@@ -149,7 +149,9 @@ verification rather than being repaired.
   as a speed improvement.
 - Min/max ranges accompany complete-cell medians. A matched percentage is shown
   only when the runs' ranges do not overlap; `withheld` explains overlap without
-  making an otherwise comparable cell ineligible.
+  making an otherwise comparable cell ineligible. Repeat setup A and pass
+  `--reference results/setup-a-repeat` to report raw A-to-repeat median drift;
+  changes no larger in absolute value than that drift are also withheld.
 - A compatible comparison requires the same normalized workload, collector
   binary fingerprint and transport controls. Model/endpoint deployments may
   differ; this is a descriptive deployment comparison, not causal attribution.

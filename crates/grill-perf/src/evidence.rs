@@ -550,6 +550,14 @@ pub struct CellChange {
     pub prefill_rate_change_percent: Option<f64>,
 }
 #[derive(Serialize)]
+pub struct Drift {
+    pub cell: String,
+    pub wave_latency_percent: Option<f64>,
+    pub achieved_throughput_percent: Option<f64>,
+    pub decode_rate_percent: Option<f64>,
+    pub prefill_rate_percent: Option<f64>,
+}
+#[derive(Serialize)]
 pub struct Comparison {
     pub version: u32,
     pub claim: &'static str,
@@ -559,6 +567,8 @@ pub struct Comparison {
     pub candidate_deployment: Option<Deployment>,
     pub baseline: Vec<CellSummary>,
     pub candidate: Vec<CellSummary>,
+    pub reference: Option<Vec<CellSummary>>,
+    pub drift: Option<Vec<Drift>>,
     pub changes: Vec<CellChange>,
 }
 fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
@@ -566,26 +576,48 @@ fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
         .filter(|(a, _)| *a > 0.0)
         .map(|(a, b)| 100.0 * (b / a - 1.0))
 }
-pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
+pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;
-    if left.plan.workload_sha256 != right.plan.workload_sha256
-        || left.plan.tool_version != right.plan.tool_version
-        || left.plan.collector_sha256 != right.plan.collector_sha256
-        || left.plan.local_http != right.plan.local_http
-        || left.plan.pool_max_idle_per_host != right.plan.pool_max_idle_per_host
-    {
-        return Err(
-            "incompatible workload, tool or transport controls; no matched comparison produced"
-                .into(),
-        );
+    let reference = reference.map(load).transpose()?;
+    for other in std::iter::once(&right).chain(reference.iter()) {
+        if left.plan.workload_sha256 != other.plan.workload_sha256
+            || left.plan.tool_version != other.plan.tool_version
+            || left.plan.collector_sha256 != other.plan.collector_sha256
+            || left.plan.local_http != other.plan.local_http
+            || left.plan.pool_max_idle_per_host != other.plan.pool_max_idle_per_host
+        {
+            return Err(
+                "incompatible workload, tool or transport controls; no matched comparison produced"
+                    .into(),
+            );
+        }
     }
     let baseline = summarize(&left);
     let candidate = summarize(&right);
+    let reference = reference.as_ref().map(summarize);
+    let drift: Option<Vec<Drift>> = reference.as_ref().map(|reference| {
+        baseline.iter().zip(reference).map(|(a, a2)| Drift {
+            cell: a.cell.clone(),
+            wave_latency_percent: change(a.median_wave_latency_us, a2.median_wave_latency_us),
+            achieved_throughput_percent: change(
+                a.median_achieved_completion_tokens_per_second,
+                a2.median_achieved_completion_tokens_per_second,
+            ),
+            decode_rate_percent: change(
+                a.median_decode_tokens_per_second, a2.median_decode_tokens_per_second,
+            ),
+            prefill_rate_percent: change(
+                a.median_prefill_tokens_per_second, a2.median_prefill_tokens_per_second,
+            ),
+        }).collect()
+    });
     let changes = baseline
         .iter()
         .zip(&candidate)
-        .map(|(a, b)| {
+        .enumerate()
+        .map(|(index, (a, b))| {
+            let drift = drift.as_ref().map(|drift| &drift[index]);
             let same = a
                 .lane_completion_tokens
                 .iter()
@@ -603,25 +635,32 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
             }
             let mut withheld = Vec::new();
             let mut matched_change = |name: &str, value: Option<f64>,
-                                      a: Option<[f64; 2]>, b: Option<[f64; 2]>| {
+                                      a: Option<[f64; 2]>, b: Option<[f64; 2]>,
+                                      drift: Option<f64>| {
                 let value = value.filter(|_| same)?;
                 let (a, b) = a.zip(b)?;
-                if a[1] < b[0] || b[1] < a[0] {
-                    return Some(value);
+                let separate = a[1] < b[0] || b[1] < a[0];
+                if !separate {
+                    withheld.push(if name == "wave latency" {
+                        format!(
+                            "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
+                            a[0] / 1_000_000.0, a[1] / 1_000_000.0,
+                            b[0] / 1_000_000.0, b[1] / 1_000_000.0
+                        )
+                    } else {
+                        format!(
+                            "{name}: ranges overlap, {:.1}-{:.1} vs {:.1}-{:.1}",
+                            a[0], a[1], b[0], b[1]
+                        )
+                    });
                 }
-                withheld.push(if name == "wave latency" {
-                    format!(
-                        "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
-                        a[0] / 1_000_000.0, a[1] / 1_000_000.0,
-                        b[0] / 1_000_000.0, b[1] / 1_000_000.0
-                    )
-                } else {
-                    format!(
-                        "{name}: ranges overlap, {:.1}-{:.1} vs {:.1}-{:.1}",
-                        a[0], a[1], b[0], b[1]
-                    )
-                });
-                None
+                if let Some(drift) = drift.filter(|drift| value.abs() <= drift.abs()) {
+                    withheld.push(format!(
+                        "{name}: change {value:+.2}% within reference drift {drift:+.2}%"
+                    ));
+                    return None;
+                }
+                separate.then_some(value)
             };
             CellChange {
                 cell: a.cell.clone(),
@@ -634,6 +673,7 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     "wave latency",
                     change(a.median_wave_latency_us, b.median_wave_latency_us),
                     a.wave_latency_us_range, b.wave_latency_us_range,
+                    drift.and_then(|d| d.wave_latency_percent),
                 ),
                 achieved_throughput_change_percent: matched_change(
                     "achieved throughput",
@@ -643,16 +683,19 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     ),
                     a.achieved_completion_tokens_per_second_range,
                     b.achieved_completion_tokens_per_second_range,
+                    drift.and_then(|d| d.achieved_throughput_percent),
                 ),
                 decode_rate_change_percent: matched_change(
                     "decode rate",
                     change(a.median_decode_tokens_per_second, b.median_decode_tokens_per_second),
                     a.decode_tokens_per_second_range, b.decode_tokens_per_second_range,
+                    drift.and_then(|d| d.decode_rate_percent),
                 ),
                 prefill_rate_change_percent: matched_change(
                     "prefill rate",
                     change(a.median_prefill_tokens_per_second, b.median_prefill_tokens_per_second),
                     a.prefill_tokens_per_second_range, b.prefill_tokens_per_second_range,
+                    drift.and_then(|d| d.prefill_rate_percent),
                 ),
                 withheld,
             }
@@ -667,6 +710,8 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
         candidate_deployment: right.plan.deployment,
         baseline,
         candidate,
+        reference,
+        drift,
         changes,
     })
 }

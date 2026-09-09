@@ -35,6 +35,8 @@ enum Command {
         baseline: PathBuf,
         candidate: PathBuf,
         #[arg(long)]
+        reference: Option<PathBuf>,
+        #[arg(long)]
         json: bool,
     },
 }
@@ -68,14 +70,15 @@ fn execute(cli: Cli) -> model::Result<bool> {
         Command::Compare {
             baseline,
             candidate,
+            reference,
             json,
         } => {
-            let comparison = evidence::compare(&baseline, &candidate)?;
+            let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
             if json {
                 print_json(&comparison)?;
             } else {
                 println!("Descriptive deployment comparison; not a causal or capacity verdict.");
-                for change in &comparison.changes {
+                for (index, change) in comparison.changes.iter().enumerate() {
                     print!("{}: ", change.cell);
                     for (index, (name, value)) in [
                         ("wave latency", change.wave_latency_change_percent),
@@ -92,6 +95,25 @@ fn execute(cli: Cli) -> model::Result<bool> {
                         }
                     }
                     println!();
+                    if let Some(drift) = &comparison.drift {
+                        let drift = &drift[index];
+                        print!("  reference drift: ");
+                        for (index, (name, value)) in [
+                            ("wave latency", drift.wave_latency_percent),
+                            ("achieved throughput", drift.achieved_throughput_percent),
+                            ("decode rate", drift.decode_rate_percent),
+                            ("prefill rate", drift.prefill_rate_percent),
+                        ].into_iter().enumerate() {
+                            if index > 0 {
+                                print!("; ");
+                            }
+                            match value {
+                                Some(value) => print!("{name} {value:+.2}%"),
+                                None => print!("{name} n/a"),
+                            }
+                        }
+                        println!();
+                    }
                     for reason in change.withheld.iter().chain(&change.ineligibility_reasons) {
                         println!("  {reason}");
                     }

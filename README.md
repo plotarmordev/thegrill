@@ -53,6 +53,7 @@ The decode workload sends **72 requests**, the prefill workload **16**. For a se
 **2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs.
 
 **3. Compare the saved results.** No server connection is needed for this step.
+Repeat setup A and add `--reference results/setup-a-repeat` to the comparison to measure drift.
 
 ```sh
 target/release/grill-perf compare results/setup-a results/setup-b --json
