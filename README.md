@@ -4,15 +4,16 @@
 
 # The Grill
 
-**Compare the speed of your LLM serving recipes.**
+**Measure how fast a serving setup runs an LLM, then compare setups.**
 
-Run the same test on two setups and compare the results. A recipe is the engine and settings you use to run a model.
+A serving setup is the engine plus its settings, such as vLLM with a quantized model at a given context length. Run the same test on each setup, then compare the saved results.
 
-The Grill also has a separate tool for checking model answers. That part is still being developed.
+| I want to... | Use | What you get |
+|---|---|---|
+| Check whether a serving setup is faster | [Speed benchmarks](#speed-benchmarks)<br>`grill-perf` ![Ready to try](https://img.shields.io/badge/ready_to_try-0969da?style=flat-square) | Time per request group, combined tokens per second, comparison of saved runs |
+| Check whether a model answers tasks correctly | [Quality evaluation](#quality-evaluation-wip)<br>`grill` ![Work in progress](https://img.shields.io/badge/work_in_progress-a16207?style=flat-square) | Graded answers, with wrong, refused, cut-off, and missing results kept separate |
 
-[![Speed benchmarks](https://img.shields.io/badge/Speed-benchmarks-0969da?style=flat-square)](#speed-benchmarks) [![Quality evaluation: WIP](https://img.shields.io/badge/Quality-WIP-a16207?style=flat-square)](#quality-evaluation-wip)
-
-The tools run on your machine and connect to your chosen server. No project account or results upload is required. **This is experimental software.**
+Both tools run on your machine and connect to a server you already run. No project account or results upload is required. **This is experimental software.**
 
 ## Get started
 
@@ -37,30 +38,31 @@ Start your model server first. In the examples below, replace port `8000` and `y
 
 ## Speed benchmarks
 
-Use **`grill-perf`** to measure your serving recipe.
+Use **`grill-perf`** to measure a serving setup.
 
 **1. Test your first setup.**
 
 ```sh
 target/release/grill-perf run crates/grill-perf/examples/quick.json \
   --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --out results/recipe-a
+  --local-http --model your-model --out results/setup-a
 ```
 
 The quick test sends **28 requests** in groups of **1 and 6**. Each request asks for a limit of **1,024 output tokens**.
 
-**2. Change your recipe and test again.** Repeat the command with `--out results/recipe-b`. Use the same test and tool build for both runs.
+**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs.
 
 **3. Compare the saved results.** No server connection is needed for this step.
 
 ```sh
-target/release/grill-perf compare results/recipe-a results/recipe-b --json
+target/release/grill-perf compare results/setup-a results/setup-b --json
 ```
 
 | Result | What it tells you |
 |---|---|
-| **Time per group** | How long the whole group of requests took to finish |
-| **Combined tokens/sec** | How many tokens your server produced per second across the group |
+| **Time per group** | How long a group of requests took from first send to last finish |
+| **Combined tokens/sec** | Tokens produced per second across the whole group, as reported by the server |
+| **Change** | The difference between the two saved runs, shown only when the runs are comparable |
 
 <details>
 <summary><strong>How to avoid misleading speed comparisons</strong></summary>
