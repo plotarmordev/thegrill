@@ -50,6 +50,18 @@ All warmup waves finish before any measured wave begins.
 It needs a vLLM-compatible server whose chat template honors `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` (and `reasoning_tokens` where the server reports it) in the receipts, since the tool does not reject reasoning output.
 sparkDash appends a per-stream suffix to prompts above concurrency 1; this workload sends identical prompts, so cache mode `observe` permits prefix sharing across lanes. Use `reported-prefix-zero` when provider-reported zero-prefix evidence is required.
 
+[`sparkdash-prefill-v1.json`](../../crates/grill-perf/examples/sparkdash-prefill-v1.json) follows [MiaAI-Lab's sparkDash PrefillBench protocol](https://github.com/MiaAI-Lab/sparkDash/blob/main/server/collectors/PrefillBench.js):
+salted header, repeated `" the"` filler and `Reply OK.` footer, thinking off,
+temperature zero, concurrency 1, and the default 4k/8k/16k/32k prompt sizes.
+It makes 16 requests: one warmup and three measured trials per size rather than
+sparkDash's single request per size and separate warmup. Output is exactly 8
+tokens rather than a cap of 8 so comparisons stay length matched; the text salt
+is per attempt. Filler repeats use sparkDash's rounded characters/4 estimate
+with the rendered salt width, not the literal `{salt}` placeholder.
+Check that larger sizes fit the ten-minute `total_ms` ceiling; both total and
+idle deadlines are set to that ceiling because prefill may send no bytes before
+the first token.
+
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
 concurrency 1 and 2, a 64-token cap, and nine requests per run.
