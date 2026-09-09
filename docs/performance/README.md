@@ -56,8 +56,9 @@ temperature zero, concurrency 1, and the default 4k/8k/16k/32k prompt sizes.
 It makes 16 requests: one warmup and three measured trials per size rather than
 sparkDash's single request per size and separate warmup. Output is exactly 8
 tokens rather than a cap of 8 so comparisons stay length matched; the text salt
-is per attempt. Filler repeats use sparkDash's rounded characters/4 estimate
-with the rendered salt width, not the literal `{salt}` placeholder.
+is per attempt. The rendered salt is 20–21 characters, making header plus footer
+103–104 characters: sparkDash's rounded characters/4 estimate reserves 26 tokens,
+so each filler repeat is the target size minus 26.
 Check that larger sizes fit the ten-minute `total_ms` ceiling; both total and
 idle deadlines are set to that ceiling because prefill may send no bytes before
 the first token.

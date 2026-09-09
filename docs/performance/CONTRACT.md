@@ -49,6 +49,9 @@ Admission checks the wave-buffer allowance against concurrency times
 `rendered_bytes` is the cell's case declared content sum plus `unit.len()*repeat`
 (zero fill bytes when absent). The latter budgets body-sized JSON scratch and
 decoded fields rather than assuming frame-sized parsing.
+Encoded request bytes at the admission bound widths times concurrency must not
+exceed 20 MiB, leaving room for embedded-body JSON escaping within the 40 MiB
+reservation receipt limit.
 Serialized reservation buffers are released before dispatch. These are
 conservative owned-buffer allowances, **not** RSS or kernel/socket-memory
 guarantees. The allowance cannot exceed 512 MiB. HTTP-library, TLS and process

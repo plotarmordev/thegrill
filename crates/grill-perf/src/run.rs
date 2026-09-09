@@ -139,7 +139,11 @@ pub fn execute(o: &Options) -> Result<Summary> {
                 trial,
                 concurrency: cell.concurrency,
             };
-            wire::request_body(&plan, &bound, lane)?;
+            if wire::request_body(&plan, &bound, lane)?.len() * cell.concurrency as usize
+                > 20 * 1024 * 1024
+            {
+                return Err(format!("cell {} exceeds the reservation receipt bound", cell.id));
+            }
         }
     }
     evidence::fresh(&o.out)?;

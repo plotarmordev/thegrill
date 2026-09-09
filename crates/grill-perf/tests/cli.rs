@@ -962,6 +962,31 @@ fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
 }
 
 #[test]
+fn fill_wave_reservation_bound_counts_encoded_request_bytes() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    for (index, (name, unit, concurrency)) in [
+        ("plain", "x", 24),
+        ("escaped", "\"", 12),
+    ].into_iter().enumerate() {
+        let mut w = workload(concurrency, 0, 1);
+        w["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
+        w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+        w["cases"][0]["fill"] = json!({"unit":unit,"repeat":1000000});
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+        assert_eq!(server.count.load(Ordering::SeqCst), index);
+        w["cells"][0]["concurrency"] = json!(1);
+        successful(&run(&temp, &server, name, &w));
+        let reservation = value(temp.path(name).join("wave-000000/reservation.json"));
+        let bytes = reservation["requests"][0].as_str().unwrap().len();
+        assert!(bytes < 2 * 1024 * 1024);
+        assert!(bytes * concurrency as usize > 20 * 1024 * 1024);
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn warm_prefix_protocol_reuses_primed_lane_salts_but_not_other_lanes() {
     let temp = Temp::new();
     let server = Server::new(|mut s, i, _| {
