@@ -769,6 +769,11 @@ fn omitted_or_null_thinking_preserves_provider_defaults() {
     for body in seen {
         assert!(body.get("chat_template_kwargs").is_none());
     }
+    // Plans recorded before the field existed must keep their workload digest.
+    for name in ["omitted", "null"] {
+        let plan = value(temp.path(name).join("plan.json"));
+        assert!(plan["workload"]["request"].get("thinking").is_none());
+    }
 }
 
 #[test]
