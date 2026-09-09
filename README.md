@@ -1,109 +1,83 @@
 # The Grill
 
-A Rust CLI for running language-model evaluations and comparing saved results.
+**Benchmark serving recipes. Evaluate model answers. Two tools, separate results.**
 
-Define tasks in JSON, collect answers from a Chat Completions endpoint, and inspect or regrade the results without calling the model again. The Grill keeps the inputs, declared settings, responses, and grading evidence together so comparisons can be checked rather than taken on trust.
+The Grill runs against your existing Chat Completions server and saves evidence locally. Use either tool independently—no project account, hosted service, or mandatory upload.
 
-**Status: early-stage, actively developed software.** The quality runner collects and checks evidence; its included synthetic tasks are examples, not a calibrated intelligence benchmark. The performance companion reports bounded, client-observed measurements—not server capacity. Local CLI and fixture checks do not establish compatibility with every deployment.
+## Choose your benchmark
 
-## What it does
+| Your question | Mode & command | What you get |
+|---|---|---|
+| **“Is this serving recipe faster?”** | **[Recipe performance](#recipe-performance)**<br>`grill-perf` | Timing, token throughput, recipe comparisons |
+| **“How well does this model answer?”** | **[Intelligence evaluation](#intelligence-evaluation)**<br>`grill` · **WIP** | Answer grades, failure accounting, comparisons |
 
-- **Check and plan:** validate task packs and preview requests before making model calls.
-- **Run:** collect one attempt per case, with streaming support, deadlines, and response limits.
-- **Pause and resume:** drain an active request before pausing, then continue only never-started cases from validated evidence.
-- **Inspect and regrade:** distinguish incorrect answers, formatting problems, output-limit stops, timeouts and service errors; inspect and regrade saved evidence offline.
-- **Compare:** check compatible results while keeping incorrect, malformed, refused, and missing answers distinguishable.
-- **Study:** bind a declared comparison to exact inputs and inspect paired outcomes by task family and problem unit.
+**Early-stage software:** performance collection is implemented; qualify it on your deployment. Intelligence evaluation is still a work in progress—not a calibrated general-intelligence score.
 
-No project account or hosted service is required. You choose the model endpoint and provide any credentials it needs.
+## Build once, choose a tool
 
-## Quick start
-
-Requirements: Linux, Rust/Cargo 1.98, and a C/C++ build toolchain with CMake.
+Requires **Linux, Rust/Cargo 1.98, a C/C++ toolchain, and CMake**.
 
 ```sh
 git clone https://github.com/plotarmordev/thegrill.git
 cd thegrill
-cargo build --locked
-
-target/debug/grill check examples/synthetic-pack.json --json
+cargo build --workspace --release --locked
 mkdir -p results
-target/debug/grill grade examples/synthetic-pack.json examples/submission-a.json --out results/example-a
-target/debug/grill grade examples/synthetic-pack.json examples/submission-b.json --out results/example-b
-target/debug/grill compare results/example-a results/example-b --json
 ```
 
-This example needs no model or API key. Submission A has one correct answer, two failures, and one unknown; B has three correct answers and one failure. The comparison retains all four cases.
+The examples below use a local server on port `8000`. Replace the port and `your-model` with your recipe's settings. Start the server yourself; The Grill does not launch or configure it.
 
-New run and grade output directories must not already exist. Choose different names when repeating the example; `resume` continues an existing run instead of creating a replacement.
+For authenticated endpoints, set `MODEL_API_KEY` and add `--auth-env MODEL_API_KEY`. Remote servers need HTTPS or a separately managed local forward; `--local-http` permits only literal loopback addresses.
 
-## Evaluate a model
+## Recipe performance
 
-Set `MODEL_API_KEY` in your environment if your endpoint requires authentication, then replace the endpoint and model below:
+**For comparing engines, quantizations, runtime settings, or other serving recipes.** Measures speed—not answer quality.
 
 ```sh
-target/debug/grill run examples/synthetic-pack.json \
-  --endpoint https://api.example.com/v1/chat/completions \
-  --model your-model \
-  --auth-env MODEL_API_KEY \
-  --token-cap 128 \
-  --stream \
-  --out results/model-run
-
-target/debug/grill inspect results/model-run --json
-target/debug/grill regrade results/model-run --out results/model-run-regraded
+target/release/grill-perf run crates/grill-perf/examples/quick.json \
+  --endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --local-http --model your-model --out results/recipe-a
 ```
 
-Use `plan` instead of `run` with the same arguments to preview the request sizes and declared settings without making a model call or creating output. Omit `--auth-env` for an endpoint that does not require authentication. Run `target/debug/grill run --help` for the available controls.
+The supplied workload runs at concurrency **1 and 6**, with warmup and three measured trials per cell, capped at **1,024 output tokens** per request.
 
-To pause an active quality run, use another terminal:
+Change your recipe, then repeat that command with `--out results/recipe-b`. Keep the **same workload and collector binary**, then compare:
 
 ```sh
-target/debug/grill pause results/model-run
-target/debug/grill inspect results/model-run --json
+target/release/grill-perf compare results/recipe-a results/recipe-b --json
 ```
 
-A pause request is not yet a completed pause. Wait for the collector to finish its active request and exit before continuing later with `target/debug/grill resume results/model-run`. Resume checks the frozen settings and evidence, refuses concurrent ownership or unsettled crash state, and does not repeat completed attempts. Earlier grade views remain historical; create a fresh `regrade` output after continuation. Performance pause/resume uses whole-wave boundaries and has separate comparison limits, documented in its [usage guide](docs/performance/README.md).
+| Measure | Meaning |
+|---|---|
+| **Wave latency** | First request dispatch to last request settlement in a fixed group |
+| **Completion throughput** | Provider-reported completion tokens over that group’s elapsed time; may include reasoning |
+| **Matched change** | Withheld when the runs lack compatible evidence or paired output amounts differ |
 
-Results include prompts and model responses. Review them before sharing.
+These are client observations, **not maximum server capacity**. A token cap does not force equal output lengths. Resumed runs do not qualify as uninterrupted timing comparisons.
 
-Inspection explains unfinished answers without changing their grades. For complete responses, new receipts keep the reported stop reason and usage even when no final answer was delivered. Where older runs retained the complete raw response, inspection can recover those facts from verified bytes without rewriting the run. Missing usage remains unknown—not zero—and reported usage is not a verified bill.
+**[Full performance guide →](docs/performance/README.md)** Workload controls, exact-output profiles, cache observations, pause/resume, and interpretation.
 
-## Offline studies and pilot packs
+## Intelligence evaluation
 
-After running the quick-start example, analyze its saved views with the supplied study manifest:
+> **Work in progress.** The collection and grading workflow works, but the bundled synthetic tasks demonstrate the format—not a validated intelligence benchmark. Current support is text-only, direct-answer evaluation; no generated-code execution or agents.
 
 ```sh
-target/debug/grill study check examples/synthetic-study.json examples/synthetic-pack.json
-target/debug/grill study compare examples/synthetic-study.json examples/synthetic-pack.json \
-  results/example-a results/example-b --json
+target/release/grill run examples/synthetic-pack.json \
+  --endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --local-http --model your-model --token-cap 4096 --stream \
+  --out results/answers
+
+target/release/grill inspect results/answers --json
+target/release/grill regrade results/answers --out results/answers-regraded
 ```
 
-The manifest declares the ordered system pair, protocol, task-family provenance, sampling and per-case exposure. Analysis verifies those bindings against saved evidence, retains unknowns, and reports gains/losses by family and problem unit. Declarations do not authenticate provenance, freshness or equal effective compute. Reports are descriptive, not confidence intervals or causal verdicts.
+Use your own task pack and a suitable token budget for meaningful evaluation. Incorrect answers, refusals, truncation, and missing evidence remain distinguishable. Inspection and regrading are **offline**; use `plan` instead of `run` to preview requests without sending them.
 
-Generate a deterministic diagnostic pack without a model:
+**[Quality formats & usage →](docs/PROJECT.md)** Task packs, grading, study manifests, comparisons, and pause/resume.
 
-```sh
-target/debug/grill pilot --seed 42 --units 8 > results/pilot-42.json
-target/debug/grill check results/pilot-42.json --json
-```
+## Before sharing results
 
-This produces 32 cases: eight ledger instances and eight directed-graph instances, each with two presentation variants. **Pack files include answer keys and grading fixtures.** They are not validated capability benchmarks or automatically fresh holdouts. See [study manifests and pilot design](docs/PROJECT.md#study-manifests-and-pilot-design) before using them in a study.
+Use fresh output directories. Runs retain prompts and responses: **review content and rights before sharing**. Declared model names and provider usage are evidence, not independent verification of model identity or billing.
 
-## Scope
+[Code organization](docs/REPOSITORY.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
 
-The quality runner, `grill`, supports text-only, direct-answer tasks on Linux. It does not execute generated code or operate an agent. The included synthetic examples demonstrate the format; they are not a validated capability benchmark. Saved receipts support inspection and regrading, but do not independently prove which model produced an answer.
-
-The separate `grill-perf` companion measures bounded request waves against an already-running Chat Completions server and compares saved evidence offline. It does not grade answers or manage servers. See [performance setup and usage](docs/performance/README.md) for its build, installation, and measurement limits.
-
-## Documentation
-
-- [Task formats, protocols, and measurement design](docs/PROJECT.md)
-- [Serving-performance setup and usage](docs/performance/README.md)
-- [Code organization](docs/REPOSITORY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
-
-## License
-
-TheGrill's code and documentation are [MIT licensed](LICENSE). Third-party benchmark data and model weights retain their own licenses and access restrictions; this license does not grant rights to those materials.
+The MIT license covers TheGrill’s code and documentation, not third-party benchmark data or model weights.
