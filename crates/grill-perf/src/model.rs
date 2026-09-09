@@ -54,7 +54,7 @@ pub struct RequestSettings {
     pub top_p_milli: Option<u16>,
     pub seed: Option<i64>,
     // Omitted when absent so plans recorded before this field keep their digest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
