@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "system": {
+    "name": "Synthetic submission B",
+    "model": "declared-model-b",
+    "endpoint": "https://example.invalid/inert-declaration"
+  },
+  "protocol": {
+    "profile": "declared-chat-completions-v1",
+    "stream": false,
+    "token_cap": {
+      "field": "max_completion_tokens",
+      "value": 128
+    },
+    "temperature_milli": null,
+    "top_p_milli": null,
+    "seed": null,
+    "collection": {
+      "total_ms": 30000,
+      "idle_ms": 10000,
+      "response_bytes": 8388608,
+      "artifact_bytes": 1048576
+    },
+    "rendering": {
+      "status": "unknown",
+      "template": null,
+      "tokenizer": null
+    }
+  },
+  "answers": [
+    {
+      "case_id": "tile-code",
+      "artifact": "{\"answer\":\"blue\"}"
+    },
+    {
+      "case_id": "padded-key",
+      "artifact": "{\"answer\":\" oak \"}"
+    },
+    {
+      "case_id": "lambda-mark",
+      "artifact": "{\"answer\":\"\\u03bb\"}"
+    },
+    {
+      "case_id": "empty-slot",
+      "artifact": "{\"answer\":\"\"}"
+    }
+  ]
+}

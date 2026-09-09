@@ -1,0 +1,679 @@
+use crate::model::*;
+use grill_sse::{Flow, Parser, SseLimits};
+use reqwest::header::{AUTHORIZATION, HeaderValue};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use std::borrow::Cow;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
+use tokio::sync::watch;
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+#[derive(Serialize)]
+struct Body<'a> {
+    model: &'a str,
+    messages: &'a [Message],
+    stream: bool,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignore_eos: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<String>,
+}
+pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
+    let r = &plan.workload.request;
+    let case = plan
+        .workload
+        .cases
+        .iter()
+        .find(|c| c.id == wave.case)
+        .ok_or("unknown case")?;
+    let exact = r.profile == Profile::VllmFixedV1 && r.output.mode == OutputMode::Exact;
+    let salt = match r.cache {
+        Cache::Observe => None,
+        cache => {
+            let nonce = plan
+                .cache_namespace
+                .as_deref()
+                .ok_or("missing cache namespace")?;
+            Some(if cache == Cache::ReportedPrefixZero {
+                format!("{nonce}-{}-{lane}", wave.index)
+            } else {
+                format!("{nonce}-{}-{lane}", wave.cell)
+            })
+        }
+    };
+    let body = serde_json::to_string(&Body {
+        model: &plan.model,
+        messages: &case.messages,
+        stream: r.stream,
+        max_tokens: r.output.tokens,
+        temperature: r.temperature_milli.map(|n| f64::from(n) / 1000.0),
+        top_p: r.top_p_milli.map(|n| f64::from(n) / 1000.0),
+        seed: r
+            .seed
+            .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
+        stream_options: r.stream.then_some(StreamOptions {
+            include_usage: true,
+        }),
+        min_tokens: exact.then_some(r.output.tokens),
+        ignore_eos: exact.then_some(true),
+        cache_salt: salt,
+    })
+    .map_err(|e| e.to_string())?;
+    if body.len() > FRAME_CAP {
+        return Err("encoded request exceeds 256 KiB".into());
+    }
+    Ok(body)
+}
+
+pub fn endpoint(text: &str, local_http: bool) -> Result<reqwest::Url> {
+    if text.is_empty() || text.len() > 4096 || text.chars().any(char::is_control) {
+        return Err("endpoint must be nonempty, control-free text within 4096 bytes".into());
+    }
+    let url = reqwest::Url::parse(text).map_err(|_| "invalid endpoint URL")?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+    {
+        return Err("endpoint must have a host and no credentials, query or fragment".into());
+    }
+    let loopback = url
+        .host_str()
+        .and_then(|h| h.trim_matches(['[', ']']).parse::<IpAddr>().ok())
+        .is_some_and(|ip| ip.is_loopback());
+    if url.scheme() != "https" && !(local_http && url.scheme() == "http" && loopback) {
+        return Err("use HTTPS, or --local-http with a literal loopback address".into());
+    }
+    Ok(url)
+}
+pub fn credential(name: Option<&str>) -> Result<Option<HeaderValue>> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err("invalid credential environment-variable name".into());
+    }
+    let value = std::env::var(name).map_err(|_| "credential variable is unavailable")?;
+    if value.is_empty() || value.len() > 8192 || !value.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("credential must be nonempty visible ASCII within 8192 bytes".into());
+    }
+    let mut header = HeaderValue::from_str(&format!("Bearer {value}"))
+        .map_err(|_| "invalid credential header")?;
+    header.set_sensitive(true);
+    Ok(Some(header))
+}
+pub fn client(local: bool, pool: usize) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .https_only(!local)
+        .http1_only()
+        .referer(false)
+        .pool_max_idle_per_host(pool)
+        .build()
+        .map_err(|_| "could not construct HTTP client".into())
+}
+pub fn request(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    auth: Option<&HeaderValue>,
+    body: String,
+    stream: bool,
+) -> Result<reqwest::Request> {
+    let mut builder = client
+        .post(url.clone())
+        .header("content-type", "application/json")
+        .header(
+            "accept",
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        )
+        .header("accept-encoding", "identity")
+        .header(
+            "user-agent",
+            concat!("grill-perf/", env!("CARGO_PKG_VERSION")),
+        )
+        .body(body);
+    if let Some(auth) = auth {
+        builder = builder.header(AUTHORIZATION, auth.clone());
+    }
+    builder
+        .build()
+        .map_err(|_| "request construction failed".into())
+}
+fn error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_connect() {
+        "connection failed"
+    } else if error.is_timeout() {
+        "transport timeout"
+    } else if error.is_body() {
+        "body transfer failed"
+    } else {
+        "transport request failed"
+    }
+}
+pub fn us(start: Instant) -> u64 {
+    start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+struct Object<T>(T);
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = Object<T>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Object)
+            }
+        }
+        d.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+
+fn bounded_depth(bytes: &[u8]) -> bool {
+    let (mut depth, mut quoted, mut escaped) = (0u32, false, false);
+    for byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    if depth > 64 {
+                        return false;
+                    }
+                }
+                b'}' | b']' => {
+                    let Some(next) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next;
+                }
+                _ => (),
+            }
+        }
+    }
+    depth == 0 && !quoted
+}
+
+#[derive(Default, Deserialize)]
+struct Delta<'a> {
+    #[serde(borrow)]
+    content: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    reasoning: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    reasoning_content: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    refusal: Option<&'a RawValue>,
+    #[serde(borrow)]
+    tool_calls: Option<&'a RawValue>,
+    #[serde(borrow)]
+    function_call: Option<&'a RawValue>,
+    #[serde(borrow)]
+    audio: Option<&'a RawValue>,
+}
+#[derive(Deserialize)]
+struct Choice<'a> {
+    index: Option<u32>,
+    #[serde(borrow)]
+    delta: Option<Object<Delta<'a>>>,
+    #[serde(borrow)]
+    message: Option<Object<Delta<'a>>>,
+    #[serde(borrow)]
+    finish_reason: Option<Cow<'a, str>>,
+}
+#[derive(Default)]
+struct Choices<'a>(Option<Choice<'a>>);
+impl<'de: 'a, 'a> Deserialize<'de> for Choices<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visitor<'a> {
+            type Value = Choices<'a>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an array with at most one choice")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let first = seq.next_element::<Object<Choice<'a>>>()?.map(|v| v.0);
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom("multiple choices unsupported"));
+                }
+                Ok(Choices(first))
+            }
+        }
+        d.deserialize_seq(Visitor(std::marker::PhantomData))
+    }
+}
+#[derive(Default, Deserialize)]
+struct PromptDetails {
+    cached_tokens: Option<u64>,
+}
+#[derive(Default, Deserialize)]
+struct CompletionDetails {
+    reasoning_tokens: Option<u64>,
+}
+#[derive(Default, Deserialize)]
+struct WireUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    prompt_tokens_details: Option<Object<PromptDetails>>,
+    completion_tokens_details: Option<Object<CompletionDetails>>,
+}
+impl From<WireUsage> for Usage {
+    fn from(w: WireUsage) -> Self {
+        Self {
+            prompt_tokens: w.prompt_tokens,
+            completion_tokens: w.completion_tokens,
+            total_tokens: w.total_tokens,
+            cached_prompt_tokens: w.prompt_tokens_details.and_then(|p| p.0.cached_tokens),
+            reasoning_tokens: w
+                .completion_tokens_details
+                .and_then(|p| p.0.reasoning_tokens),
+        }
+    }
+}
+#[derive(Deserialize)]
+struct Event<'a> {
+    #[serde(borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    choices: Option<Choices<'a>>,
+    usage: Option<Object<WireUsage>>,
+    #[serde(borrow)]
+    error: Option<&'a RawValue>,
+}
+fn present(raw: Option<&RawValue>) -> bool {
+    raw.is_some_and(|v| !matches!(v.get().trim(), "null" | "[]" | "\"\""))
+}
+#[derive(Default)]
+struct Semantic {
+    id: Option<String>,
+    finish: Option<String>,
+    usage: Usage,
+    content: bool,
+    generated: bool,
+}
+impl Semantic {
+    fn event(
+        &mut self,
+        bytes: &[u8],
+        stream: bool,
+        observed: u64,
+        timing: &mut Timing,
+    ) -> std::result::Result<Flow, (Status, &'static str)> {
+        if stream && bytes == b"[DONE]" {
+            return if self.finish.is_some() {
+                Ok(Flow::Stop)
+            } else {
+                Err((Status::Malformed, "DONE before finish"))
+            };
+        }
+        if !stream && std::str::from_utf8(bytes).is_err() {
+            return Err((Status::Malformed, "nonstreaming body is not UTF-8"));
+        }
+        if !bounded_depth(bytes) {
+            return Err((Status::Malformed, "JSON nesting or shape exceeds bounds"));
+        }
+        let Object(event): Object<Event<'_>> = serde_json::from_slice(bytes)
+            .map_err(|_| (Status::Malformed, "invalid response JSON or field shape"))?;
+        if present(event.error) {
+            return Err((Status::Unsupported, "provider error envelope"));
+        }
+        if let Some(id) = event.id {
+            if self.id.as_deref().is_some_and(|old| old != id) {
+                return Err((Status::Malformed, "response identity changed"));
+            }
+            if self.id.is_none() {
+                self.id = Some(id.into_owned());
+            }
+        }
+        if let Some(usage) = event.usage {
+            self.usage = usage.0.into();
+        }
+        let Some(choices) = event.choices else {
+            return Err((Status::Malformed, "missing choices"));
+        };
+        let Some(choice) = choices.0 else {
+            return if stream {
+                Ok(Flow::Continue)
+            } else {
+                Err((Status::Malformed, "missing response choice"))
+            };
+        };
+        if choice.index.is_some_and(|i| i != 0) {
+            return Err((Status::Unsupported, "only choice zero is supported"));
+        }
+        let delta = if stream {
+            if choice.message.is_some() {
+                return Err((Status::Unsupported, "message in streaming response"));
+            }
+            choice.delta
+        } else {
+            if choice.delta.is_some() {
+                return Err((Status::Unsupported, "delta in nonstreaming response"));
+            }
+            choice.message
+        };
+        if let Some(Object(delta)) = delta {
+            if present(delta.tool_calls)
+                || present(delta.function_call)
+                || present(delta.audio)
+                || present(delta.refusal)
+            {
+                return Err((Status::Unsupported, "non-text answer or refusal"));
+            }
+            let content = delta.content.as_ref().is_some_and(|s| !s.is_empty());
+            let reasoning = delta.reasoning.as_ref().is_some_and(|s| !s.is_empty())
+                || delta
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty());
+            let generated = content || reasoning;
+            if generated && self.finish.is_some() {
+                return Err((Status::Malformed, "text after finish"));
+            }
+            if stream && generated && timing.first_generated_text_us.is_none() {
+                timing.first_generated_text_us = Some(observed);
+                timing.first_generated_channel = Some(match (content, reasoning) {
+                    (true, true) => TextChannel::MixedEvent,
+                    (true, false) => TextChannel::Answer,
+                    _ => TextChannel::Reasoning,
+                });
+            }
+            if stream && content && timing.first_answer_text_us.is_none() {
+                timing.first_answer_text_us = Some(observed);
+            }
+            self.content |= content;
+            self.generated |= generated;
+        }
+        if let Some(reason) = choice.finish_reason {
+            if !matches!(reason.as_ref(), "stop" | "length") {
+                return Err((Status::Unsupported, "unsupported finish reason"));
+            }
+            if self.finish.is_some() {
+                return Err((Status::Malformed, "duplicate finish"));
+            }
+            self.finish = Some(reason.into_owned());
+        }
+        if !stream {
+            if self.finish.is_none() {
+                return Err((Status::Malformed, "missing finish reason"));
+            }
+            return Ok(Flow::Stop);
+        }
+        Ok(Flow::Continue)
+    }
+}
+
+pub fn verify_complete(attempt: &Attempt, body: &[u8], stream: bool) -> Result<()> {
+    let mut semantic = Semantic::default();
+    let mut timing = Timing::default();
+    let end = if stream {
+        Parser::new(SseLimits {
+            line_bytes: FRAME_CAP,
+            event_bytes: FRAME_CAP,
+        })
+        .map_err(|_| "invalid framing limits")?
+        .feed(body, |event| semantic.event(event, true, 0, &mut timing))
+        .map_err(|_| "complete receipt has malformed response evidence")?
+    } else {
+        semantic
+            .event(body, false, 0, &mut timing)
+            .map_err(|_| "complete receipt has malformed JSON evidence")?;
+        Some(body.len())
+    };
+    if end.is_none()
+        || end != attempt.terminal_offset
+        || !semantic.generated
+        || semantic.finish != attempt.finish_reason
+        || semantic.usage != attempt.usage
+        || (stream
+            && (timing.first_generated_text_us.is_some()
+                != attempt.timing.first_generated_text_us.is_some()
+                || timing.first_answer_text_us.is_some()
+                    != attempt.timing.first_answer_text_us.is_some()))
+        || timing.first_generated_channel != attempt.timing.first_generated_channel
+    {
+        return Err("response evidence does not support its completion facts".into());
+    }
+    Ok(())
+}
+
+pub struct Collected {
+    pub attempt: Attempt,
+    pub body: Vec<u8>,
+}
+pub async fn collect(
+    client: reqwest::Client,
+    request: reqwest::Request,
+    limits: Limits,
+    stream: bool,
+    lane: u32,
+    origin: Instant,
+    mut cancel: watch::Receiver<bool>,
+) -> Collected {
+    let sent = Instant::now();
+    let mut a = Attempt {
+        lane,
+        dispatched: false,
+        status: Status::Incomplete,
+        detail: "stream ended before completion".into(),
+        http_status: None,
+        finish_reason: None,
+        usage: Usage::default(),
+        timing: Timing {
+            dispatch_offset_us: sent
+                .duration_since(origin)
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            ..Timing::default()
+        },
+        response_bytes: 0,
+        response_sha256: String::new(),
+        terminal_offset: None,
+        surplus_observed_bytes: 0,
+        eligibility_errors: Vec::new(),
+    };
+    let mut body = Vec::new();
+    let mut semantic = Semantic::default();
+    let total =
+        tokio::time::Instant::from_std(sent) + Duration::from_millis(u64::from(limits.total_ms));
+    let mut idle =
+        tokio::time::Instant::from_std(sent) + Duration::from_millis(u64::from(limits.idle_ms));
+    if *cancel.borrow() {
+        a.status = Status::Interrupted;
+        a.detail = "canceled before dispatch".into();
+    } else {
+        a.dispatched = true;
+        let response = tokio::select! {
+            biased;
+            _ = cancel.changed() => { a.status = Status::Interrupted; a.detail = "canceled before headers".into(); None },
+            _ = tokio::time::sleep_until(total) => { a.status = Status::TotalTimeout; a.detail = "total deadline before headers".into(); None },
+            _ = tokio::time::sleep_until(idle) => { a.status = Status::IdleTimeout; a.detail = "idle deadline before body".into(); None },
+            r = client.execute(request) => match r { Ok(r) => Some(r), Err(e) => { a.status = Status::TransportError; a.detail = error_kind(&e).into(); None } },
+        };
+        if let Some(mut response) = response {
+            a.http_status = Some(response.status().as_u16());
+            a.timing.headers_us = Some(us(sent));
+            let wanted = if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            let media_ok = {
+                let mut types = response.headers().get_all("content-type").iter();
+                types.next().is_some_and(|value| {
+                    value.to_str().is_ok_and(|v| {
+                        v.split(';')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .eq_ignore_ascii_case(wanted)
+                    })
+                }) && types.next().is_none()
+            };
+            let encoding_ok = response
+                .headers()
+                .get_all("content-encoding")
+                .iter()
+                .all(|v| {
+                    v.to_str().is_ok_and(|s| {
+                        s.split(',')
+                            .all(|p| p.trim().eq_ignore_ascii_case("identity"))
+                    })
+                });
+            let parse = response.status().as_u16() == 200 && media_ok && encoding_ok;
+            if response.status().as_u16() != 200 {
+                a.status = Status::HttpError;
+                a.detail = "non-200 HTTP response".into();
+            } else if !parse {
+                a.status = Status::Unsupported;
+                a.detail = "unsupported response media type or encoding".into();
+            }
+            let mut parser = Parser::new(SseLimits {
+                line_bytes: FRAME_CAP,
+                event_bytes: FRAME_CAP,
+            })
+            .expect("constant valid framing limits");
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = cancel.changed() => { a.status = Status::Interrupted; a.detail = "canceled while receiving body".into(); break; },
+                    _ = tokio::time::sleep_until(total) => { a.status = Status::TotalTimeout; a.detail = "total response deadline".into(); break; },
+                    _ = tokio::time::sleep_until(idle) => { a.status = Status::IdleTimeout; a.detail = "idle response deadline".into(); break; },
+                    r = response.chunk() => r,
+                };
+                let chunk = match chunk {
+                    Err(e) => {
+                        a.status = Status::TransportError;
+                        a.detail = error_kind(&e).into();
+                        break;
+                    }
+                    Ok(None) => {
+                        if parse && !stream {
+                            let processing = Instant::now();
+                            match semantic.event(&body, false, us(sent), &mut a.timing) {
+                                Ok(Flow::Stop) => {
+                                    a.status = Status::Complete;
+                                    a.detail = "complete JSON response".into();
+                                    a.terminal_offset = Some(body.len());
+                                }
+                                Ok(Flow::Continue) => (),
+                                Err((status, detail)) => {
+                                    a.status = status;
+                                    a.detail = detail.into();
+                                }
+                            }
+                            a.timing.capture_parse_us += us(processing);
+                        }
+                        break;
+                    }
+                    Ok(Some(chunk)) if chunk.is_empty() => continue,
+                    Ok(Some(chunk)) => chunk,
+                };
+                let observed = us(sent);
+                if a.timing.first_body_us.is_none() {
+                    a.timing.first_body_us = Some(observed);
+                }
+                idle =
+                    tokio::time::Instant::now() + Duration::from_millis(u64::from(limits.idle_ms));
+                let processing = Instant::now();
+                let previous = body.len();
+                let retained = chunk.len().min(limits.response_bytes - previous);
+                body.extend_from_slice(&chunk[..retained]);
+                let mut done = false;
+                if parse && stream {
+                    match parser.feed(&chunk[..retained], |event| {
+                        semantic.event(event, true, observed, &mut a.timing)
+                    }) {
+                        Ok(Some(consumed)) => {
+                            a.status = Status::Complete;
+                            a.detail = "complete SSE response".into();
+                            a.terminal_offset = Some(previous + consumed);
+                            a.surplus_observed_bytes = chunk.len() - consumed;
+                            done = true;
+                        }
+                        Ok(None) => (),
+                        Err(grill_sse::Error::Handler((status, detail))) => {
+                            a.status = status;
+                            a.detail = detail.into();
+                            done = true;
+                        }
+                        Err(grill_sse::Error::Framing(_)) => {
+                            a.status = Status::Malformed;
+                            a.detail = "SSE framing or UTF-8 limit violated".into();
+                            done = true;
+                        }
+                    }
+                }
+                a.timing.capture_parse_us += us(processing);
+                if done && a.status == Status::Complete && tokio::time::Instant::now() >= total {
+                    a.status = Status::TotalTimeout;
+                    a.detail = "total deadline during completion parsing".into();
+                }
+                if done {
+                    break;
+                }
+                if retained < chunk.len() {
+                    a.status = Status::ResponseLimit;
+                    a.detail = "response byte cap reached".into();
+                    break;
+                }
+                if tokio::time::Instant::now() >= total {
+                    a.status = Status::TotalTimeout;
+                    a.detail = "total deadline during parsing".into();
+                    break;
+                }
+            }
+        }
+    }
+    if a.status == Status::Complete && !semantic.generated {
+        a.status = Status::Unsupported;
+        a.detail = "completed response contained no generated text".into();
+    }
+    a.finish_reason = semantic.finish;
+    a.usage = semantic.usage;
+    a.timing.settle_us = us(sent);
+    if a.status == Status::Complete && tokio::time::Instant::now() >= total {
+        a.status = Status::TotalTimeout;
+        a.detail = "total deadline before completion settlement".into();
+    }
+    a.response_bytes = body.len();
+    Collected { attempt: a, body }
+}

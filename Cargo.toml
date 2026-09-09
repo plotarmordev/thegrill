@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/*"]
+default-members = [".", "crates/grill-sse"]
+resolver = "3"
+
+[package]
+name = "grill"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+grill-sse = { path = "crates/grill-sse" }
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["std", "raw_value", "float_roundtrip"] }
+sha2 = { version = "0.11", default-features = false }
+# One reusable HTTP/1 client with rustls; no http2/json/stream/compression/proxy features.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Current-thread runtime, deadlines, Unix signal latch and select!.
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "signal", "macros"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Architecture-correct O_NOFOLLOW/O_NONBLOCK constants for evidence opens.
+libc = { version = "0.2", default-features = false }

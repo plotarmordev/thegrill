@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "label": "Original synthetic contract exercises; not a capability benchmark",
+  "worlds": [
+    "tile-world",
+    "key-world",
+    "mark-world",
+    "slot-world"
+  ],
+  "groups": [
+    "finite-alternatives",
+    "exact-text"
+  ],
+  "cases": [
+    {
+      "id": "tile-code",
+      "world": "tile-world",
+      "group": "finite-alternatives",
+      "messages": [
+        {
+          "role": "user",
+          "content": "In this invented tile code, a teal tile is named T or teal. Give either name for a teal tile as a JSON object with only a string answer field."
+        }
+      ],
+      "accepted": [
+        "T",
+        "teal"
+      ],
+      "qualification": {
+        "valid": [
+          "{\"answer\":\"T\"}",
+          "{\"answer\":\"teal\"}"
+        ],
+        "wrong": [
+          "{\"answer\":\"t\"}",
+          "{\"answer\":\"blue\"}"
+        ]
+      }
+    },
+    {
+      "id": "padded-key",
+      "world": "key-world",
+      "group": "exact-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "The invented key consists of exactly one space, then oak, then one space. Return that exact key as a JSON object with only a string answer field."
+        }
+      ],
+      "accepted": [
+        " oak "
+      ],
+      "qualification": {
+        "valid": [
+          "{\"answer\":\" oak \"}"
+        ],
+        "wrong": [
+          "{\"answer\":\"oak\"}",
+          "{\"answer\":\" OAK \"}"
+        ]
+      }
+    },
+    {
+      "id": "lambda-mark",
+      "world": "mark-world",
+      "group": "exact-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Our invented marker is the single character λ. Return it as a JSON object with only a string answer field."
+        }
+      ],
+      "accepted": [
+        "λ"
+      ],
+      "qualification": {
+        "valid": [
+          "{\"answer\":\"λ\"}",
+          "{\"answer\":\"\\u03bb\"}"
+        ],
+        "wrong": [
+          "{\"answer\":\"Λ\"}",
+          "{\"answer\":null,\"answer\":\"λ\"}"
+        ]
+      }
+    },
+    {
+      "id": "empty-slot",
+      "world": "slot-world",
+      "group": "exact-text",
+      "messages": [
+        {
+          "role": "user",
+          "content": "This invented slot contains zero characters. Return its contents as a JSON object with only a string answer field."
+        }
+      ],
+      "accepted": [
+        ""
+      ],
+      "qualification": {
+        "valid": [
+          "{\"answer\":\"\"}"
+        ],
+        "wrong": [
+          "",
+          "{\"answer\":\" \"}",
+          "{\"answer\":\"\",\"extra\":0}"
+        ]
+      }
+    }
+  ]
+}

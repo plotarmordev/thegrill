@@ -1,0 +1,40 @@
+# Generated evaluation data and model artifacts.
+/runs/
+/results/
+/artifacts/
+/.local/
+/datasets/
+/models/
+*.safetensors
+*.gguf
+*.onnx
+*.pt
+*.pth
+
+# Credentials and machine-local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build products, environments, caches, and editor state.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+node_modules/
+dist/
+build/
+/target/
+*.egg-info/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.orca/

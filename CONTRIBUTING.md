@@ -1,0 +1,31 @@
+# Contributing
+
+Keep changes focused on observable behavior. For a substantial change, open an issue describing the problem, proposed approach, and affected file formats or protocols before implementation.
+
+## Development
+
+The Grill is a Rust CLI for Linux. Build and check it with:
+
+```sh
+cargo build --workspace --locked
+cargo fmt --all --check
+cargo test --workspace --locked
+cargo clippy --workspace --locked --all-targets -- -D warnings
+```
+
+Integration tests run the CLI against synthetic inputs and loopback fixtures. Do not point tests at a model service. Use `cargo test --locked --test offline` or `cargo test --locked --test runner` for a focused run.
+
+## Changes and review
+
+- Use a feature branch and submit a pull request. Describe the behavior changed, assumptions, and checks performed.
+- Keep compatibility changes explicit. Preserve existing task, protocol, and grading identities unless the contract deliberately changes.
+- Preserve the fixed examples and `examples/identity-vectors.json`. Do not update expected hashes merely to make a failing check pass.
+- Bump the grader implementation revision when grading behavior changes.
+- Test plausible failures, boundaries, and invariants rather than implementation details or wording.
+- Include valid alternate answers as well as incorrect and malformed answers when changing a grader.
+- Identify external code or data incorporated into a change and preserve any required notices.
+- Review staged files for credentials, sensitive inputs, and generated results before publishing.
+
+## Evaluation claims
+
+Distinguish task self-checks from independent validation, and submitted outputs from controlled model execution. Preserve failed and incomplete attempts in reports. State the task set, protocol, sampling assumptions, and uncertainty behind a comparison; a small pilot is not evidence of general capability.
