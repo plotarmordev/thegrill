@@ -1053,8 +1053,8 @@ fn fill_body_at_the_request_cap_is_refused_before_any_run_directory() {
     successful(&run(&temp, &server, "probe", &w));
     let reservation = value(temp.path("probe").join("wave-000000/reservation.json"));
     let base = reservation["requests"][0].as_str().unwrap().len() - 3000;
-    // Without seed or salt the admission sample equals the sent body, so this
-    // renders exactly 2 MiB; a wider interior lane would exceed the cap.
+    // Without seed or salt the admission sample equals the sent body; admission
+    // keeps two bytes of lane-digit slack, so a sample at the cap is refused.
     let cap = 2 * 1024 * 1024;
     let repeat = (cap - base) / 3;
     let pad = "y".repeat(cap - base - 3 * repeat);
