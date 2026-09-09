@@ -46,6 +46,13 @@ cell, and three measured trials. It caps output at 1,024 tokens; it does not
 pretend that a cap forces every server to emit exactly that many tokens.
 All warmup waves finish before any measured wave begins.
 
+For a smaller compatibility probe, use
+[`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
+concurrency 1 and 2, a 64-token cap, and nine requests per run.
+The [two-recipe qualification and GLM A/A receipt](2026-09-09-recipe-smoke.md)
+shows successful collection alongside substantial timing variation without a
+deployment change. It is a smoke example, not an optimization result.
+
 ## Pause and continue
 
 ```sh

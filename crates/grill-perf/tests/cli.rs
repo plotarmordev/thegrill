@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -102,6 +102,34 @@ impl Server {
             count,
             peak,
             join: Some(join),
+        }
+    }
+
+    fn wait_for_request(&self, child: &mut Child) {
+        // Request deadlines start at dispatch, not process spawn. Fingerprinting
+        // a debug executable with software SHA can take several seconds first.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.seen.recv_timeout(Duration::from_millis(20)) {
+                Ok(_) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    if Instant::now() < deadline && child.try_wait().unwrap().is_none() => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let status = child.wait().unwrap();
+                    let mut stdout = String::new();
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stdout.take() {
+                        pipe.read_to_string(&mut stdout).unwrap();
+                    }
+                    if let Some(mut pipe) = child.stderr.take() {
+                        pipe.read_to_string(&mut stderr).unwrap();
+                    }
+                    panic!(
+                        "collector did not dispatch a request: {error}; status={status}; stdout={stdout}; stderr={stderr}"
+                    );
+                }
+            }
         }
     }
 }
@@ -256,7 +284,7 @@ fn pause_drains_wave_resume_is_exclusive_and_preserves_evidence() {
         .spawn()
         .unwrap();
     for _ in 0..2 {
-        server.seen.recv_timeout(Duration::from_secs(3)).unwrap();
+        server.wait_for_request(&mut child);
     }
     successful(&cli().arg("pause").arg(temp.path("run")).output().unwrap());
     assert!(child.try_wait().unwrap().is_none());
@@ -345,7 +373,7 @@ fn pause_drains_wave_resume_is_exclusive_and_preserves_evidence() {
         );
         fs::write(receipt, &retained[2].1).unwrap();
     }
-    let resumed = cli()
+    let mut resumed = cli()
         .arg("resume")
         .arg(temp.path("run"))
         .arg("--json")
@@ -354,7 +382,7 @@ fn pause_drains_wave_resume_is_exclusive_and_preserves_evidence() {
         .spawn()
         .unwrap();
     for _ in 0..2 {
-        server.seen.recv_timeout(Duration::from_secs(3)).unwrap();
+        server.wait_for_request(&mut resumed);
     }
     let concurrent = cli().arg("resume").arg(temp.path("run")).output().unwrap();
     assert_eq!(concurrent.status.code(), Some(1));
@@ -542,7 +570,7 @@ fn pause_and_wave_admission_share_serialization() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        server.seen.recv_timeout(Duration::from_secs(3)).unwrap();
+        server.wait_for_request(&mut child);
         let session = temp.path("run/session-000000");
         let gate = fs::File::open(&session).unwrap();
         assert_eq!(unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_EX) }, 0);
@@ -796,14 +824,18 @@ fn timeout_settles_partial_evidence_without_starting_more_waves() {
 
 fn cancellation_case(signal: i32) {
     let temp = Temp::new();
-    let server = Server::new(|mut s, _, _| {
+    let (ready, releases) = std::sync::mpsc::sync_channel(2);
+    let server = Server::new(move |mut s, _, _| {
         header(&mut s, "text/event-stream");
-        let _ = s.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
-        thread::sleep(Duration::from_millis(300));
+        s.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+            .unwrap();
+        let (release, wait) = std::sync::mpsc::sync_channel(0);
+        ready.send(release).unwrap();
+        wait.recv_timeout(Duration::from_secs(10)).unwrap();
     });
     let input = temp.path("input.json");
     fs::write(&input, serde_json::to_vec(&workload(2, 0, 3)).unwrap()).unwrap();
-    let child = cli()
+    let mut child = cli()
         .arg("run")
         .arg(input)
         .args([
@@ -820,14 +852,18 @@ fn cancellation_case(signal: i32) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let until = Instant::now() + Duration::from_secs(3);
-    while server.count.load(Ordering::SeqCst) < 2 {
-        assert!(Instant::now() < until);
-        thread::sleep(Duration::from_millis(2));
+    for _ in 0..2 {
+        server.wait_for_request(&mut child);
     }
-    thread::sleep(Duration::from_millis(25));
+    let releases = [
+        releases.recv_timeout(Duration::from_secs(3)).unwrap(),
+        releases.recv_timeout(Duration::from_secs(3)).unwrap(),
+    ];
     assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
     let output = child.wait_with_output().unwrap();
+    for release in releases {
+        release.send(()).unwrap();
+    }
     assert_eq!(output.status.code(), Some(2));
     let w = wave(&temp, "run", 0);
     assert!(

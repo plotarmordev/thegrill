@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "name": "recipe-smoke-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": {
+      "tokens": 64,
+      "mode": "cap"
+    },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": 42
+  },
+  "limits": {
+    "total_ms": 60000,
+    "idle_ms": 30000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "numbered-words",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Write the integers from 1 to 1000 in order, separated by spaces. Do not add an introduction or explanation."
+        }
+      ]
+    }
+  ],
+  "cells": [
+    {
+      "id": "single",
+      "case": "numbered-words",
+      "concurrency": 1,
+      "warmup_trials": 1,
+      "trials": 2
+    },
+    {
+      "id": "two",
+      "case": "numbered-words",
+      "concurrency": 2,
+      "warmup_trials": 1,
+      "trials": 2
+    }
+  ]
+}
