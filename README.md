@@ -4,22 +4,19 @@
 
 # The Grill
 
-**Benchmark serving recipes. Evaluate model answers. Two tools, separate results.**
+**Compare the speed of your LLM serving recipes.**
 
-The Grill runs against your existing Chat Completions server and saves evidence locally. Use either tool independently—no project account, hosted service, or mandatory upload.
+Run the same test on two setups and compare the results. A recipe is the engine and settings you use to run a model.
 
-## Choose your benchmark
+The Grill also has a separate tool for checking model answers. That part is still being developed.
 
-| Your question | Mode & command | What you get |
-|---|---|---|
-| **“Is this serving recipe faster?”** | **[Recipe performance](#recipe-performance)**<br>`grill-perf` | Timing, token throughput, recipe comparisons |
-| **“How well does this model answer?”** | **[Intelligence evaluation](#intelligence-evaluation)**<br>`grill` · **WIP** | Answer grades, failure accounting, comparisons |
+[![Speed benchmarks](https://img.shields.io/badge/Speed-benchmarks-0969da?style=flat-square)](#speed-benchmarks) [![Quality evaluation: WIP](https://img.shields.io/badge/Quality-WIP-a16207?style=flat-square)](#quality-evaluation-wip)
 
-**Early-stage software:** performance collection is implemented; qualify it on your deployment. Intelligence evaluation is still a work in progress—not a calibrated general-intelligence score.
+The tools run on your machine and connect to your chosen server. No project account or results upload is required. **This is experimental software.**
 
-## Build once, choose a tool
+## Get started
 
-Requires **Linux, Rust/Cargo 1.98, a C/C++ toolchain, and CMake**.
+You need **Linux, Rust/Cargo 1.98, a C/C++ toolchain, and CMake**.
 
 ```sh
 git clone https://github.com/plotarmordev/thegrill.git
@@ -28,13 +25,21 @@ cargo build --workspace --release --locked
 mkdir -p results
 ```
 
-The examples below use a local server on port `8000`. Replace the port and `your-model` with your recipe's settings. Start the server yourself; The Grill does not launch or configure it.
+Start your model server first. In the examples below, replace port `8000` and `your-model` with your server's settings. The Grill does not start or change your server.
 
-For authenticated endpoints, set `MODEL_API_KEY` and add `--auth-env MODEL_API_KEY`. Remote servers need HTTPS or a separately managed local forward; `--local-http` permits only literal loopback addresses.
+<details>
+<summary><strong>Using a remote server or an API key?</strong></summary>
 
-## Recipe performance
+- For a remote server, use its HTTPS URL or a separately managed local forward. `--local-http` permits HTTP only on literal loopback addresses such as `127.0.0.1`.
+- If a key is needed, set `MODEL_API_KEY` in your environment and add `--auth-env MODEL_API_KEY` to the run command. Do not put the key in a workload file.
 
-**For comparing engines, quantizations, runtime settings, or other serving recipes.** Measures speed—not answer quality.
+</details>
+
+## Speed benchmarks
+
+Use **`grill-perf`** to measure your serving recipe.
+
+**1. Test your first setup.**
 
 ```sh
 target/release/grill-perf run crates/grill-perf/examples/quick.json \
@@ -42,27 +47,38 @@ target/release/grill-perf run crates/grill-perf/examples/quick.json \
   --local-http --model your-model --out results/recipe-a
 ```
 
-The supplied workload runs at concurrency **1 and 6**, with warmup and three measured trials per cell, capped at **1,024 output tokens** per request.
+The quick test sends **28 requests** in groups of **1 and 6**. Each request asks for a limit of **1,024 output tokens**.
 
-Change your recipe, then repeat that command with `--out results/recipe-b`. Keep the **same workload and collector binary**, then compare:
+**2. Change your recipe and test again.** Repeat the command with `--out results/recipe-b`. Use the same test and tool build for both runs.
+
+**3. Compare the saved results.** No server connection is needed for this step.
 
 ```sh
 target/release/grill-perf compare results/recipe-a results/recipe-b --json
 ```
 
-| Measure | Meaning |
+| Result | What it tells you |
 |---|---|
-| **Wave latency** | First request dispatch to last request settlement in a fixed group |
-| **Completion throughput** | Provider-reported completion tokens over that group’s elapsed time; may include reasoning |
-| **Matched change** | Withheld when the runs lack compatible evidence or paired output amounts differ |
+| **Time per group** | How long the whole group of requests took to finish |
+| **Combined tokens/sec** | How many tokens your server produced per second across the group |
 
-These are client observations, **not maximum server capacity**. A token cap does not force equal output lengths. Resumed runs do not qualify as uninterrupted timing comparisons.
+<details>
+<summary><strong>How to avoid misleading speed comparisons</strong></summary>
 
-**[Full performance guide →](docs/performance/README.md)** Workload controls, exact-output profiles, cache observations, pause/resume, and interpretation.
+- Token counts come from the server and may include thinking tokens. The Grill does not turn thinking off for you. Use the same thinking settings for both runs.
+- A token cap does not force equal answer lengths. If one run produces shorter answers, the tool will not call it a matched speed improvement.
+- The quick test includes warmup and three measured trials per group size. The timings include client and network effects. They are not maximum server capacity.
+- Pausing and resuming changes the measurement session. Resumed performance runs do not qualify as uninterrupted timing comparisons.
 
-## Intelligence evaluation
+</details>
 
-> **Work in progress.** The collection and grading workflow works, but the bundled synthetic tasks demonstrate the format—not a validated intelligence benchmark. Current support is text-only, direct-answer evaluation; no generated-code execution or agents.
+[Full speed benchmark guide](docs/performance/README.md)
+
+## Quality evaluation (WIP)
+
+Use **`grill`** to collect model answers and check them against task rules.
+
+**This part is a work in progress.** The included questions are synthetic examples, not a validated intelligence test. It currently supports text answers, not agents or code execution.
 
 ```sh
 target/release/grill run examples/synthetic-pack.json \
@@ -74,14 +90,14 @@ target/release/grill inspect results/answers --json
 target/release/grill regrade results/answers --out results/answers-regraded
 ```
 
-Use your own task pack and a suitable token budget for meaningful evaluation. Incorrect answers, refusals, truncation, and missing evidence remain distinguishable. Inspection and regrading are **offline**; use `plan` instead of `run` to preview requests without sending them.
+Inspection and regrading use saved files. They do not call the model again. Wrong answers, refusals, cut-off responses, and missing results stay separate.
 
-**[Quality formats & usage →](docs/PROJECT.md)** Task packs, grading, study manifests, comparisons, and pause/resume.
+[Task formats and quality evaluation guide](docs/PROJECT.md)
 
-## Before sharing results
+## Keep your results safe
 
-Use fresh output directories. Runs retain prompts and responses: **review content and rights before sharing**. Declared model names and provider usage are evidence, not independent verification of model identity or billing.
+Use a new output directory for each run. Results contain prompts and model responses, so review them before sharing.
 
-[Code organization](docs/REPOSITORY.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Contributing](CONTRIBUTING.md) · [Code organization](docs/REPOSITORY.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
 
-The MIT license covers TheGrill’s code and documentation, not third-party benchmark data or model weights.
+MIT covers this project's code and documentation. Benchmark data and model weights keep their own licenses.
