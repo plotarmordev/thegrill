@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "name": "quick-text-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 1024, "mode": "cap" },
+    "cache": "observe",
+    "temperature_milli": 600,
+    "top_p_milli": 950,
+    "seed": 42
+  },
+  "limits": {
+    "total_ms": 120000,
+    "idle_ms": 30000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "numbered-words",
+      "messages": [
+        { "role": "user", "content": "Write a long numbered list of lowercase English words. Continue until the response limit. Do not add an introduction." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "single", "case": "numbered-words", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "six", "case": "numbered-words", "concurrency": 6, "warmup_trials": 1, "trials": 3 }
+  ]
+}

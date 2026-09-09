@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "label": "Synthetic submitted-answer comparison",
+  "purpose": "pilot",
+  "construct": "Exercise exact-answer grading and paired reporting; not model capability.",
+  "sampling": "Four deliberately authored contract examples, not a random sample. Each world is one problem unit.",
+  "exclusions": "No inference to other tasks, model rankings, or weight effects.",
+  "stopping_rule": "Analyze all four cases once; retain missing answers in the denominator.",
+  "pack_source": "aebec7ddf819bcb85c723af5b0e2e0726ea6bbfe2e9bf53e998812432dba4e33",
+  "protocol": {
+    "profile": "declared-chat-completions-v1",
+    "stream": false,
+    "token_cap": { "field": "max_completion_tokens", "value": 128 },
+    "temperature_milli": null,
+    "top_p_milli": null,
+    "seed": null,
+    "collection": {
+      "total_ms": 30000,
+      "idle_ms": 10000,
+      "response_bytes": 8388608,
+      "artifact_bytes": 1048576
+    },
+    "rendering": { "status": "unknown", "template": null, "tokenizer": null }
+  },
+  "left_system": { "name": "Synthetic submission A", "model": "declared-model-a", "endpoint": null },
+  "right_system": {
+    "name": "Synthetic submission B",
+    "model": "declared-model-b",
+    "endpoint": "https://example.invalid/inert-declaration"
+  },
+  "families": [
+    {
+      "group": "finite-alternatives",
+      "construct": "Membership in explicitly allowed answer alternatives.",
+      "source": "examples/synthetic-pack.json; original synthetic fixtures",
+      "revision": "synthetic-pack-v1",
+      "rights": "Original project-authored examples; no external dataset incorporated."
+    },
+    {
+      "group": "exact-text",
+      "construct": "Exact preservation of whitespace, Unicode and empty strings.",
+      "source": "examples/synthetic-pack.json; original synthetic fixtures",
+      "revision": "synthetic-pack-v1",
+      "rights": "Original project-authored examples; no external dataset incorporated."
+    }
+  ],
+  "exposure": [
+    { "case_id": "tile-code", "left": "exposed", "right": "exposed" },
+    { "case_id": "padded-key", "left": "exposed", "right": "exposed" },
+    { "case_id": "lambda-mark", "left": "exposed", "right": "exposed" },
+    { "case_id": "empty-slot", "left": "exposed", "right": "exposed" }
+  ]
+}
