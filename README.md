@@ -40,15 +40,15 @@ Start your model server first. In the examples below, replace port `8000` and `y
 
 Use **`grill-perf`** to measure a serving setup.
 
-**1. Test your first setup.**
+**1. Test your first setup.** Two workloads follow [MiaAI-Lab's sparkDash](https://github.com/MiaAI-Lab/sparkDash) protocols, with credit: `sparkdash-decode-v1.json` (prose, code, structured and JSON cases; thinking off; exact output length) and `sparkdash-prefill-v1.json` (salted 4k to 32k prompts, prompt tokens per second to first token). Both need a vLLM-compatible server.
 
 ```sh
-target/release/grill-perf run crates/grill-perf/examples/quick.json \
+target/release/grill-perf run crates/grill-perf/examples/sparkdash-decode-v1.json \
   --endpoint http://127.0.0.1:8000/v1/chat/completions \
   --local-http --model your-model --out results/setup-a
 ```
 
-The quick test sends **28 requests** in groups of **1 and 6**. Each request asks for a limit of **1,024 output tokens**.
+The decode workload sends **72 requests**, the prefill workload **16**. For a server without vLLM controls, `quick.json` sends **28 requests** with a **1,024 token** cap and no thinking control.
 
 **2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs.
 
@@ -62,12 +62,14 @@ target/release/grill-perf compare results/setup-a results/setup-b --json
 |---|---|
 | **Time per group** | How long a group of requests took from first send to last finish |
 | **Combined tokens/sec** | Tokens produced per second across the whole group, as reported by the server |
+| **Decode tokens/sec** | Per-stream rate after the first token, defined to match sparkDash |
+| **Prefill tokens/sec** | Prompt tokens per second to the first token, defined to match sparkDash |
 | **Change** | The difference between the two saved runs, shown only when the runs are comparable |
 
 <details>
 <summary><strong>How to avoid misleading speed comparisons</strong></summary>
 
-- Token counts come from the server and may include thinking tokens. The Grill does not turn thinking off for you. Use the same thinking settings for both runs.
+- Token counts come from the server and may include thinking tokens. The sparkDash workloads declare thinking off through `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` in the receipts, because a template that ignores it is not detected. Use the same thinking settings for both runs.
 - A token cap does not force equal answer lengths. If one run produces shorter answers, the tool will not call it a matched speed improvement.
 - The quick test includes warmup and three measured trials per group size. The timings include client and network effects. They are not maximum server capacity.
 - Pausing and resuming changes the measurement session. Resumed performance runs do not qualify as uninterrupted timing comparisons.
