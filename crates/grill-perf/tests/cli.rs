@@ -2078,7 +2078,7 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
 }
 
 #[test]
-fn unequal_prompt_tokens_withhold_only_prefill_rate_change() {
+fn unequal_prompt_tokens_keep_prefill_rate_change_and_stay_visible() {
     let temp = Temp::new();
     let server = Server::new(|mut s, i, _| {
         header(&mut s, "text/event-stream");
@@ -2108,11 +2108,9 @@ fn unequal_prompt_tokens_withhold_only_prefill_rate_change() {
     for side in ["baseline", "candidate"] {
         assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
     }
+    // Per-run text salts tokenize to different counts; the per-token rate must still compare.
     let change = &report["changes"][0];
-    assert_eq!(
-        change.get("prefill_rate_change_percent"),
-        Some(&Value::Null)
-    );
+    assert!(change["prefill_rate_change_percent"].is_number());
     assert_eq!(change["eligible"], true);
     assert_eq!(change["observed_output_amounts_match"], true);
     assert_eq!(change["ineligibility_reasons"], json!([]));

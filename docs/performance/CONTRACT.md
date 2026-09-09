@@ -226,8 +226,7 @@ Model and optional deployment declarations are shown separately. There is no
 combined quality/performance score, automatic winner, confidence interval or
 p95 estimate from three trials.
 Per-stream decode medians use eligible measured lanes under the same completeness gates; decode-rate changes also require matched ordered lane counts.
-Per-stream prefill medians use the same completeness gates; prefill-rate changes additionally require all ordered lane prompt counts to be present and equal, without changing other metrics' eligibility.
-
+Per-stream prefill medians use the same completeness gates; prefill-rate changes require matched ordered lane completion counts like the other changes, and each side's ordered lane prompt counts are reported so tokenizer or salt differences stay visible.
 A second execution session resets the client connection pool and introduces an
 unmeasured gap in server/cache state. Original warmup waves remain evidence but
 cannot certify resumed-session warmup continuity. No warmup is added or replayed,

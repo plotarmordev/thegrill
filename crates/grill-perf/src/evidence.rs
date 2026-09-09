@@ -620,10 +620,7 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                 } else {
                     None
                 },
-                prefill_rate_change_percent: if same
-                    && a.lane_prompt_tokens.iter().flatten().all(Option::is_some)
-                    && a.lane_prompt_tokens == b.lane_prompt_tokens
-                {
+                prefill_rate_change_percent: if same {
                     change(
                         a.median_prefill_tokens_per_second,
                         b.median_prefill_tokens_per_second,
