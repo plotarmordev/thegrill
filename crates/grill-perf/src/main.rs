@@ -35,6 +35,8 @@ enum Command {
         baseline: PathBuf,
         candidate: PathBuf,
         #[arg(long)]
+        reference: Option<PathBuf>,
+        #[arg(long)]
         json: bool,
     },
 }
@@ -68,36 +70,64 @@ fn execute(cli: Cli) -> model::Result<bool> {
         Command::Compare {
             baseline,
             candidate,
+            reference,
             json,
         } => {
-            let comparison = evidence::compare(&baseline, &candidate)?;
+            let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
             if json {
                 print_json(&comparison)?;
             } else {
                 println!("Descriptive deployment comparison; not a causal or capacity verdict.");
-                for change in &comparison.changes {
-                    match (
-                        change.wave_latency_change_percent,
-                        change.achieved_throughput_change_percent,
-                    ) {
-                        (Some(latency), Some(rate)) => {
-                            print!(
-                                "{}: wave latency {latency:+.2}%; achieved throughput {rate:+.2}%",
-                                change.cell
-                            );
-                            if let Some(decode) = change.decode_rate_change_percent {
-                                print!("; decode rate {decode:+.2}%");
-                            }
-                            if let Some(prefill) = change.prefill_rate_change_percent {
-                                print!("; prefill rate {prefill:+.2}%");
-                            }
-                            println!();
-                        }
-                        _ => println!(
-                            "{}: {}",
-                            change.cell,
-                            change.ineligibility_reasons.join("; ")
+                for (cell, change) in comparison.changes.iter().enumerate() {
+                    print!("{}: ", change.cell);
+                    for (index, (name, value)) in [
+                        ("wave latency", change.wave_latency_change_percent),
+                        (
+                            "achieved throughput",
+                            change.achieved_throughput_change_percent,
                         ),
+                        ("decode rate", change.decode_rate_change_percent),
+                        ("prefill rate", change.prefill_rate_change_percent),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if index > 0 {
+                            print!("; ");
+                        }
+                        match value {
+                            Some(value) => print!("{name} {value:+.2}%"),
+                            None if change.withheld.iter().any(|w| w.starts_with(name)) => {
+                                print!("{name} withheld")
+                            }
+                            None => print!("{name} n/a"),
+                        }
+                    }
+                    println!();
+                    if let Some(drift) = &comparison.drift {
+                        let drift = &drift[cell];
+                        print!("  reference drift: ");
+                        for (index, (name, value)) in [
+                            ("wave latency", drift.wave_latency_percent),
+                            ("achieved throughput", drift.achieved_throughput_percent),
+                            ("decode rate", drift.decode_rate_percent),
+                            ("prefill rate", drift.prefill_rate_percent),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            if index > 0 {
+                                print!("; ");
+                            }
+                            match value {
+                                Some(value) => print!("{name} {value:+.2}%"),
+                                None => print!("{name} n/a"),
+                            }
+                        }
+                        println!();
+                    }
+                    for reason in change.withheld.iter().chain(&change.ineligibility_reasons) {
+                        println!("  {reason}");
                     }
                 }
             }

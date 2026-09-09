@@ -50,9 +50,9 @@ target/release/grill-perf run crates/grill-perf/examples/sparkdash-decode-v1.jso
 
 The decode workload sends **72 requests**, the prefill workload **16**. For a server without vLLM controls, `quick.json` sends **28 requests** with a **1,024 token** cap and no thinking control.
 
-**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs.
+**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs. A repeat of setup A saved as `results/setup-a-repeat` lets the comparison measure drift.
 
-**3. Compare the saved results.** No server connection is needed for this step.
+**3. Compare the saved results.** No server connection is needed for this step. Add `--reference results/setup-a-repeat` if you have the repeat.
 
 ```sh
 target/release/grill-perf compare results/setup-a results/setup-b --json
@@ -64,7 +64,7 @@ target/release/grill-perf compare results/setup-a results/setup-b --json
 | **Combined tokens/sec** | Tokens produced per second across the whole group, as reported by the server |
 | **Decode tokens/sec** | Per-stream rate after the first token, defined to match sparkDash |
 | **Prefill tokens/sec** | Prompt tokens per second to the first token, defined to match sparkDash |
-| **Change** | The difference between the two saved runs, shown only when the runs are comparable |
+| **Change** | The difference between the two saved runs, shown only when the runs are comparable and their ranges do not overlap. Three trials make this a coarse filter, not proof: a withheld change is not evidence of equality |
 
 <details>
 <summary><strong>How to avoid misleading speed comparisons</strong></summary>

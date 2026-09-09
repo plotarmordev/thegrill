@@ -350,6 +350,10 @@ pub struct CellSummary {
     pub median_achieved_completion_tokens_per_second: Option<f64>,
     pub median_decode_tokens_per_second: Option<f64>,
     pub median_prefill_tokens_per_second: Option<f64>,
+    pub wave_latency_us_range: Option<[f64; 2]>,
+    pub achieved_completion_tokens_per_second_range: Option<[f64; 2]>,
+    pub decode_tokens_per_second_range: Option<[f64; 2]>,
+    pub prefill_tokens_per_second_range: Option<[f64; 2]>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
     pub reported_completion_tokens: Vec<Option<u64>>,
@@ -372,6 +376,12 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     } else {
         values[middle]
     })
+}
+fn range(values: &[f64]) -> Option<[f64; 2]> {
+    let first = *values.first()?;
+    Some(values.iter().fold([first, first], |[min, max], &value| {
+        [min.min(value), max.max(value)]
+    }))
 }
 pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
     let warmups_complete = run
@@ -456,32 +466,30 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 .collect();
             let complete = warmups_complete && eligible == cell.trials as usize
                 && run.history.count <= 1 && !run.history.open;
+            let (latency_values, rate_values, decode_values, prefill_values) = if complete {
+                (
+                    latencies.iter().flatten().map(|n| *n as f64).collect::<Vec<_>>(),
+                    rates.iter().flatten().copied().collect::<Vec<_>>(),
+                    decode_rates.iter().flatten().flatten().copied().collect::<Vec<_>>(),
+                    prefill_rates.iter().flatten().flatten().copied().collect::<Vec<_>>(),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
             CellSummary {
                 cell: cell.id.clone(),
                 planned_trials: cell.trials,
                 observed_trials: observed,
                 eligible_trials: eligible,
-                median_wave_latency_us: if complete {
-                    median(latencies.iter().flatten().map(|n| *n as f64).collect())
-                } else {
-                    None
-                },
-                median_achieved_completion_tokens_per_second: if complete {
-                    median(rates.iter().flatten().copied().collect())
-                } else {
-                    None
-                },
-                median_decode_tokens_per_second: if complete {
-                    median(decode_rates.iter().flatten().flatten().copied().collect())
-                } else {
-                    None
-                },
+                wave_latency_us_range: range(&latency_values),
+                achieved_completion_tokens_per_second_range: range(&rate_values),
+                decode_tokens_per_second_range: range(&decode_values),
+                prefill_tokens_per_second_range: range(&prefill_values),
+                median_wave_latency_us: median(latency_values),
+                median_achieved_completion_tokens_per_second: median(rate_values),
+                median_decode_tokens_per_second: median(decode_values),
                 lane_decode_tokens_per_second: decode_rates,
-                median_prefill_tokens_per_second: if complete {
-                    median(prefill_rates.iter().flatten().flatten().copied().collect())
-                } else {
-                    None
-                },
+                median_prefill_tokens_per_second: median(prefill_values),
                 lane_prefill_tokens_per_second: prefill_rates,
                 wave_latency_us: latencies,
                 achieved_completion_tokens_per_second: rates,
@@ -535,10 +543,19 @@ pub struct CellChange {
     pub eligible: bool,
     pub observed_output_amounts_match: bool,
     pub ineligibility_reasons: Vec<String>,
+    pub withheld: Vec<String>,
     pub wave_latency_change_percent: Option<f64>,
     pub achieved_throughput_change_percent: Option<f64>,
     pub decode_rate_change_percent: Option<f64>,
     pub prefill_rate_change_percent: Option<f64>,
+}
+#[derive(Serialize)]
+pub struct Drift {
+    pub cell: String,
+    pub wave_latency_percent: Option<f64>,
+    pub achieved_throughput_percent: Option<f64>,
+    pub decode_rate_percent: Option<f64>,
+    pub prefill_rate_percent: Option<f64>,
 }
 #[derive(Serialize)]
 pub struct Comparison {
@@ -550,6 +567,8 @@ pub struct Comparison {
     pub candidate_deployment: Option<Deployment>,
     pub baseline: Vec<CellSummary>,
     pub candidate: Vec<CellSummary>,
+    pub reference: Option<Vec<CellSummary>>,
+    pub drift: Option<Vec<Drift>>,
     pub changes: Vec<CellChange>,
 }
 fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
@@ -557,26 +576,54 @@ fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
         .filter(|(a, _)| *a > 0.0)
         .map(|(a, b)| 100.0 * (b / a - 1.0))
 }
-pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
+pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;
-    if left.plan.workload_sha256 != right.plan.workload_sha256
-        || left.plan.tool_version != right.plan.tool_version
-        || left.plan.collector_sha256 != right.plan.collector_sha256
-        || left.plan.local_http != right.plan.local_http
-        || left.plan.pool_max_idle_per_host != right.plan.pool_max_idle_per_host
-    {
-        return Err(
-            "incompatible workload, tool or transport controls; no matched comparison produced"
-                .into(),
-        );
+    let reference = reference.map(load).transpose()?;
+    for other in std::iter::once(&right).chain(reference.iter()) {
+        if left.plan.workload_sha256 != other.plan.workload_sha256
+            || left.plan.tool_version != other.plan.tool_version
+            || left.plan.collector_sha256 != other.plan.collector_sha256
+            || left.plan.local_http != other.plan.local_http
+            || left.plan.pool_max_idle_per_host != other.plan.pool_max_idle_per_host
+        {
+            return Err(
+                "incompatible workload, tool or transport controls; no matched comparison produced"
+                    .into(),
+            );
+        }
     }
     let baseline = summarize(&left);
     let candidate = summarize(&right);
+    let reference = reference.as_ref().map(summarize);
+    let drift: Option<Vec<Drift>> = reference.as_ref().map(|reference| {
+        baseline
+            .iter()
+            .zip(reference)
+            .map(|(a, a2)| Drift {
+                cell: a.cell.clone(),
+                wave_latency_percent: change(a.median_wave_latency_us, a2.median_wave_latency_us),
+                achieved_throughput_percent: change(
+                    a.median_achieved_completion_tokens_per_second,
+                    a2.median_achieved_completion_tokens_per_second,
+                ),
+                decode_rate_percent: change(
+                    a.median_decode_tokens_per_second,
+                    a2.median_decode_tokens_per_second,
+                ),
+                prefill_rate_percent: change(
+                    a.median_prefill_tokens_per_second,
+                    a2.median_prefill_tokens_per_second,
+                ),
+            })
+            .collect()
+    });
     let changes = baseline
         .iter()
         .zip(&candidate)
-        .map(|(a, b)| {
+        .enumerate()
+        .map(|(index, (a, b))| {
+            let a2 = reference.as_ref().map(|reference| &reference[index]);
             let same = a
                 .lane_completion_tokens
                 .iter()
@@ -592,6 +639,40 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
             if !same {
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
+            let mut withheld = Vec::new();
+            // A repeat of the baseline widens its range: the candidate must clear the
+            // noise the baseline itself demonstrated, not just three trials of it.
+            let mut matched_change = |name: &str,
+                                      value: Option<f64>,
+                                      a: Option<[f64; 2]>,
+                                      a2: Option<[f64; 2]>,
+                                      b: Option<[f64; 2]>,
+                                      unit: (f64, usize)| {
+                let value = value.filter(|_| same)?;
+                let (a, b) = a.zip(b)?;
+                let a = match a2 {
+                    Some(a2) => [a[0].min(a2[0]), a[1].max(a2[1])],
+                    None => a,
+                };
+                if a[1] < b[0] || b[1] < a[0] {
+                    return Some(value);
+                }
+                let (divisor, decimals) = unit;
+                let [a0, a1, b0, b1] = [a[0], a[1], b[0], b[1]].map(|v| v / divisor);
+                withheld.push(format!(
+                    "{name}: ranges overlap, {a0:.*}-{a1:.*} vs {b0:.*}-{b1:.*}{}",
+                    decimals,
+                    decimals,
+                    decimals,
+                    decimals,
+                    if a2.is_some() {
+                        " (baseline pooled with reference)"
+                    } else {
+                        ""
+                    }
+                ));
+                None
+            };
             CellChange {
                 cell: a.cell.clone(),
                 eligible: same
@@ -599,40 +680,53 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     && b.median_wave_latency_us.is_some(),
                 observed_output_amounts_match: same,
                 ineligibility_reasons: reasons,
-                wave_latency_change_percent: if same {
-                    change(a.median_wave_latency_us, b.median_wave_latency_us)
-                } else {
-                    None
-                },
-                achieved_throughput_change_percent: if same {
+                wave_latency_change_percent: matched_change(
+                    "wave latency",
+                    change(a.median_wave_latency_us, b.median_wave_latency_us),
+                    a.wave_latency_us_range,
+                    a2.and_then(|a2| a2.wave_latency_us_range),
+                    b.wave_latency_us_range,
+                    (1_000_000.0, 2),
+                ),
+                achieved_throughput_change_percent: matched_change(
+                    "achieved throughput",
                     change(
                         a.median_achieved_completion_tokens_per_second,
                         b.median_achieved_completion_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
-                decode_rate_change_percent: if same {
+                    ),
+                    a.achieved_completion_tokens_per_second_range,
+                    a2.and_then(|a2| a2.achieved_completion_tokens_per_second_range),
+                    b.achieved_completion_tokens_per_second_range,
+                    (1.0, 1),
+                ),
+                decode_rate_change_percent: matched_change(
+                    "decode rate",
                     change(
                         a.median_decode_tokens_per_second,
                         b.median_decode_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
-                prefill_rate_change_percent: if same {
+                    ),
+                    a.decode_tokens_per_second_range,
+                    a2.and_then(|a2| a2.decode_tokens_per_second_range),
+                    b.decode_tokens_per_second_range,
+                    (1.0, 1),
+                ),
+                prefill_rate_change_percent: matched_change(
+                    "prefill rate",
                     change(
                         a.median_prefill_tokens_per_second,
                         b.median_prefill_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
+                    ),
+                    a.prefill_tokens_per_second_range,
+                    a2.and_then(|a2| a2.prefill_tokens_per_second_range),
+                    b.prefill_tokens_per_second_range,
+                    (1.0, 1),
+                ),
+                withheld,
             }
         })
         .collect();
     Ok(Comparison {
-        version: 1,
+        version: 2,
         claim: "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
         baseline_model: left.plan.model,
         candidate_model: right.plan.model,
@@ -640,6 +734,8 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
         candidate_deployment: right.plan.deployment,
         baseline,
         candidate,
+        reference,
+        drift,
         changes,
     })
 }

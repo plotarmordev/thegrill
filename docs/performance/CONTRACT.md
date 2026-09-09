@@ -237,6 +237,27 @@ outcomes also withhold medians. `changes[].ineligibility_reasons` explains side
 specific evidence issues and missing/unequal paired lane counts in both CLI and
 JSON, rather than requiring users to infer why a change is absent.
 
+Each complete cell reports min/max ranges alongside its medians: trial-level
+wave latency and achieved throughput, and all eligible measured lanes for decode
+and prefill rates. A matched percentage is reported only when the two ranges do
+not overlap (`a.max < b.min || b.max < a.min`); touching endpoints overlap.
+`changes[].withheld` records each overlap with both ranges, using seconds with
+two decimals for latency and tokens/s with one decimal for rates. Withholding
+for spread does not change `eligible` or `ineligibility_reasons`, which describe
+run comparability. Absent scalars and ranges are explicit JSON nulls.
+Disjoint ranges from three trials is a coarse filter, not a significance test:
+about one identical pair in ten separates by chance, and one outlier lane can
+withhold a real change. A withheld change is not evidence of equality.
+`compare A B --reference A2` checks the reference against the same workload,
+collector identity and transport controls, and includes its cell summaries in
+`reference`. The baseline range then becomes the union of A's and A2's ranges
+before the overlap test, and overlap strings say so; a reference cell without a
+range leaves A's range unchanged. `drift` reports raw median changes from A to
+A2 for each metric without gating: a noise floor for reading, not a claim.
+Absent reference and drift fields are explicit nulls; human output prints absent
+drift as `n/a`. The comparison JSON is `version` 2: `*_change_percent` is null
+for an eligible cell whenever its ranges overlap, which version 1 never did.
+
 ## Validation
 
 Run the real CLI fixture regressions and strict package checks:

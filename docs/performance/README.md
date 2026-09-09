@@ -147,6 +147,15 @@ verification rather than being repaired.
 - A matched change is withheld if observed output amounts differ in any paired
   trial/lane, even when wave totals match. Shorter answers must not masquerade
   as a speed improvement.
+- Min/max ranges accompany complete-cell medians. A matched percentage is shown
+  only when the runs' ranges do not overlap; `withheld` explains overlap without
+  making an otherwise comparable cell ineligible. Three trials make this a coarse
+  filter, not a significance test: identical setups separate by chance about one
+  time in ten, and one outlier lane can withhold a real change, so a withheld
+  change is not evidence of equality. Repeat setup A and pass
+  `--reference results/setup-a-repeat`: the baseline range becomes the union of
+  both A runs before the overlap test, and `drift` reports the raw A-to-repeat
+  median change as a noise floor.
 - A compatible comparison requires the same normalized workload, collector
   binary fingerprint and transport controls. Model/endpoint deployments may
   differ; this is a descriptive deployment comparison, not causal attribution.

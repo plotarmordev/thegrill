@@ -650,7 +650,22 @@ fn concurrent_waves_exclude_warmup_and_measure_answer_not_first_bytes() {
         .unwrap();
     successful(&compared);
     let c: Value = serde_json::from_slice(&compared.stdout).unwrap();
-    assert_eq!(c["changes"][0]["wave_latency_change_percent"], 0.0);
+    assert_eq!(
+        c["changes"][0].get("wave_latency_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(
+        c["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| {
+                reason
+                    .as_str()
+                    .unwrap()
+                    .starts_with("wave latency: ranges overlap")
+            })
+    );
     assert_eq!(c["baseline"][0]["planned_trials"], 2);
 }
 
@@ -834,7 +849,22 @@ fn fill_renders_distinct_lane_and_trial_salts_and_observe_plans_load() {
         .unwrap();
     successful(&output);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["changes"][0]["wave_latency_change_percent"], 0.0);
+    assert_eq!(
+        report["changes"][0].get("wave_latency_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(
+        report["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| {
+                reason
+                    .as_str()
+                    .unwrap()
+                    .starts_with("wave latency: ranges overlap")
+            })
+    );
 }
 
 #[test]
@@ -1906,7 +1936,10 @@ fn nonstreaming_decode_rate_is_null() {
         .output()
         .unwrap();
     successful(&human);
-    assert_eq!(human.stdout.iter().filter(|b| **b == b'%').count(), 2);
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("wave latency withheld"));
+    assert!(text.contains("decode rate n/a"));
+    assert!(!text.contains('%'));
 }
 
 #[test]
@@ -2066,7 +2099,22 @@ fn streaming_prefill_rate_uses_prompt_tokens_and_first_text_time() {
         .unwrap();
     assert!((median - (rates[1] + rates[2]) / 2.0).abs() < 1e-9);
     assert_eq!(report["baseline"], report["candidate"]);
-    assert_eq!(report["changes"][0]["prefill_rate_change_percent"], 0.0);
+    assert_eq!(
+        report["changes"][0].get("prefill_rate_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(
+        report["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| {
+                reason
+                    .as_str()
+                    .unwrap()
+                    .starts_with("prefill rate: ranges overlap")
+            })
+    );
 }
 
 #[test]
@@ -2102,7 +2150,30 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
         report["changes"][0].get("prefill_rate_change_percent"),
         Some(&Value::Null)
     );
-    assert!(report["changes"][0]["decode_rate_change_percent"].is_number());
+    assert_eq!(
+        report["changes"][0].get("decode_rate_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(
+        report["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| {
+                reason
+                    .as_str()
+                    .unwrap()
+                    .starts_with("decode rate: ranges overlap")
+            })
+    );
+    // Null for the cache rule, not for overlap: nothing withheld names prefill.
+    assert!(
+        !report["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().starts_with("prefill rate"))
+    );
 }
 
 #[test]
@@ -2207,4 +2278,538 @@ fn faster_first_text_has_positive_matched_prefill_rate_change() {
         let expected = report["changes"][0][field].as_f64().unwrap();
         assert!((actual - expected).abs() <= 0.005);
     }
+}
+
+fn spread_server(timings: &'static [(u64, u64, u64)]) -> Server {
+    Server::new(move |mut s, i, _| {
+        let (prefill_ms, decode_ms, tokens) = timings[i];
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(prefill_ms));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(decode_ms));
+        finish(&mut s, Some(tokens), Some(0));
+    })
+}
+
+#[test]
+fn comparison_nonoverlapping_ranges_use_measured_trials_and_lanes() {
+    let temp = Temp::new();
+    let server = spread_server(&[
+        (5, 5, 8),
+        (5, 5, 8),
+        (60, 60, 8),
+        (80, 80, 8),
+        (100, 100, 8),
+        (120, 120, 8),
+        (5, 5, 8),
+        (5, 5, 8),
+        (360, 360, 8),
+        (380, 380, 8),
+        (400, 400, 8),
+        (420, 420, 8),
+    ]);
+    let work = workload(2, 1, 2);
+    successful(&run(&temp, &server, "a", &work));
+    successful(&run(&temp, &server, "b", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for side in ["baseline", "candidate"] {
+        let summary = &report[side][0];
+        for (field, values) in [
+            ("wave_latency_us_range", "wave_latency_us"),
+            (
+                "achieved_completion_tokens_per_second_range",
+                "achieved_completion_tokens_per_second",
+            ),
+            (
+                "decode_tokens_per_second_range",
+                "lane_decode_tokens_per_second",
+            ),
+            (
+                "prefill_tokens_per_second_range",
+                "lane_prefill_tokens_per_second",
+            ),
+        ] {
+            let mut samples = Vec::new();
+            for value in summary[values].as_array().unwrap() {
+                if let Some(lanes) = value.as_array() {
+                    samples.extend(lanes.iter().filter_map(Value::as_f64));
+                } else {
+                    samples.push(value.as_f64().unwrap());
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            assert_eq!(
+                summary[field],
+                json!([samples[0], samples[samples.len() - 1]])
+            );
+        }
+    }
+    let a = &report["baseline"][0];
+    let b = &report["candidate"][0];
+    assert!(
+        a["wave_latency_us_range"][1].as_f64().unwrap()
+            < b["wave_latency_us_range"][0].as_f64().unwrap()
+    );
+    for (field, median) in [
+        ("wave_latency_change_percent", "median_wave_latency_us"),
+        (
+            "achieved_throughput_change_percent",
+            "median_achieved_completion_tokens_per_second",
+        ),
+        (
+            "decode_rate_change_percent",
+            "median_decode_tokens_per_second",
+        ),
+        (
+            "prefill_rate_change_percent",
+            "median_prefill_tokens_per_second",
+        ),
+    ] {
+        let expected = 100.0 * (b[median].as_f64().unwrap() / a[median].as_f64().unwrap() - 1.0);
+        assert!((report["changes"][0][field].as_f64().unwrap() - expected).abs() < 1e-9);
+    }
+    assert_eq!(report["changes"][0]["withheld"], json!([]));
+}
+
+#[test]
+fn comparison_overlapping_ranges_withhold_without_ineligibility() {
+    let temp = Temp::new();
+    let server = spread_server(&[(50, 50, 8), (400, 400, 8), (150, 150, 8), (300, 300, 8)]);
+    let work = workload(1, 0, 2);
+    successful(&run(&temp, &server, "a", &work));
+    successful(&run(&temp, &server, "b", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("cell: wave latency withheld; achieved throughput withheld; decode rate withheld; prefill rate withheld"));
+    let change = &report["changes"][0];
+    assert_eq!(change["eligible"], true);
+    assert_eq!(change["ineligibility_reasons"], json!([]));
+    for (name, field, range) in [
+        (
+            "wave latency",
+            "wave_latency_change_percent",
+            "wave_latency_us_range",
+        ),
+        (
+            "achieved throughput",
+            "achieved_throughput_change_percent",
+            "achieved_completion_tokens_per_second_range",
+        ),
+        (
+            "decode rate",
+            "decode_rate_change_percent",
+            "decode_tokens_per_second_range",
+        ),
+        (
+            "prefill rate",
+            "prefill_rate_change_percent",
+            "prefill_tokens_per_second_range",
+        ),
+    ] {
+        assert_eq!(change.get(field), Some(&Value::Null));
+        let a = &report["baseline"][0][range];
+        let b = &report["candidate"][0][range];
+        let (amin, amax, bmin, bmax) = (
+            a[0].as_f64().unwrap(),
+            a[1].as_f64().unwrap(),
+            b[0].as_f64().unwrap(),
+            b[1].as_f64().unwrap(),
+        );
+        assert!(amin <= bmax && bmin <= amax);
+        let reason = if name == "wave latency" {
+            format!(
+                "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
+                amin / 1_000_000.0,
+                amax / 1_000_000.0,
+                bmin / 1_000_000.0,
+                bmax / 1_000_000.0
+            )
+        } else {
+            format!("{name}: ranges overlap, {amin:.1}-{amax:.1} vs {bmin:.1}-{bmax:.1}")
+        };
+        assert!(
+            change["withheld"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason))
+        );
+        assert!(text.contains(&format!("  {reason}\n")));
+    }
+}
+
+#[test]
+fn comparison_incomplete_cell_ranges_are_explicit_null() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    successful(&run(&temp, &server, "run", &workload(1, 1, 1)));
+    fs::remove_file(temp.path("run/wave-000000/wave.json")).unwrap();
+    fs::remove_file(temp.path("run/session-000000/run.json")).unwrap();
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    for side in ["baseline", "candidate"] {
+        for field in [
+            "wave_latency_us_range",
+            "achieved_completion_tokens_per_second_range",
+            "decode_tokens_per_second_range",
+            "prefill_tokens_per_second_range",
+        ] {
+            assert_eq!(report[side][0].get(field), Some(&Value::Null));
+        }
+    }
+    assert_eq!(report["changes"][0]["eligible"], false);
+    assert_eq!(report["changes"][0]["withheld"], json!([]));
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(2));
+    let text = String::from_utf8(human.stdout).unwrap();
+    for reason in report["changes"][0]["ineligibility_reasons"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(text.contains(&format!("  {}\n", reason.as_str().unwrap())));
+    }
+}
+
+#[test]
+fn comparison_latency_change_survives_overlapping_throughput() {
+    let temp = Temp::new();
+    let server = spread_server(&[(100, 100, 1), (120, 120, 8), (300, 300, 1), (320, 320, 8)]);
+    let work = workload(1, 0, 2);
+    successful(&run(&temp, &server, "a", &work));
+    successful(&run(&temp, &server, "b", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let a = &report["baseline"][0];
+    let b = &report["candidate"][0];
+    assert!(
+        a["wave_latency_us_range"][1].as_f64().unwrap()
+            < b["wave_latency_us_range"][0].as_f64().unwrap()
+    );
+    let change = &report["changes"][0];
+    assert!(change["wave_latency_change_percent"].as_f64().unwrap() > 0.0);
+    assert_eq!(
+        change.get("achieved_throughput_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(change["withheld"].as_array().unwrap().iter().any(|reason| {
+        reason
+            .as_str()
+            .unwrap()
+            .starts_with("achieved throughput: ranges overlap")
+    }));
+    assert_eq!(change["eligible"], true);
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains(&format!(
+        "cell: wave latency {:+.2}%; achieved throughput withheld;",
+        change["wave_latency_change_percent"].as_f64().unwrap()
+    )));
+}
+
+#[test]
+fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
+    let temp = Temp::new();
+    let server = spread_server(&[(100, 100, 8), (150, 150, 8), (350, 350, 8)]);
+    let work = workload(1, 0, 1);
+    for name in ["a", "b", "a2"] {
+        successful(&run(&temp, &server, name, &work));
+    }
+    let ordinary = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&ordinary);
+    let ordinary: Value = serde_json::from_slice(&ordinary.stdout).unwrap();
+    assert_eq!(ordinary.get("reference"), Some(&Value::Null));
+    assert_eq!(ordinary.get("drift"), Some(&Value::Null));
+    for reference in ["a2", "b"] {
+        let output = cli()
+            .arg("compare")
+            .arg(temp.path("a"))
+            .arg(temp.path("b"))
+            .arg("--reference")
+            .arg(temp.path(reference))
+            .arg("--json")
+            .output()
+            .unwrap();
+        successful(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let change = &report["changes"][0];
+        assert_eq!(change["eligible"], true);
+        assert_eq!(change["ineligibility_reasons"], json!([]));
+        let human = cli()
+            .arg("compare")
+            .arg(temp.path("a"))
+            .arg(temp.path("b"))
+            .arg("--reference")
+            .arg(temp.path(reference))
+            .output()
+            .unwrap();
+        successful(&human);
+        let text = String::from_utf8(human.stdout).unwrap();
+        let mut drift_parts = Vec::new();
+        for (name, field, drift_field, median) in [
+            (
+                "wave latency",
+                "wave_latency_change_percent",
+                "wave_latency_percent",
+                "median_wave_latency_us",
+            ),
+            (
+                "achieved throughput",
+                "achieved_throughput_change_percent",
+                "achieved_throughput_percent",
+                "median_achieved_completion_tokens_per_second",
+            ),
+            (
+                "decode rate",
+                "decode_rate_change_percent",
+                "decode_rate_percent",
+                "median_decode_tokens_per_second",
+            ),
+            (
+                "prefill rate",
+                "prefill_rate_change_percent",
+                "prefill_rate_percent",
+                "median_prefill_tokens_per_second",
+            ),
+        ] {
+            let c = ordinary["changes"][0][field].as_f64().unwrap();
+            let d = report["drift"][0][drift_field].as_f64().unwrap();
+            let expected = 100.0
+                * (report["reference"][0][median].as_f64().unwrap()
+                    / report["baseline"][0][median].as_f64().unwrap()
+                    - 1.0);
+            assert!((d - expected).abs() < 1e-9);
+            assert!(c != 0.0);
+            // A and B alone are disjoint points; pooling the reference into the
+            // baseline range covers B, so the change is withheld as overlap.
+            assert_eq!(change.get(field), Some(&Value::Null));
+            let reason = change["withheld"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|w| {
+                    w.as_str()
+                        .filter(|w| w.starts_with(&format!("{name}: ranges overlap")))
+                })
+                .unwrap();
+            assert!(reason.ends_with("(baseline pooled with reference)"));
+            assert!(text.contains(&format!("  {reason}\n")));
+            drift_parts.push(format!("{name} {d:+.2}%"));
+        }
+        assert_eq!(report["drift"][0]["cell"], "cell");
+        assert!(text.contains(&format!("  reference drift: {}\n", drift_parts.join("; "))));
+    }
+}
+
+#[test]
+fn comparison_change_outside_pooled_reference_range_remains_present() {
+    let temp = Temp::new();
+    let server = spread_server(&[
+        (100, 100, 8),
+        (200, 200, 8),
+        (400, 400, 8),
+        (500, 500, 8),
+        (110, 110, 8),
+        (190, 190, 8),
+    ]);
+    let work = workload(1, 0, 2);
+    for name in ["a", "b", "a2"] {
+        successful(&run(&temp, &server, name, &work));
+    }
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--reference")
+        .arg(temp.path("a2"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--reference")
+        .arg(temp.path("a2"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    let mut change_parts = Vec::new();
+    let mut drift_parts = Vec::new();
+    for (name, field, drift_field, median, range) in [
+        (
+            "wave latency",
+            "wave_latency_change_percent",
+            "wave_latency_percent",
+            "median_wave_latency_us",
+            "wave_latency_us_range",
+        ),
+        (
+            "achieved throughput",
+            "achieved_throughput_change_percent",
+            "achieved_throughput_percent",
+            "median_achieved_completion_tokens_per_second",
+            "achieved_completion_tokens_per_second_range",
+        ),
+        (
+            "decode rate",
+            "decode_rate_change_percent",
+            "decode_rate_percent",
+            "median_decode_tokens_per_second",
+            "decode_tokens_per_second_range",
+        ),
+        (
+            "prefill rate",
+            "prefill_rate_change_percent",
+            "prefill_rate_percent",
+            "median_prefill_tokens_per_second",
+            "prefill_tokens_per_second_range",
+        ),
+    ] {
+        let a = &report["baseline"][0];
+        let b = &report["candidate"][0];
+        let a2 = &report["reference"][0];
+        assert!(
+            a[range][0].as_f64().unwrap() <= a2[range][1].as_f64().unwrap()
+                && a2[range][0].as_f64().unwrap() <= a[range][1].as_f64().unwrap()
+        );
+        let pooled_max = a[range][1]
+            .as_f64()
+            .unwrap()
+            .max(a2[range][1].as_f64().unwrap());
+        let pooled_min = a[range][0]
+            .as_f64()
+            .unwrap()
+            .min(a2[range][0].as_f64().unwrap());
+        assert!(
+            pooled_max < b[range][0].as_f64().unwrap()
+                || b[range][1].as_f64().unwrap() < pooled_min
+        );
+        let c = report["changes"][0][field].as_f64().unwrap();
+        let d = report["drift"][0][drift_field].as_f64().unwrap();
+        let baseline = a[median].as_f64().unwrap();
+        assert!((c - 100.0 * (b[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
+        assert!((d - 100.0 * (a2[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
+        change_parts.push(format!("{name} {c:+.2}%"));
+        drift_parts.push(format!("{name} {d:+.2}%"));
+    }
+    assert_eq!(report["changes"][0]["withheld"], json!([]));
+    assert!(text.contains(&format!(
+        "cell: {}\n  reference drift: {}\n",
+        change_parts.join("; "),
+        drift_parts.join("; ")
+    )));
+}
+
+#[test]
+fn comparison_reference_checks_workload_and_reports_absent_drift_metrics() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, _, _| {
+        header(&mut s, "application/json");
+        s.write_all(br#"{"choices":[{"message":{"content":"x"},"finish_reason":"length"}],"usage":{"prompt_tokens":4,"completion_tokens":8}}"#).unwrap();
+    });
+    let mut work = workload(1, 0, 1);
+    work["request"]["stream"] = json!(false);
+    successful(&run(&temp, &server, "a", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("a"))
+        .arg("--reference")
+        .arg(temp.path("a"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["drift"][0]["wave_latency_percent"], 0.0);
+    assert_eq!(report["drift"][0]["achieved_throughput_percent"], 0.0);
+    for field in ["decode_rate_percent", "prefill_rate_percent"] {
+        assert_eq!(report["drift"][0].get(field), Some(&Value::Null));
+    }
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("a"))
+        .arg("--reference")
+        .arg(temp.path("a"))
+        .output()
+        .unwrap();
+    successful(&human);
+    assert!(String::from_utf8(human.stdout).unwrap().contains(
+        "  reference drift: wave latency +0.00%; achieved throughput +0.00%; decode rate n/a; prefill rate n/a\n"
+    ));
+    work["cases"][0]["messages"][0]["content"] = json!("Different workload.");
+    successful(&run(&temp, &server, "other", &work));
+    let refused = cli()
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("a"))
+        .arg("--reference")
+        .arg(temp.path("other"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    assert!(
+        String::from_utf8(refused.stderr)
+            .unwrap()
+            .contains("incompatible workload")
+    );
 }
