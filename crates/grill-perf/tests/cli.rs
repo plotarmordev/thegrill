@@ -1042,6 +1042,34 @@ fn fill_wave_reservation_bound_counts_escaped_request_bytes() {
 }
 
 #[test]
+fn fill_body_at_the_request_cap_is_refused_before_any_run_directory() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["request"]["seed"] = Value::Null;
+    w["limits"]["wave_buffer_bytes"] = json!(8 * 1024 * 1024);
+    w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+    w["cases"][0]["fill"] = json!({"unit":"xxx","repeat":1000});
+    successful(&run(&temp, &server, "probe", &w));
+    let reservation = value(temp.path("probe").join("wave-000000/reservation.json"));
+    let base = reservation["requests"][0].as_str().unwrap().len() - 3000;
+    // Without seed or salt the admission sample equals the sent body, so this
+    // renders exactly 2 MiB; a wider interior lane would exceed the cap.
+    let cap = 2 * 1024 * 1024;
+    let repeat = (cap - base) / 3;
+    let pad = "y".repeat(cap - base - 3 * repeat);
+    w["cases"][0]["fill"]["repeat"] = json!(repeat);
+    w["cases"][0]["messages"][0]["content"] = json!(format!("{{fill}}{pad}"));
+    assert_eq!(run(&temp, &server, "cap", &w).status.code(), Some(1));
+    assert!(!temp.path("cap").exists());
+    w["cases"][0]["messages"][0]["content"] = json!(format!("{{fill}}{pad}y"));
+    w["cases"][0]["fill"]["repeat"] = json!(repeat - 1);
+    successful(&run(&temp, &server, "under", &w));
+    let reservation = value(temp.path("under").join("wave-000000/reservation.json"));
+    assert_eq!(reservation["requests"][0].as_str().unwrap().len(), cap - 2);
+}
+
+#[test]
 fn warm_prefix_protocol_reuses_primed_lane_salts_but_not_other_lanes() {
     let temp = Temp::new();
     let server = Server::new(|mut s, i, _| {
