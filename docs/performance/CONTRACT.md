@@ -12,8 +12,10 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 
 `request` declares `profile`, `stream`, `output: {tokens, mode}`, `cache`, and
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
-decimal sampling values. No other generation fields are sent or inferred.
-In particular, model-side thinking defaults are not silently overridden.
+decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
+and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
+No other generation fields are sent or inferred.
+Model-side thinking defaults are not overridden unless declared.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
 
 Each cell names a case, concurrency, warmup trial count and measured trial count.
@@ -59,12 +61,13 @@ observation immediately before its request is executed. It records:
 | `first_answer_text_us` | Dispatch to the first complete SSE event with nonempty `delta.content`. |
 | `settle_us` | Dispatch to completion or failure settlement, including collection/parse work. |
 | `capture_parse_us` | Accumulated elapsed intervals inside capture/parse sections; not process CPU time or server time. |
+| Derived per-stream decode tokens/s | For a complete streaming attempt with `completion_tokens = n >= 2`, `(n - 1) * 1_000_000 / (settle_us - first_generated_text_us)` when the first generated text time is present and settlement is later; otherwise null. Derived offline, not persisted in wave receipts. Settlement includes final `[DONE]`/usage frame parsing, making this slightly conservative relative to last-token timing. |
 
 Fragmented events become observable when their framing boundary arrives. Multiple
 events in one received chunk share its arrival observation. Gateway buffering,
 coalescing and client scheduling remain in these observations. Nonstreaming
 responses have completion latency but no fabricated first-text observation.
-No post-first-answer token-rate proxy or GPU/token timestamp is produced.
+A per-stream decode rate from first generated text to settlement is derived offline; no GPU/token timestamps are produced.
 
 Wave elapsed time is the span from the first collector dispatch to the last
 collector settlement. Dispatch spread is recorded. Only a fully eligible wave
@@ -206,6 +209,7 @@ token counts and eligibility issues. Equal caps alone do not establish equal wor
 Model and optional deployment declarations are shown separately. There is no
 combined quality/performance score, automatic winner, confidence interval or
 p95 estimate from three trials.
+Per-stream decode medians use eligible measured lanes under the same completeness gates; decode-rate changes also require matched ordered lane counts.
 
 A second execution session resets the client connection pool and introduces an
 unmeasured gap in server/cache state. Original warmup waves remain evidence but

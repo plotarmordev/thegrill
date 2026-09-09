@@ -12,6 +12,10 @@ struct StreamOptions {
     include_usage: bool,
 }
 #[derive(Serialize)]
+struct ChatTemplateKwargs {
+    thinking: bool,
+}
+#[derive(Serialize)]
 struct Body<'a> {
     model: &'a str,
     messages: &'a [Message],
@@ -23,6 +27,8 @@ struct Body<'a> {
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +71,7 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         seed: r
             .seed
             .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
+        chat_template_kwargs: r.thinking.map(|thinking| ChatTemplateKwargs { thinking }),
         stream_options: r.stream.then_some(StreamOptions {
             include_usage: true,
         }),

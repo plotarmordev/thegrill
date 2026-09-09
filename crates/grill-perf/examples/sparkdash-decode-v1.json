@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "name": "sparkdash-decode-v1",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": { "tokens": 400, "mode": "exact" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking": false
+  },
+  "limits": {
+    "total_ms": 360000,
+    "idle_ms": 60000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "structured",
+      "messages": [
+        { "role": "user", "content": "Count from 1 to 200. Output only the numbers, separated by spaces. No other text." }
+      ]
+    },
+    {
+      "id": "prose",
+      "messages": [
+        { "role": "user", "content": "Write a detailed step-by-step explanation of how a hash map works, including collision handling, resizing, and time complexity. Be thorough." }
+      ]
+    },
+    {
+      "id": "code",
+      "messages": [
+        { "role": "user", "content": "Output only Python source code. No comments, no docstrings, no markdown fences. Write functions clamp_00 through clamp_49. Each function is exactly:\ndef clamp_NN(x, lo=0, hi=1):\n    if x < lo:\n        return lo\n    if x > hi:\n        return hi\n    return x\nChange only the function name suffix (00, 01, … 49). One blank line between functions. No other text." }
+      ]
+    },
+    {
+      "id": "json",
+      "messages": [
+        { "role": "user", "content": "Emit only a JSON array of fake GPU metrics rows. Each object needs host, gpuIndex, utilPct, tempC, powerW, memUsedMb. Invent many rows. No markdown. Keep expanding the array." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "structured-1", "case": "structured", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "structured-2", "case": "structured", "concurrency": 2, "warmup_trials": 1, "trials": 3 },
+    { "id": "structured-4", "case": "structured", "concurrency": 4, "warmup_trials": 1, "trials": 3 },
+    { "id": "structured-8", "case": "structured", "concurrency": 8, "warmup_trials": 1, "trials": 3 },
+    { "id": "prose-1", "case": "prose", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "code-1", "case": "code", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "json-1", "case": "json", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}

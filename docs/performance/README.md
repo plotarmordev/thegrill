@@ -46,6 +46,10 @@ cell, and three measured trials. It caps output at 1,024 tokens; it does not
 pretend that a cap forces every server to emit exactly that many tokens.
 All warmup waves finish before any measured wave begins.
 
+[`sparkdash-decode-v1.json`](../../crates/grill-perf/examples/sparkdash-decode-v1.json) follows [MiaAI-Lab's sparkDash decode protocol](https://github.com/MiaAI-Lab/sparkDash) with its verbatim prompts and 72 requests per run.
+It needs a vLLM-compatible server whose chat template honors `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` (and `reasoning_tokens` where the server reports it) in the receipts, since the tool does not reject reasoning output.
+sparkDash appends a per-stream suffix to prompts above concurrency 1; this workload sends identical prompts, so cache mode `observe` permits prefix sharing across lanes. Use `reported-prefix-zero` when provider-reported zero-prefix evidence is required.
+
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
 concurrency 1 and 2, a 64-token cap, and nine requests per run.
@@ -110,6 +114,10 @@ verification rather than being repaired.
 - **Achieved completion throughput** uses complete provider-reported completion
   counts divided by that entire wave interval. It is not an answer-only token
   rate or a claim of steady-state server capacity.
+- **Per-stream decode rate** excludes prefill/TTFT and is defined to match the
+  sparkDash-comparable `(completion_tokens - 1) / (last - first)` rate. Settlement
+  stands in for last-token time and includes final `[DONE]`/usage frame parsing,
+  so this client-observed rate is slightly conservative.
 - **First body**, **first generated text** and **first answer text** are separate
   observations. Role-only events do not count as text; reasoning is generated
   text but not answer text. These are client observations, not GPU token times.

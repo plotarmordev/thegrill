@@ -127,6 +127,18 @@ pub fn throughput(attempts: &[Attempt], elapsed_us: u64) -> (bool, Option<u64>, 
         .map(|n| n as f64 * 1_000_000.0 / elapsed_us as f64);
     (eligible && rate.is_some(), tokens, rate)
 }
+fn decode_rate(attempt: &Attempt) -> Option<f64> {
+    if attempt.status != Status::Complete {
+        return None;
+    }
+    let tokens = attempt.usage.completion_tokens?;
+    let first = attempt.timing.first_generated_text_us?;
+    let settle = attempt.timing.settle_us;
+    if tokens < 2 || settle <= first {
+        return None;
+    }
+    Some((tokens - 1) as f64 * 1_000_000.0 / (settle - first) as f64)
+}
 pub struct Loaded {
     pub plan: Plan,
     pub waves: Vec<Option<Wave>>,
@@ -323,6 +335,7 @@ pub struct CellSummary {
     pub achieved_completion_tokens_per_second: Vec<Option<f64>>,
     pub median_wave_latency_us: Option<f64>,
     pub median_achieved_completion_tokens_per_second: Option<f64>,
+    pub median_decode_tokens_per_second: Option<f64>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
     pub reported_completion_tokens: Vec<Option<u64>>,
@@ -330,6 +343,7 @@ pub struct CellSummary {
     pub warmup_states: Vec<String>,
     pub all_declared_warmups_complete: bool,
     pub lane_completion_tokens: Vec<Vec<Option<u64>>>,
+    pub lane_decode_tokens_per_second: Vec<Vec<Option<f64>>>,
 }
 fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
@@ -406,6 +420,17 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                         .and_then(|w| w.achieved_completion_tokens_per_second)
                 })
                 .collect();
+            let decode_rates: Vec<Vec<_>> = pairs
+                .iter()
+                .map(|(spec, wave)| match wave {
+                    Some(w) => w
+                        .attempts
+                        .iter()
+                        .map(decode_rate)
+                        .collect(),
+                    None => vec![None; spec.concurrency as usize],
+                })
+                .collect();
             let complete = warmups_complete && eligible == cell.trials as usize
                 && run.history.count <= 1 && !run.history.open;
             CellSummary {
@@ -423,6 +448,12 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 } else {
                     None
                 },
+                median_decode_tokens_per_second: if complete {
+                    median(decode_rates.iter().flatten().flatten().copied().collect())
+                } else {
+                    None
+                },
+                lane_decode_tokens_per_second: decode_rates,
                 wave_latency_us: latencies,
                 achieved_completion_tokens_per_second: rates,
                 reported_completion_tokens: pairs
@@ -470,6 +501,7 @@ pub struct CellChange {
     pub ineligibility_reasons: Vec<String>,
     pub wave_latency_change_percent: Option<f64>,
     pub achieved_throughput_change_percent: Option<f64>,
+    pub decode_rate_change_percent: Option<f64>,
 }
 #[derive(Serialize)]
 pub struct Comparison {
@@ -539,6 +571,14 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     change(
                         a.median_achieved_completion_tokens_per_second,
                         b.median_achieved_completion_tokens_per_second,
+                    )
+                } else {
+                    None
+                },
+                decode_rate_change_percent: if same {
+                    change(
+                        a.median_decode_tokens_per_second,
+                        b.median_decode_tokens_per_second,
                     )
                 } else {
                     None

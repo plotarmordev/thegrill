@@ -53,6 +53,9 @@ pub struct RequestSettings {
     pub temperature_milli: Option<u16>,
     pub top_p_milli: Option<u16>,
     pub seed: Option<i64>,
+    // Omitted when absent so plans recorded before this field keep their digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -126,9 +129,11 @@ impl Workload {
             return Err("invalid output budget or sampling controls".into());
         }
         if r.profile == Profile::PortableChatV1
-            && (r.output.mode == OutputMode::Exact || r.cache != Cache::Observe)
+            && (r.output.mode == OutputMode::Exact
+                || r.cache != Cache::Observe
+                || r.thinking.is_some())
         {
-            return Err("exact output and required prefix evidence need the explicit vllm-fixed-v1 request profile".into());
+            return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
         }
         let l = &self.limits;
         if l.total_ms == 0
