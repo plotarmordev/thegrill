@@ -78,6 +78,7 @@ observation immediately before its request is executed. It records:
 | `settle_us` | Dispatch to completion or failure settlement, including collection/parse work. |
 | `capture_parse_us` | Accumulated elapsed intervals inside capture/parse sections; not process CPU time or server time. |
 | Derived per-stream decode tokens/s | For a complete streaming attempt with `completion_tokens = n >= 2`, `(n - 1) * 1_000_000 / (settle_us - first_generated_text_us)` when the first generated text time is present and settlement is later; otherwise null. Derived offline, not persisted in wave receipts. Settlement includes final `[DONE]`/usage frame parsing, making this slightly conservative relative to last-token timing. |
+| Derived per-stream prefill tokens/s | For a complete streaming attempt with `prompt_tokens = p >= 1`, `first_generated_text_us = t > 0`, and provider-reported cached prompt tokens absent or zero, `p * 1_000_000 / t`; otherwise null. Matches sparkDash prompt_tokens/TTFT, including queueing and first-token generation. Derived offline, not persisted in wave receipts; absent optional summary medians and changes are omitted from JSON. |
 
 Fragmented events become observable when their framing boundary arrives. Multiple
 events in one received chunk share its arrival observation. Gateway buffering,
@@ -226,6 +227,7 @@ Model and optional deployment declarations are shown separately. There is no
 combined quality/performance score, automatic winner, confidence interval or
 p95 estimate from three trials.
 Per-stream decode medians use eligible measured lanes under the same completeness gates; decode-rate changes also require matched ordered lane counts.
+Per-stream prefill medians use the same completeness gates; prefill-rate changes additionally require all ordered lane prompt counts to be present and equal, without changing other metrics' eligibility.
 
 A second execution session resets the client connection pool and introduces an
 unmeasured gap in server/cache state. Original warmup waves remain evidence but

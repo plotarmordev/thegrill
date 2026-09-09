@@ -88,6 +88,9 @@ fn execute(cli: Cli) -> model::Result<bool> {
                             if let Some(decode) = change.decode_rate_change_percent {
                                 print!("; decode rate {decode:+.2}%");
                             }
+                            if let Some(prefill) = change.prefill_rate_change_percent {
+                                print!("; prefill rate {prefill:+.2}%");
+                            }
                             println!();
                         }
                         _ => println!(

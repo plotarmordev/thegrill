@@ -131,6 +131,9 @@ verification rather than being repaired.
   sparkDash-comparable `(completion_tokens - 1) / (last - first)` rate. Settlement
   stands in for last-token time and includes final `[DONE]`/usage frame parsing,
   so this client-observed rate is slightly conservative.
+- **Per-stream prefill rate** is defined to match sparkDash `prompt_tokens / TTFT`,
+  from dispatch to first generated text, including queueing and first-token
+  generation. It is null when the provider reports nonzero cached prompt tokens.
 - **First body**, **first generated text** and **first answer text** are separate
   observations. Role-only events do not count as text; reasoning is generated
   text but not answer text. These are client observations, not GPU token times.

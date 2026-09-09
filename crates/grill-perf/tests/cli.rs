@@ -1914,11 +1914,216 @@ fn faster_streaming_decode_has_positive_matched_rate_change() {
         .filter_map(|word| word.trim_end_matches(';').strip_suffix('%'))
         .map(|number| number.parse().unwrap())
         .collect();
-    assert_eq!(percentages.len(), 3);
+    assert_eq!(percentages.len(), 4);
     for (actual, field) in percentages.iter().zip([
         "wave_latency_change_percent",
         "achieved_throughput_change_percent",
         "decode_rate_change_percent",
+    ]) {
+        let expected = report["changes"][0][field].as_f64().unwrap();
+        assert!((actual - expected).abs() <= 0.005);
+    }
+}
+
+#[test]
+fn streaming_prefill_rate_uses_prompt_tokens_and_first_text_time() {
+    let temp = Temp::new();
+    let interval = Duration::from_millis(150);
+    let server = Server::new(move |mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(if i < 2 {
+            Duration::from_millis(30)
+        } else {
+            interval
+        });
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), (i % 2 == 0).then_some(0));
+    });
+    successful(&run(&temp, &server, "run", &workload(2, 1, 2)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["baseline"][0]["lane_prompt_tokens"],
+        json!([[4, 4], [4, 4]])
+    );
+    let lanes = report["baseline"][0]["lane_prefill_tokens_per_second"]
+        .as_array()
+        .unwrap();
+    assert_eq!(lanes.len(), 2);
+    let mut rates = Vec::new();
+    for (trial, values) in lanes.iter().enumerate() {
+        let receipt = wave(&temp, "run", trial + 1);
+        let values = values.as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        for (lane, value) in values.iter().enumerate() {
+            let rate = value.as_f64().unwrap();
+            let attempt = &receipt["attempts"][lane];
+            let tokens = attempt["usage"]["prompt_tokens"].as_u64().unwrap();
+            let first = attempt["timing"]["first_generated_text_us"]
+                .as_u64()
+                .unwrap();
+            let expected = tokens as f64 * 1_000_000.0 / first as f64;
+            assert!((rate - expected).abs() < 1e-9);
+            let paced = tokens as f64 / interval.as_secs_f64();
+            assert!(rate > paced * 0.5 && rate < paced * 1.5, "{rate}");
+            rates.push(rate);
+        }
+    }
+    rates.sort_by(f64::total_cmp);
+    let median = report["baseline"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((median - (rates[1] + rates[2]) / 2.0).abs() < 1e-9);
+    assert_eq!(report["baseline"], report["candidate"]);
+    assert_eq!(report["changes"][0]["prefill_rate_change_percent"], 0.0);
+}
+
+#[test]
+fn cached_prompt_tokens_withhold_prefill_rate() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, _, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(30));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), Some(1));
+    });
+    successful(&run(&temp, &server, "run", &workload(1, 0, 1)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["baseline"][0]["lane_prompt_tokens"],
+        json!([[4]])
+    );
+    assert_eq!(
+        report["baseline"][0]["lane_prefill_tokens_per_second"],
+        json!([[null]])
+    );
+    assert!(
+        report["baseline"][0]
+            .get("median_prefill_tokens_per_second")
+            .is_none()
+    );
+    assert!(
+        report["changes"][0]
+            .get("prefill_rate_change_percent")
+            .is_none()
+    );
+    assert!(report["changes"][0]["decode_rate_change_percent"].is_number());
+}
+
+#[test]
+fn unequal_prompt_tokens_withhold_only_prefill_rate_change() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(30));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        frame(
+            &mut s,
+            json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":if i == 0 { 4 } else { 5 },"completion_tokens":8}}),
+        );
+        s.write_all(b"data: [DONE]\n\n").unwrap();
+    });
+    let work = workload(1, 0, 1);
+    successful(&run(&temp, &server, "baseline", &work));
+    successful(&run(&temp, &server, "candidate", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["baseline"][0]["lane_prompt_tokens"], json!([[4]]));
+    assert_eq!(report["candidate"][0]["lane_prompt_tokens"], json!([[5]]));
+    for side in ["baseline", "candidate"] {
+        assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
+    }
+    let change = &report["changes"][0];
+    assert!(change.get("prefill_rate_change_percent").is_none());
+    assert_eq!(change["eligible"], true);
+    assert_eq!(change["observed_output_amounts_match"], true);
+    assert_eq!(change["ineligibility_reasons"], json!([]));
+    for field in [
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+    ] {
+        assert!(change[field].is_number(), "{field}");
+    }
+}
+
+#[test]
+fn faster_first_text_has_positive_matched_prefill_rate_change() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), None);
+    });
+    let work = workload(1, 0, 1);
+    successful(&run(&temp, &server, "baseline", &work));
+    successful(&run(&temp, &server, "candidate", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let change = report["changes"][0]["prefill_rate_change_percent"]
+        .as_f64()
+        .unwrap();
+    assert!(change > 0.0, "{change}");
+    let baseline = report["baseline"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    let candidate = report["candidate"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((change - 100.0 * (candidate / baseline - 1.0)).abs() < 1e-9);
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    let percentages: Vec<f64> = text
+        .split_whitespace()
+        .filter_map(|word| word.trim_end_matches(';').strip_suffix('%'))
+        .map(|number| number.parse().unwrap())
+        .collect();
+    assert_eq!(percentages.len(), 4);
+    for (actual, field) in percentages.iter().zip([
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+        "prefill_rate_change_percent",
     ]) {
         let expected = report["changes"][0][field].as_f64().unwrap();
         assert!((actual - expected).abs() <= 0.005);

@@ -139,6 +139,19 @@ fn decode_rate(attempt: &Attempt) -> Option<f64> {
     }
     Some((tokens - 1) as f64 * 1_000_000.0 / (settle - first) as f64)
 }
+fn prefill_rate(attempt: &Attempt) -> Option<f64> {
+    if attempt.status != Status::Complete
+        || attempt.usage.cached_prompt_tokens.is_some_and(|n| n > 0)
+    {
+        return None;
+    }
+    let tokens = attempt.usage.prompt_tokens?;
+    let first = attempt.timing.first_generated_text_us?;
+    if tokens == 0 || first == 0 {
+        return None;
+    }
+    Some(tokens as f64 * 1_000_000.0 / first as f64)
+}
 pub struct Loaded {
     pub plan: Plan,
     pub waves: Vec<Option<Wave>>,
@@ -336,6 +349,8 @@ pub struct CellSummary {
     pub median_wave_latency_us: Option<f64>,
     pub median_achieved_completion_tokens_per_second: Option<f64>,
     pub median_decode_tokens_per_second: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_prefill_tokens_per_second: Option<f64>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
     pub reported_completion_tokens: Vec<Option<u64>>,
@@ -344,6 +359,8 @@ pub struct CellSummary {
     pub all_declared_warmups_complete: bool,
     pub lane_completion_tokens: Vec<Vec<Option<u64>>>,
     pub lane_decode_tokens_per_second: Vec<Vec<Option<f64>>>,
+    pub lane_prompt_tokens: Vec<Vec<Option<u64>>>,
+    pub lane_prefill_tokens_per_second: Vec<Vec<Option<f64>>>,
 }
 fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
@@ -431,6 +448,13 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                     None => vec![None; spec.concurrency as usize],
                 })
                 .collect();
+            let prefill_rates: Vec<Vec<_>> = pairs
+                .iter()
+                .map(|(spec, wave)| match wave {
+                    Some(w) => w.attempts.iter().map(prefill_rate).collect(),
+                    None => vec![None; spec.concurrency as usize],
+                })
+                .collect();
             let complete = warmups_complete && eligible == cell.trials as usize
                 && run.history.count <= 1 && !run.history.open;
             CellSummary {
@@ -454,6 +478,12 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                     None
                 },
                 lane_decode_tokens_per_second: decode_rates,
+                median_prefill_tokens_per_second: if complete {
+                    median(prefill_rates.iter().flatten().flatten().copied().collect())
+                } else {
+                    None
+                },
+                lane_prefill_tokens_per_second: prefill_rates,
                 wave_latency_us: latencies,
                 achieved_completion_tokens_per_second: rates,
                 reported_completion_tokens: pairs
@@ -489,6 +519,13 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                         None => vec![None; spec.concurrency as usize],
                     })
                     .collect(),
+                lane_prompt_tokens: pairs
+                    .iter()
+                    .map(|(spec, wave)| match wave {
+                        Some(w) => w.attempts.iter().map(|a| a.usage.prompt_tokens).collect(),
+                        None => vec![None; spec.concurrency as usize],
+                    })
+                    .collect(),
             }
         })
         .collect()
@@ -502,6 +539,8 @@ pub struct CellChange {
     pub wave_latency_change_percent: Option<f64>,
     pub achieved_throughput_change_percent: Option<f64>,
     pub decode_rate_change_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_rate_change_percent: Option<f64>,
 }
 #[derive(Serialize)]
 pub struct Comparison {
@@ -579,6 +618,17 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     change(
                         a.median_decode_tokens_per_second,
                         b.median_decode_tokens_per_second,
+                    )
+                } else {
+                    None
+                },
+                prefill_rate_change_percent: if same
+                    && a.lane_prompt_tokens.iter().flatten().all(Option::is_some)
+                    && a.lane_prompt_tokens == b.lane_prompt_tokens
+                {
+                    change(
+                        a.median_prefill_tokens_per_second,
+                        b.median_prefill_tokens_per_second,
                     )
                 } else {
                     None
