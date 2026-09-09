@@ -46,6 +46,9 @@ cell, and three measured trials. It caps output at 1,024 tokens; it does not
 pretend that a cap forces every server to emit exactly that many tokens.
 All warmup waves finish before any measured wave begins.
 
+[`sparkdash-decode-v1.json`](../../crates/grill-perf/examples/sparkdash-decode-v1.json) follows [MiaAI-Lab's sparkDash decode protocol](https://github.com/MiaAI-Lab/sparkDash) with its verbatim prompts and 72 requests per run; it needs a vLLM-compatible server that accepts `chat_template_kwargs`.
+Cache mode `observe` permits prefix sharing across lanes; `reported-prefix-zero` is available when provider-reported zero-prefix evidence is required.
+
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
 concurrency 1 and 2, a 64-token cap, and nine requests per run.
