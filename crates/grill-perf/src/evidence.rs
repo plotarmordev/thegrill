@@ -350,6 +350,10 @@ pub struct CellSummary {
     pub median_achieved_completion_tokens_per_second: Option<f64>,
     pub median_decode_tokens_per_second: Option<f64>,
     pub median_prefill_tokens_per_second: Option<f64>,
+    pub wave_latency_us_range: Option<[f64; 2]>,
+    pub achieved_completion_tokens_per_second_range: Option<[f64; 2]>,
+    pub decode_tokens_per_second_range: Option<[f64; 2]>,
+    pub prefill_tokens_per_second_range: Option<[f64; 2]>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
     pub reported_completion_tokens: Vec<Option<u64>>,
@@ -372,6 +376,12 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     } else {
         values[middle]
     })
+}
+fn range(values: &[f64]) -> Option<[f64; 2]> {
+    let first = *values.first()?;
+    Some(values.iter().fold([first, first], |[min, max], &value| {
+        [min.min(value), max.max(value)]
+    }))
 }
 pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
     let warmups_complete = run
@@ -456,32 +466,30 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 .collect();
             let complete = warmups_complete && eligible == cell.trials as usize
                 && run.history.count <= 1 && !run.history.open;
+            let (latency_values, rate_values, decode_values, prefill_values) = if complete {
+                (
+                    latencies.iter().flatten().map(|n| *n as f64).collect::<Vec<_>>(),
+                    rates.iter().flatten().copied().collect::<Vec<_>>(),
+                    decode_rates.iter().flatten().flatten().copied().collect::<Vec<_>>(),
+                    prefill_rates.iter().flatten().flatten().copied().collect::<Vec<_>>(),
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
             CellSummary {
                 cell: cell.id.clone(),
                 planned_trials: cell.trials,
                 observed_trials: observed,
                 eligible_trials: eligible,
-                median_wave_latency_us: if complete {
-                    median(latencies.iter().flatten().map(|n| *n as f64).collect())
-                } else {
-                    None
-                },
-                median_achieved_completion_tokens_per_second: if complete {
-                    median(rates.iter().flatten().copied().collect())
-                } else {
-                    None
-                },
-                median_decode_tokens_per_second: if complete {
-                    median(decode_rates.iter().flatten().flatten().copied().collect())
-                } else {
-                    None
-                },
+                wave_latency_us_range: range(&latency_values),
+                achieved_completion_tokens_per_second_range: range(&rate_values),
+                decode_tokens_per_second_range: range(&decode_values),
+                prefill_tokens_per_second_range: range(&prefill_values),
+                median_wave_latency_us: median(latency_values),
+                median_achieved_completion_tokens_per_second: median(rate_values),
+                median_decode_tokens_per_second: median(decode_values),
                 lane_decode_tokens_per_second: decode_rates,
-                median_prefill_tokens_per_second: if complete {
-                    median(prefill_rates.iter().flatten().flatten().copied().collect())
-                } else {
-                    None
-                },
+                median_prefill_tokens_per_second: median(prefill_values),
                 lane_prefill_tokens_per_second: prefill_rates,
                 wave_latency_us: latencies,
                 achieved_completion_tokens_per_second: rates,
@@ -535,6 +543,7 @@ pub struct CellChange {
     pub eligible: bool,
     pub observed_output_amounts_match: bool,
     pub ineligibility_reasons: Vec<String>,
+    pub withheld: Vec<String>,
     pub wave_latency_change_percent: Option<f64>,
     pub achieved_throughput_change_percent: Option<f64>,
     pub decode_rate_change_percent: Option<f64>,
@@ -592,6 +601,28 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
             if !same {
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
+            let mut withheld = Vec::new();
+            let mut matched_change = |name: &str, value: Option<f64>,
+                                      a: Option<[f64; 2]>, b: Option<[f64; 2]>| {
+                let value = value.filter(|_| same)?;
+                let (a, b) = a.zip(b)?;
+                if a[1] < b[0] || b[1] < a[0] {
+                    return Some(value);
+                }
+                withheld.push(if name == "wave latency" {
+                    format!(
+                        "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
+                        a[0] / 1_000_000.0, a[1] / 1_000_000.0,
+                        b[0] / 1_000_000.0, b[1] / 1_000_000.0
+                    )
+                } else {
+                    format!(
+                        "{name}: ranges overlap, {:.1}-{:.1} vs {:.1}-{:.1}",
+                        a[0], a[1], b[0], b[1]
+                    )
+                });
+                None
+            };
             CellChange {
                 cell: a.cell.clone(),
                 eligible: same
@@ -599,35 +630,31 @@ pub fn compare(a: &Path, b: &Path) -> Result<Comparison> {
                     && b.median_wave_latency_us.is_some(),
                 observed_output_amounts_match: same,
                 ineligibility_reasons: reasons,
-                wave_latency_change_percent: if same {
-                    change(a.median_wave_latency_us, b.median_wave_latency_us)
-                } else {
-                    None
-                },
-                achieved_throughput_change_percent: if same {
+                wave_latency_change_percent: matched_change(
+                    "wave latency",
+                    change(a.median_wave_latency_us, b.median_wave_latency_us),
+                    a.wave_latency_us_range, b.wave_latency_us_range,
+                ),
+                achieved_throughput_change_percent: matched_change(
+                    "achieved throughput",
                     change(
                         a.median_achieved_completion_tokens_per_second,
                         b.median_achieved_completion_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
-                decode_rate_change_percent: if same {
-                    change(
-                        a.median_decode_tokens_per_second,
-                        b.median_decode_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
-                prefill_rate_change_percent: if same {
-                    change(
-                        a.median_prefill_tokens_per_second,
-                        b.median_prefill_tokens_per_second,
-                    )
-                } else {
-                    None
-                },
+                    ),
+                    a.achieved_completion_tokens_per_second_range,
+                    b.achieved_completion_tokens_per_second_range,
+                ),
+                decode_rate_change_percent: matched_change(
+                    "decode rate",
+                    change(a.median_decode_tokens_per_second, b.median_decode_tokens_per_second),
+                    a.decode_tokens_per_second_range, b.decode_tokens_per_second_range,
+                ),
+                prefill_rate_change_percent: matched_change(
+                    "prefill rate",
+                    change(a.median_prefill_tokens_per_second, b.median_prefill_tokens_per_second),
+                    a.prefill_tokens_per_second_range, b.prefill_tokens_per_second_range,
+                ),
+                withheld,
             }
         })
         .collect();

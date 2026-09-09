@@ -76,28 +76,24 @@ fn execute(cli: Cli) -> model::Result<bool> {
             } else {
                 println!("Descriptive deployment comparison; not a causal or capacity verdict.");
                 for change in &comparison.changes {
-                    match (
-                        change.wave_latency_change_percent,
-                        change.achieved_throughput_change_percent,
-                    ) {
-                        (Some(latency), Some(rate)) => {
-                            print!(
-                                "{}: wave latency {latency:+.2}%; achieved throughput {rate:+.2}%",
-                                change.cell
-                            );
-                            if let Some(decode) = change.decode_rate_change_percent {
-                                print!("; decode rate {decode:+.2}%");
-                            }
-                            if let Some(prefill) = change.prefill_rate_change_percent {
-                                print!("; prefill rate {prefill:+.2}%");
-                            }
-                            println!();
+                    print!("{}: ", change.cell);
+                    for (index, (name, value)) in [
+                        ("wave latency", change.wave_latency_change_percent),
+                        ("achieved throughput", change.achieved_throughput_change_percent),
+                        ("decode rate", change.decode_rate_change_percent),
+                        ("prefill rate", change.prefill_rate_change_percent),
+                    ].into_iter().enumerate() {
+                        if index > 0 {
+                            print!("; ");
                         }
-                        _ => println!(
-                            "{}: {}",
-                            change.cell,
-                            change.ineligibility_reasons.join("; ")
-                        ),
+                        match value {
+                            Some(value) => print!("{name} {value:+.2}%"),
+                            None => print!("{name} withheld"),
+                        }
+                    }
+                    println!();
+                    for reason in change.withheld.iter().chain(&change.ineligibility_reasons) {
+                        println!("  {reason}");
                     }
                 }
             }

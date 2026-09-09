@@ -64,7 +64,7 @@ target/release/grill-perf compare results/setup-a results/setup-b --json
 | **Combined tokens/sec** | Tokens produced per second across the whole group, as reported by the server |
 | **Decode tokens/sec** | Per-stream rate after the first token, defined to match sparkDash |
 | **Prefill tokens/sec** | Prompt tokens per second to the first token, defined to match sparkDash |
-| **Change** | The difference between the two saved runs, shown only when the runs are comparable |
+| **Change** | The difference between the two saved runs, shown only when the runs are comparable and only when the two runs' ranges do not overlap |
 
 <details>
 <summary><strong>How to avoid misleading speed comparisons</strong></summary>

@@ -237,6 +237,15 @@ outcomes also withhold medians. `changes[].ineligibility_reasons` explains side
 specific evidence issues and missing/unequal paired lane counts in both CLI and
 JSON, rather than requiring users to infer why a change is absent.
 
+Each complete cell reports min/max ranges alongside its medians: trial-level
+wave latency and achieved throughput, and all eligible measured lanes for decode
+and prefill rates. A matched percentage is reported only when the two ranges do
+not overlap (`a.max < b.min || b.max < a.min`); touching endpoints overlap.
+`changes[].withheld` records each overlap with both ranges, using seconds with
+two decimals for latency and tokens/s with one decimal for rates. Withholding
+for spread does not change `eligible` or `ineligibility_reasons`, which describe
+run comparability. Absent scalars and ranges are explicit JSON nulls.
+
 ## Validation
 
 Run the real CLI fixture regressions and strict package checks:
