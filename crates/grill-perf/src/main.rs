@@ -82,10 +82,16 @@ fn execute(cli: Cli) -> model::Result<bool> {
                     print!("{}: ", change.cell);
                     for (index, (name, value)) in [
                         ("wave latency", change.wave_latency_change_percent),
-                        ("achieved throughput", change.achieved_throughput_change_percent),
+                        (
+                            "achieved throughput",
+                            change.achieved_throughput_change_percent,
+                        ),
                         ("decode rate", change.decode_rate_change_percent),
                         ("prefill rate", change.prefill_rate_change_percent),
-                    ].into_iter().enumerate() {
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
                         if index > 0 {
                             print!("; ");
                         }
@@ -103,7 +109,10 @@ fn execute(cli: Cli) -> model::Result<bool> {
                             ("achieved throughput", drift.achieved_throughput_percent),
                             ("decode rate", drift.decode_rate_percent),
                             ("prefill rate", drift.prefill_rate_percent),
-                        ].into_iter().enumerate() {
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
                             if index > 0 {
                                 print!("; ");
                             }

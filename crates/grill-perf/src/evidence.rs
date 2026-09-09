@@ -597,20 +597,26 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
     let candidate = summarize(&right);
     let reference = reference.as_ref().map(summarize);
     let drift: Option<Vec<Drift>> = reference.as_ref().map(|reference| {
-        baseline.iter().zip(reference).map(|(a, a2)| Drift {
-            cell: a.cell.clone(),
-            wave_latency_percent: change(a.median_wave_latency_us, a2.median_wave_latency_us),
-            achieved_throughput_percent: change(
-                a.median_achieved_completion_tokens_per_second,
-                a2.median_achieved_completion_tokens_per_second,
-            ),
-            decode_rate_percent: change(
-                a.median_decode_tokens_per_second, a2.median_decode_tokens_per_second,
-            ),
-            prefill_rate_percent: change(
-                a.median_prefill_tokens_per_second, a2.median_prefill_tokens_per_second,
-            ),
-        }).collect()
+        baseline
+            .iter()
+            .zip(reference)
+            .map(|(a, a2)| Drift {
+                cell: a.cell.clone(),
+                wave_latency_percent: change(a.median_wave_latency_us, a2.median_wave_latency_us),
+                achieved_throughput_percent: change(
+                    a.median_achieved_completion_tokens_per_second,
+                    a2.median_achieved_completion_tokens_per_second,
+                ),
+                decode_rate_percent: change(
+                    a.median_decode_tokens_per_second,
+                    a2.median_decode_tokens_per_second,
+                ),
+                prefill_rate_percent: change(
+                    a.median_prefill_tokens_per_second,
+                    a2.median_prefill_tokens_per_second,
+                ),
+            })
+            .collect()
     });
     let changes = baseline
         .iter()
@@ -634,8 +640,10 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
             let mut withheld = Vec::new();
-            let mut matched_change = |name: &str, value: Option<f64>,
-                                      a: Option<[f64; 2]>, b: Option<[f64; 2]>,
+            let mut matched_change = |name: &str,
+                                      value: Option<f64>,
+                                      a: Option<[f64; 2]>,
+                                      b: Option<[f64; 2]>,
                                       drift: Option<f64>| {
                 let value = value.filter(|_| same)?;
                 let (a, b) = a.zip(b)?;
@@ -644,8 +652,10 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     withheld.push(if name == "wave latency" {
                         format!(
                             "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
-                            a[0] / 1_000_000.0, a[1] / 1_000_000.0,
-                            b[0] / 1_000_000.0, b[1] / 1_000_000.0
+                            a[0] / 1_000_000.0,
+                            a[1] / 1_000_000.0,
+                            b[0] / 1_000_000.0,
+                            b[1] / 1_000_000.0
                         )
                     } else {
                         format!(
@@ -672,7 +682,8 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                 wave_latency_change_percent: matched_change(
                     "wave latency",
                     change(a.median_wave_latency_us, b.median_wave_latency_us),
-                    a.wave_latency_us_range, b.wave_latency_us_range,
+                    a.wave_latency_us_range,
+                    b.wave_latency_us_range,
                     drift.and_then(|d| d.wave_latency_percent),
                 ),
                 achieved_throughput_change_percent: matched_change(
@@ -687,14 +698,22 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                 ),
                 decode_rate_change_percent: matched_change(
                     "decode rate",
-                    change(a.median_decode_tokens_per_second, b.median_decode_tokens_per_second),
-                    a.decode_tokens_per_second_range, b.decode_tokens_per_second_range,
+                    change(
+                        a.median_decode_tokens_per_second,
+                        b.median_decode_tokens_per_second,
+                    ),
+                    a.decode_tokens_per_second_range,
+                    b.decode_tokens_per_second_range,
                     drift.and_then(|d| d.decode_rate_percent),
                 ),
                 prefill_rate_change_percent: matched_change(
                     "prefill rate",
-                    change(a.median_prefill_tokens_per_second, b.median_prefill_tokens_per_second),
-                    a.prefill_tokens_per_second_range, b.prefill_tokens_per_second_range,
+                    change(
+                        a.median_prefill_tokens_per_second,
+                        b.median_prefill_tokens_per_second,
+                    ),
+                    a.prefill_tokens_per_second_range,
+                    b.prefill_tokens_per_second_range,
                     drift.and_then(|d| d.prefill_rate_percent),
                 ),
                 withheld,
