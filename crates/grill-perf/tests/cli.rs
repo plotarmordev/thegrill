@@ -737,7 +737,6 @@ fn explicit_thinking_false_is_sent_on_every_request() {
     assert_eq!(seen.len(), 4);
     for body in seen {
         assert_eq!(body["chat_template_kwargs"]["thinking"], false);
-        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
     }
 }
 

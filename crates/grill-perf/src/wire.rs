@@ -14,7 +14,6 @@ struct StreamOptions {
 #[derive(Serialize)]
 struct ChatTemplateKwargs {
     thinking: bool,
-    enable_thinking: bool,
 }
 #[derive(Serialize)]
 struct Body<'a> {
@@ -106,10 +105,7 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         seed: r
             .seed
             .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
-        chat_template_kwargs: r.thinking.map(|thinking| ChatTemplateKwargs {
-            thinking,
-            enable_thinking: thinking,
-        }),
+        chat_template_kwargs: r.thinking.map(|thinking| ChatTemplateKwargs { thinking }),
         stream_options: r.stream.then_some(StreamOptions {
             include_usage: true,
         }),

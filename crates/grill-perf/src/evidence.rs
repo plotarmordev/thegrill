@@ -349,7 +349,6 @@ pub struct CellSummary {
     pub median_wave_latency_us: Option<f64>,
     pub median_achieved_completion_tokens_per_second: Option<f64>,
     pub median_decode_tokens_per_second: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub median_prefill_tokens_per_second: Option<f64>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
@@ -539,7 +538,6 @@ pub struct CellChange {
     pub wave_latency_change_percent: Option<f64>,
     pub achieved_throughput_change_percent: Option<f64>,
     pub decode_rate_change_percent: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prefill_rate_change_percent: Option<f64>,
 }
 #[derive(Serialize)]
