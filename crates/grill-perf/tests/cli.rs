@@ -1936,7 +1936,10 @@ fn nonstreaming_decode_rate_is_null() {
         .output()
         .unwrap();
     successful(&human);
-    assert_eq!(human.stdout.iter().filter(|b| **b == b'%').count(), 2);
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("wave latency withheld"));
+    assert!(text.contains("decode rate n/a"));
+    assert!(!text.contains('%'));
 }
 
 #[test]

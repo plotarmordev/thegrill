@@ -97,7 +97,10 @@ fn execute(cli: Cli) -> model::Result<bool> {
                         }
                         match value {
                             Some(value) => print!("{name} {value:+.2}%"),
-                            None => print!("{name} withheld"),
+                            None if change.withheld.iter().any(|w| w.starts_with(name)) => {
+                                print!("{name} withheld")
+                            }
+                            None => print!("{name} n/a"),
                         }
                     }
                     println!();
