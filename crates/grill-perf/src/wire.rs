@@ -71,19 +71,26 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
             case.messages
                 .iter()
                 .map(|message| {
-                    let content = message.content.replace("{salt}", &text_salt);
-                    let content = if let Some((header, footer)) = content.split_once("{fill}") {
-                        let mut rendered = String::with_capacity(
-                            content.len() + fill.unit.len() * fill.repeat as usize,
-                        );
-                        rendered.push_str(header);
-                        for _ in 0..fill.repeat {
-                            rendered.push_str(&fill.unit);
-                        }
-                        rendered.push_str(footer);
-                        rendered
+                    let content = if message.content.contains("{salt}") {
+                        Cow::Owned(message.content.replace("{salt}", &text_salt))
                     } else {
-                        content
+                        Cow::Borrowed(message.content.as_str())
+                    };
+                    let content = match content.split_once("{fill}") {
+                        Some((header, footer)) => {
+                            let mut rendered = String::with_capacity(
+                                header.len()
+                                    + footer.len()
+                                    + fill.unit.len() * fill.repeat as usize,
+                            );
+                            rendered.push_str(header);
+                            for _ in 0..fill.repeat {
+                                rendered.push_str(&fill.unit);
+                            }
+                            rendered.push_str(footer);
+                            rendered
+                        }
+                        None => content.into_owned(),
                     };
                     Message {
                         role: message.role,

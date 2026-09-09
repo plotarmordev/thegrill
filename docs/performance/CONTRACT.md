@@ -49,7 +49,8 @@ the cell's case `unit.len()*repeat` (zero when absent). The latter budgets
 body-sized JSON scratch and decoded fields rather than assuming frame-sized parsing.
 Each request body, JSON-string-escaped as it is embedded in the reservation receipt
 and rendered at the admission bound widths, times concurrency must not exceed
-32 MiB, within the 40 MiB reservation receipt limit.
+32 MiB, within the 40 MiB reservation receipt limit. Fill bytes are held in rendered,
+encoded and escaped-receipt copies while a wave is reserved; the allowance counts them once.
 Serialized reservation buffers are released before dispatch. These are
 conservative owned-buffer allowances, **not** RSS or kernel/socket-memory
 guarantees. The allowance cannot exceed 512 MiB. HTTP-library, TLS and process

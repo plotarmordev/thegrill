@@ -7,7 +7,7 @@
     "output": { "tokens": 8, "mode": "exact" },
     "cache": "observe",
     "temperature_milli": 0,
-    "top_p_milli": null,
+    "top_p_milli": 1000,
     "seed": null,
     "thinking": false
   },

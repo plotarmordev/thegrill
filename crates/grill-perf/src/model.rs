@@ -193,10 +193,10 @@ impl Workload {
         let mut attempts = 0u64;
         let mut waves = 0u64;
         for cell in &self.cells {
-            if !identifier(&cell.id)
-                || !names.insert(cell.id.as_str())
-                || !ids.contains(cell.case.as_str())
-            {
+            let Some(case) = self.cases.iter().find(|case| case.id == cell.case) else {
+                return Err("cell IDs must be unique and reference an existing case".into());
+            };
+            if !identifier(&cell.id) || !names.insert(cell.id.as_str()) {
                 return Err("cell IDs must be unique and reference an existing case".into());
             }
             if !(1..=64).contains(&cell.concurrency)
@@ -209,7 +209,6 @@ impl Workload {
             if r.cache == Cache::ReportedPrefixHit && cell.warmup_trials == 0 {
                 return Err("reported-prefix-hit requires explicit warmup priming".into());
             }
-            let case = self.cases.iter().find(|case| case.id == cell.case).unwrap();
             let fill_bytes = case
                 .fill
                 .as_ref()
