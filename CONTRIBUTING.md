@@ -15,6 +15,8 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 
 Integration tests run the CLI against synthetic inputs and loopback fixtures. Do not point tests at a model service. Use `cargo test --locked --test offline` or `cargo test --locked --test runner` for a focused run.
 
+GitHub CI runs these four checks on Ubuntu 24.04 with Rust 1.98.0 for pushes and pull requests. It uses synthetic and loopback fixtures only; hosted CI does not qualify a live model deployment.
+
 ## Changes and review
 
 - Use a feature branch and submit a pull request. Describe the behavior changed, assumptions, and checks performed.

@@ -1,0 +1,224 @@
+{
+  "kind": "privacy-reviewed-summary-not-a-replayable-evidence-directory",
+  "experiment": "two consecutive unchanged GLM recipe runs; no optimization applied between runs",
+  "date_utc": "2026-09-09",
+  "collector_source": "9150fdeb9980a641bdabdf34473305d260a97483",
+  "collector_binary_sha256": "a7886072d75bf648e404b3a3d8a68671f33a4ddf65a1b29af7f84b216e321ca2",
+  "workload_file_sha256": "5b144d5fae754006612b6d7ae754c84458f73119dedb650bb91448583ead219f",
+  "private_evidence_manifest_sha256": {
+    "run_a": "88dd7f859596dd50e5a60c5a020306cf4d40f80befbf7012a1f0ebcf0822de72",
+    "run_b": "32fbe8376de047d1f1c7aabd8ebc3d20f6e5651ef3bc8a46b09b8c814b373ce9"
+  },
+  "accounting": {
+    "run_a": {
+      "requests": 9,
+      "published_waves": 6,
+      "eligible_measured_waves": 4
+    },
+    "run_b": {
+      "requests": 9,
+      "published_waves": 6,
+      "eligible_measured_waves": 4
+    }
+  },
+  "comparison": {
+    "version": 1,
+    "claim": "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
+    "baseline_model": "GLM-5.3-Flash-EXL3",
+    "candidate_model": "GLM-5.3-Flash-EXL3",
+    "baseline": [
+      {
+        "cell": "single",
+        "planned_trials": 2,
+        "observed_trials": 2,
+        "eligible_trials": 2,
+        "wave_latency_us": [
+          1792112,
+          2007148
+        ],
+        "achieved_completion_tokens_per_second": [
+          35.71205371092878,
+          31.886039295557676
+        ],
+        "median_wave_latency_us": 1899630.0,
+        "median_achieved_completion_tokens_per_second": 33.799046503243225,
+        "first_answer_text_us": [
+          null,
+          null
+        ],
+        "trial_states": [
+          "published",
+          "published"
+        ],
+        "reported_completion_tokens": [
+          64,
+          64
+        ],
+        "issues": [],
+        "warmup_states": [
+          "eligible"
+        ],
+        "all_declared_warmups_complete": true,
+        "lane_completion_tokens": [
+          [
+            64
+          ],
+          [
+            64
+          ]
+        ]
+      },
+      {
+        "cell": "two",
+        "planned_trials": 2,
+        "observed_trials": 2,
+        "eligible_trials": 2,
+        "wave_latency_us": [
+          1780094,
+          1882514
+        ],
+        "achieved_completion_tokens_per_second": [
+          71.90631505976651,
+          67.99418224778142
+        ],
+        "median_wave_latency_us": 1831304.0,
+        "median_achieved_completion_tokens_per_second": 69.95024865377397,
+        "first_answer_text_us": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "trial_states": [
+          "published",
+          "published"
+        ],
+        "reported_completion_tokens": [
+          128,
+          128
+        ],
+        "issues": [],
+        "warmup_states": [
+          "eligible"
+        ],
+        "all_declared_warmups_complete": true,
+        "lane_completion_tokens": [
+          [
+            64,
+            64
+          ],
+          [
+            64,
+            64
+          ]
+        ]
+      }
+    ],
+    "candidate": [
+      {
+        "cell": "single",
+        "planned_trials": 2,
+        "observed_trials": 2,
+        "eligible_trials": 2,
+        "wave_latency_us": [
+          2168278,
+          2871394
+        ],
+        "achieved_completion_tokens_per_second": [
+          29.51651033677416,
+          22.288825566954586
+        ],
+        "median_wave_latency_us": 2519836.0,
+        "median_achieved_completion_tokens_per_second": 25.902667951864373,
+        "first_answer_text_us": [
+          null,
+          null
+        ],
+        "trial_states": [
+          "published",
+          "published"
+        ],
+        "reported_completion_tokens": [
+          64,
+          64
+        ],
+        "issues": [],
+        "warmup_states": [
+          "eligible"
+        ],
+        "all_declared_warmups_complete": true,
+        "lane_completion_tokens": [
+          [
+            64
+          ],
+          [
+            64
+          ]
+        ]
+      },
+      {
+        "cell": "two",
+        "planned_trials": 2,
+        "observed_trials": 2,
+        "eligible_trials": 2,
+        "wave_latency_us": [
+          3647697,
+          2271799
+        ],
+        "achieved_completion_tokens_per_second": [
+          35.0906338985941,
+          56.34301274012358
+        ],
+        "median_wave_latency_us": 2959748.0,
+        "median_achieved_completion_tokens_per_second": 45.71682331935884,
+        "first_answer_text_us": [
+          null,
+          null,
+          null,
+          null
+        ],
+        "trial_states": [
+          "published",
+          "published"
+        ],
+        "reported_completion_tokens": [
+          128,
+          128
+        ],
+        "issues": [],
+        "warmup_states": [
+          "eligible"
+        ],
+        "all_declared_warmups_complete": true,
+        "lane_completion_tokens": [
+          [
+            64,
+            64
+          ],
+          [
+            64,
+            64
+          ]
+        ]
+      }
+    ],
+    "changes": [
+      {
+        "cell": "single",
+        "eligible": true,
+        "observed_output_amounts_match": true,
+        "ineligibility_reasons": [],
+        "wave_latency_change_percent": 32.648778972747316,
+        "achieved_throughput_change_percent": -23.362725781690752
+      },
+      {
+        "cell": "two",
+        "eligible": true,
+        "observed_output_amounts_match": true,
+        "ineligibility_reasons": [],
+        "wave_latency_change_percent": 61.619698313333004,
+        "achieved_throughput_change_percent": -34.64380156010737
+      }
+    ]
+  }
+}
