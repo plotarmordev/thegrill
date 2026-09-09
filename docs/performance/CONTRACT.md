@@ -67,7 +67,7 @@ Fragmented events become observable when their framing boundary arrives. Multipl
 events in one received chunk share its arrival observation. Gateway buffering,
 coalescing and client scheduling remain in these observations. Nonstreaming
 responses have completion latency but no fabricated first-text observation.
-No post-first-answer token-rate proxy or GPU/token timestamp is produced.
+A per-stream decode rate from first generated text to settlement is derived offline; no GPU/token timestamps are produced.
 
 Wave elapsed time is the span from the first collector dispatch to the last
 collector settlement. Dispatch spread is recorded. Only a fully eligible wave
