@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub type Result<T, E = String> = std::result::Result<T, E>;
 pub const FILE_CAP: usize = 4 * 1024 * 1024;
 pub const FRAME_CAP: usize = 256 * 1024;
+pub const REQUEST_CAP: usize = 2 * 1024 * 1024;
 pub const MAX_ATTEMPTS: u64 = 10_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -70,6 +71,14 @@ pub struct Limits {
 pub struct Case {
     pub id: String,
     pub messages: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Fill {
+    pub unit: String,
+    pub repeat: u32,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +106,9 @@ fn identifier(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 impl Workload {
+    pub fn salted(&self) -> bool {
+        self.cases.iter().any(|case| case.fill.is_some())
+    }
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 || !identifier(&self.name) {
             return Err("expected workload version 1 and a short ASCII name".into());
@@ -118,6 +130,21 @@ impl Workload {
                 || case.messages.iter().map(|m| m.content.len()).sum::<usize>() > 128 * 1024
             {
                 return Err(format!("case {} exceeds message bounds", case.id));
+            }
+            if let Some(fill) = &case.fill {
+                if fill.unit.is_empty()
+                    || fill.unit.len() > 64
+                    || !(1..=1_000_000).contains(&fill.repeat)
+                    || case.messages.iter().map(|m| m.content.matches("{fill}").count()).sum::<usize>() != 1
+                    || case.messages.iter().map(|m| m.content.matches("{salt}").count()).sum::<usize>() > 1
+                {
+                    return Err(format!("case {} has invalid fill controls or placeholders", case.id));
+                }
+                if case.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    + fill.unit.len() * fill.repeat as usize > REQUEST_CAP
+                {
+                    return Err(format!("case {} exceeds the rendered request bound", case.id));
+                }
             }
         }
         let r = &self.request;
@@ -165,12 +192,14 @@ impl Workload {
             if r.cache == Cache::ReportedPrefixHit && cell.warmup_trials == 0 {
                 return Err("reported-prefix-hit requires explicit warmup priming".into());
             }
+            let case = self.cases.iter().find(|case| case.id == cell.case).unwrap();
             // Streaming semantics are frame-bounded; nonstreaming decoding is body-bounded.
             let per_request = if r.stream {
                 2 * l.response_bytes + 6 * FRAME_CAP + 512 * 1024
             } else {
                 6 * l.response_bytes + 512 * 1024
-            };
+            } + case.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                + case.fill.as_ref().map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
             if per_request * cell.concurrency as usize > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} exceeds the admitted wave buffer bound",

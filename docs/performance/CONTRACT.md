@@ -13,29 +13,42 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 `request` declares `profile`, `stream`, `output: {tokens, mode}`, `cache`, and
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
 decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
-and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
+and is sent as both `chat_template_kwargs.thinking` and
+`chat_template_kwargs.enable_thinking`; null leaves the provider default.
 No other generation fields are sent or inferred.
 Model-side thinking defaults are not overridden unless declared.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
 
+Cases may declare `fill: {unit, repeat}`. The unit is nonempty and at most 64
+bytes; repeat is 1..1,000,000. Such a case requires exactly one `{fill}` and at
+most one `{salt}` across its message contents. Rendering replaces `{fill}` with
+the repeated unit and `{salt}` with `namespace[..16]-wave.index-lane`.
+Without `fill`, both placeholders are ordinary text. A random 64-hex
+`cache_namespace` exists exactly when cache is not `observe` or any case has
+fill; text salts differ per attempt even under `observe`.
+
 Each cell names a case, concurrency, warmup trial count and measured trial count.
-For a trial, each lane receives the same case messages. When a seed is declared,
+For a trial, each lane receives the same case with its attempt's text salt. When a seed is declared,
 its lane seed is `seed + trial*64 + lane`. Warmup and measured trials are separate
 phases; seeds are paired but stochastic responses need not be identical.
 
 Bounds: at most 128 cases, 64 cells, 64 concurrent requests, 100 measured and 20
 warmup trials per cell, 1,024 total waves and 10,000 attempts. Case messages are
-bounded to 128 KiB decoded content and serialized requests to 256 KiB. Output
-budgets are 1..32,768 tokens. IDs are unique short ASCII identifiers.
+bounded to 128 KiB declared decoded content. Declared content bytes plus
+`unit.len()*repeat` must fit 2 MiB, as must each serialized request including
+JSON escaping and controls. Output budgets are 1..32,768 tokens.
+IDs are unique short ASCII identifiers.
 
 Response limits are 1 KiB..8 MiB per request. SSE line and event caps are 256 KiB,
 and JSON nesting is limited to 64. Per-request total/idle deadlines are explicit,
 positive, at most ten minutes, with idle no greater than total.
 
 Admission checks the wave-buffer allowance against concurrency times
-`2*response_bytes + 6*256KiB + 512KiB` for streaming, or
-`6*response_bytes + 512KiB` for nonstreaming. The latter budgets body-sized JSON
-scratch and decoded fields rather than assuming frame-sized parsing.
+`2*response_bytes + 6*256KiB + 512KiB + rendered_bytes` for streaming, or
+`6*response_bytes + 512KiB + rendered_bytes` for nonstreaming, where
+`rendered_bytes` is the cell's case declared content sum plus `unit.len()*repeat`
+(zero fill bytes when absent). The latter budgets body-sized JSON scratch and
+decoded fields rather than assuming frame-sized parsing.
 Serialized reservation buffers are released before dispatch. These are
 conservative owned-buffer allowances, **not** RSS or kernel/socket-memory
 guarantees. The allowance cannot exceed 512 MiB. HTTP-library, TLS and process

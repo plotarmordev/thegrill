@@ -160,7 +160,7 @@ fn read_request(stream: &mut TcpStream) -> Value {
                 .map(|v| v.trim().parse().unwrap())
         })
         .unwrap();
-    assert!(length <= 256 * 1024);
+    assert!(length <= 2 * 1024 * 1024);
     let mut body = vec![0; length];
     stream.read_exact(&mut body).unwrap();
     serde_json::from_slice(&body).unwrap()
@@ -737,6 +737,7 @@ fn explicit_thinking_false_is_sent_on_every_request() {
     assert_eq!(seen.len(), 4);
     for body in seen {
         assert_eq!(body["chat_template_kwargs"]["thinking"], false);
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
     }
 }
 
@@ -791,6 +792,173 @@ fn portable_thinking_is_rejected_before_dispatch() {
     w["request"]["profile"] = json!("vllm-fixed-v1");
     successful(&run(&temp, &server, "fixed", &w));
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn fill_renders_distinct_lane_and_trial_salts_and_observe_plans_load() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(2, 1, 2);
+    w["cases"][0]["messages"][0]["content"] = json!("header {salt}\n{fill}\nfooter");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":3});
+    successful(&run(&temp, &server, "run", &w));
+    let plan = value(temp.path("run/plan.json"));
+    let namespace = plan["cache_namespace"].as_str().unwrap();
+    assert_eq!(namespace.len(), 64);
+    assert!(namespace.bytes().all(|b| b.is_ascii_hexdigit()));
+    let expected: std::collections::HashSet<_> = (0..3)
+        .flat_map(|index| {
+            (0..2).map(move |lane| {
+                format!("header {}-{index}-{lane}\n the the the\nfooter", &namespace[..16])
+            })
+        })
+        .collect();
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 6);
+    let actual: std::collections::HashSet<_> = seen.iter()
+        .map(|body| {
+            assert!(body.get("cache_salt").is_none());
+            body["messages"][0]["content"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["changes"][0]["wave_latency_change_percent"], 0.0);
+}
+
+#[test]
+fn fill_request_cap_admits_large_complete_bodies_and_loads_them() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("header{fill}footer");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":70000});
+    successful(&run(&temp, &server, "large", &w));
+    let seen = server.seen.try_recv().unwrap();
+    assert_eq!(seen["messages"][0]["content"], format!("header{}footer", " the".repeat(70000)));
+    let reservation = value(temp.path("large/wave-000000/reservation.json"));
+    let body = reservation["requests"][0].as_str().unwrap();
+    assert!(body.len() > 256 * 1024 && body.len() < 2 * 1024 * 1024);
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), seen);
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("large"))
+        .arg(temp.path("large"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    for (name, fill) in [
+        ("rendered", json!({"unit":" the","repeat":524288})),
+        ("escaped", json!({"unit":"\"\"","repeat":600000})),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn fill_requires_bounded_controls_and_unique_placeholders() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"] = json!([
+        {"role":"system","content":"header {salt}"},
+        {"role":"user","content":"{fill}footer"}
+    ]);
+    for (name, fill) in [
+        ("unit-bound", json!({"unit":"é".repeat(32),"repeat":1})),
+        ("repeat-bound", json!({"unit":"x","repeat":1000000})),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        successful(&run(&temp, &server, name, &w));
+    }
+    for (name, fill, first, second) in [
+        ("missing", json!({"unit":"x","repeat":1}), "header {salt}", "footer"),
+        ("duplicate-fill", json!({"unit":"x","repeat":1}), "{fill}", "{fill}"),
+        ("duplicate-salt", json!({"unit":"x","repeat":1}), "{salt}", "{fill}{salt}"),
+        ("empty-unit", json!({"unit":"","repeat":1}), "header", "{fill}"),
+        ("long-unit", json!({"unit":"é".repeat(33),"repeat":1}), "header", "{fill}"),
+        ("zero-repeat", json!({"unit":"x","repeat":0}), "header", "{fill}"),
+        ("large-repeat", json!({"unit":"x","repeat":1000001}), "header", "{fill}"),
+        ("unknown-field", json!({"unit":"x","repeat":1,"extra":true}), "header", "{fill}"),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        w["cases"][0]["messages"][0]["content"] = json!(first);
+        w["cases"][0]["messages"][1]["content"] = json!(second);
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn absent_fill_preserves_literal_placeholders_and_plan_identity() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("{salt}{fill}{fill}{salt}");
+    successful(&run(&temp, &server, "omitted", &w));
+    w["cases"][0]["fill"] = Value::Null;
+    successful(&run(&temp, &server, "null", &w));
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 2);
+    for body in seen {
+        assert_eq!(body["messages"][0]["content"], "{salt}{fill}{fill}{salt}");
+    }
+    let omitted = value(temp.path("omitted/plan.json"));
+    let null = value(temp.path("null/plan.json"));
+    for plan in [&omitted, &null] {
+        assert!(plan["workload"]["cases"][0].get("fill").is_none());
+        assert!(plan["cache_namespace"].is_null());
+    }
+    assert_eq!(omitted["workload_sha256"], null["workload_sha256"]);
+    successful(&cli()
+        .arg("compare")
+        .arg(temp.path("omitted"))
+        .arg(temp.path("null"))
+        .arg("--json")
+        .output()
+        .unwrap());
+}
+
+#[test]
+fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, index, request| {
+        if request["stream"] == true {
+            normal(s, index, request);
+        } else {
+            header(&mut s, "application/json");
+            write!(s, "{}", json!({"choices":[{"message":{"content":"x"},"finish_reason":"stop"}],"usage":{"completion_tokens":8}})).unwrap();
+        }
+    });
+    let mut w = workload(2, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":100});
+    for (name, stream, base) in [
+        ("stream", true, 2 * 65536 + 6 * 256 * 1024 + 512 * 1024),
+        ("body", false, 6 * 65536 + 512 * 1024),
+    ] {
+        w["request"]["stream"] = json!(stream);
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 6 + 400) - 1);
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 6 + 400));
+        successful(&run(&temp, &server, name, &w));
+        assert_eq!(wave(&temp, name, 0)["attempts"][0]["status"], "complete");
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 4);
 }
 
 #[test]

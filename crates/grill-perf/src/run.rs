@@ -96,7 +96,7 @@ pub fn execute(o: &Options) -> Result<Summary> {
         .unwrap_or(1);
     let waves = workload.waves();
     let normalized = serde_json::to_vec(&workload).map_err(|e| e.to_string())?;
-    let cache_namespace = if workload.request.cache == Cache::Observe {
+    let cache_namespace = if workload.request.cache == Cache::Observe && !workload.salted() {
         None
     } else {
         let mut random = [0u8; 16];

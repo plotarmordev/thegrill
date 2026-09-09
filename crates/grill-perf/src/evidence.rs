@@ -174,12 +174,12 @@ pub fn load(root: &Path) -> Result<Loaded> {
     if plan.pool_max_idle_per_host != expected_pool || plan.collector_sha256.len() != 64 {
         return Err("invalid declared collector or connection-pool policy".into());
     }
-    match (&plan.cache_namespace, plan.workload.request.cache) {
-        (None, Cache::Observe) => (),
-        (Some(n), mode)
-            if mode != Cache::Observe
-                && n.len() == 64
-                && n.bytes().all(|b| b.is_ascii_hexdigit()) => {}
+    match (
+        &plan.cache_namespace,
+        plan.workload.request.cache != Cache::Observe || plan.workload.salted(),
+    ) {
+        (None, false) => (),
+        (Some(n), true) if n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()) => {}
         _ => return Err("cache namespace does not match the declared mechanism".into()),
     }
     let source = read(&root.join("workload.json"), FILE_CAP)?;
@@ -220,7 +220,7 @@ pub fn load(root: &Path) -> Result<Loaded> {
             .zip(&reservation.request_sha256)
             .enumerate()
         {
-            if body.len() > FRAME_CAP
+            if body.len() > REQUEST_CAP
                 || digest(body.as_bytes()) != *hash
                 || *body != crate::wire::request_body(&plan, spec, lane as u32)?
             {
