@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "sparkdash-prefill-v1",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": { "tokens": 8, "mode": "exact" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking": false
+  },
+  "limits": {
+    "total_ms": 600000,
+    "idle_ms": 600000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 4194304
+  },
+  "cases": [
+    {
+      "id": "prefill-4k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 4070 }
+    },
+    {
+      "id": "prefill-8k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 8166 }
+    },
+    {
+      "id": "prefill-16k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 16358 }
+    },
+    {
+      "id": "prefill-32k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 32742 }
+    }
+  ],
+  "cells": [
+    { "id": "prefill-4k-1", "case": "prefill-4k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-8k-1", "case": "prefill-8k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-16k-1", "case": "prefill-16k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-32k-1", "case": "prefill-32k", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}

@@ -50,6 +50,18 @@ All warmup waves finish before any measured wave begins.
 It needs a vLLM-compatible server whose chat template honors `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` (and `reasoning_tokens` where the server reports it) in the receipts, since the tool does not reject reasoning output.
 sparkDash appends a per-stream suffix to prompts above concurrency 1; this workload sends identical prompts, so cache mode `observe` permits prefix sharing across lanes. Use `reported-prefix-zero` when provider-reported zero-prefix evidence is required.
 
+[`sparkdash-prefill-v1.json`](../../crates/grill-perf/examples/sparkdash-prefill-v1.json) follows [MiaAI-Lab's sparkDash PrefillBench protocol](https://github.com/MiaAI-Lab/sparkDash/blob/main/server/collectors/PrefillBench.js):
+salted header, repeated `" the"` filler and `Reply OK.` footer, thinking off,
+temperature zero, top_p one, concurrency 1, and the default 4k/8k/16k/32k sizes.
+Filler repeats are the target size minus sparkDash's 26-token header/footer
+estimate for our 20–21 character salt. Deviations: 16 requests (one warmup and
+three measured trials per size) instead of one request per size; output is
+exactly 8 tokens rather than a cap of 8 so runs stay length matched; the salt is
+per attempt; thinking is disabled through `chat_template_kwargs.thinking` only,
+so check `first_generated_channel` is `answer` in the receipts.
+Both deadlines are set to the ten-minute `total_ms` ceiling because prefill
+sends no bytes before the first token; check larger sizes fit it.
+
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
 concurrency 1 and 2, a 64-token cap, and nine requests per run.
@@ -118,6 +130,12 @@ verification rather than being repaired.
   sparkDash-comparable `(completion_tokens - 1) / (last - first)` rate. Settlement
   stands in for last-token time and includes final `[DONE]`/usage frame parsing,
   so this client-observed rate is slightly conservative.
+- **Per-stream prefill rate** is defined to match sparkDash `prompt_tokens / TTFT`,
+  from dispatch to first generated text, including queueing and first-token
+  generation. It is null when the provider reports nonzero cached prompt tokens;
+  a provider that omits `cached_tokens` is treated as uncached, so under `observe`
+  with unsalted prompts the rate can include prefix-cache hits. Use `fill` with
+  `{salt}` or `reported-prefix-zero`.
 - **First body**, **first generated text** and **first answer text** are separate
   observations. Role-only events do not count as text; reasoning is generated
   text but not answer text. These are client observations, not GPU token times.

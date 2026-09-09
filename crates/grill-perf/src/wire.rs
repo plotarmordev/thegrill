@@ -61,9 +61,50 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
             })
         }
     };
+    let messages = if let Some(fill) = &case.fill {
+        let namespace = plan
+            .cache_namespace
+            .as_deref()
+            .ok_or("missing cache namespace")?;
+        let text_salt = format!("{}-{}-{lane}", &namespace[..16], wave.index);
+        Cow::Owned(
+            case.messages
+                .iter()
+                .map(|message| {
+                    let content = if message.content.contains("{salt}") {
+                        Cow::Owned(message.content.replace("{salt}", &text_salt))
+                    } else {
+                        Cow::Borrowed(message.content.as_str())
+                    };
+                    let content = match content.split_once("{fill}") {
+                        Some((header, footer)) => {
+                            let mut rendered = String::with_capacity(
+                                header.len()
+                                    + footer.len()
+                                    + fill.unit.len() * fill.repeat as usize,
+                            );
+                            rendered.push_str(header);
+                            for _ in 0..fill.repeat {
+                                rendered.push_str(&fill.unit);
+                            }
+                            rendered.push_str(footer);
+                            rendered
+                        }
+                        None => content.into_owned(),
+                    };
+                    Message {
+                        role: message.role,
+                        content,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Cow::Borrowed(case.messages.as_slice())
+    };
     let body = serde_json::to_string(&Body {
         model: &plan.model,
-        messages: &case.messages,
+        messages: &messages,
         stream: r.stream,
         max_tokens: r.output.tokens,
         temperature: r.temperature_milli.map(|n| f64::from(n) / 1000.0),
@@ -80,8 +121,8 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         cache_salt: salt,
     })
     .map_err(|e| e.to_string())?;
-    if body.len() > FRAME_CAP {
-        return Err("encoded request exceeds 256 KiB".into());
+    if body.len() > REQUEST_CAP {
+        return Err("encoded request exceeds 2 MiB".into());
     }
     Ok(body)
 }

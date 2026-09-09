@@ -160,7 +160,7 @@ fn read_request(stream: &mut TcpStream) -> Value {
                 .map(|v| v.trim().parse().unwrap())
         })
         .unwrap();
-    assert!(length <= 256 * 1024);
+    assert!(length <= 2 * 1024 * 1024);
     let mut body = vec![0; length];
     stream.read_exact(&mut body).unwrap();
     serde_json::from_slice(&body).unwrap()
@@ -791,6 +791,282 @@ fn portable_thinking_is_rejected_before_dispatch() {
     w["request"]["profile"] = json!("vllm-fixed-v1");
     successful(&run(&temp, &server, "fixed", &w));
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn fill_renders_distinct_lane_and_trial_salts_and_observe_plans_load() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(2, 1, 2);
+    w["cases"][0]["messages"][0]["content"] = json!("header {salt}\n{fill}\nfooter");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":3});
+    successful(&run(&temp, &server, "run", &w));
+    let plan = value(temp.path("run/plan.json"));
+    let namespace = plan["cache_namespace"].as_str().unwrap();
+    assert_eq!(namespace.len(), 64);
+    assert!(namespace.bytes().all(|b| b.is_ascii_hexdigit()));
+    let expected: std::collections::HashSet<_> = (0..3)
+        .flat_map(|index| {
+            (0..2).map(move |lane| {
+                format!(
+                    "header {}-{index}-{lane}\n the the the\nfooter",
+                    &namespace[..16]
+                )
+            })
+        })
+        .collect();
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 6);
+    let actual: std::collections::HashSet<_> = seen
+        .iter()
+        .map(|body| {
+            assert!(body.get("cache_salt").is_none());
+            body["messages"][0]["content"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(actual, expected);
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["changes"][0]["wave_latency_change_percent"], 0.0);
+}
+
+#[test]
+fn fill_request_cap_admits_large_complete_bodies_and_loads_them() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("header{fill}footer");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":70000});
+    successful(&run(&temp, &server, "large", &w));
+    let seen = server.seen.try_recv().unwrap();
+    assert_eq!(
+        seen["messages"][0]["content"],
+        format!("header{}footer", " the".repeat(70000))
+    );
+    let reservation = value(temp.path("large/wave-000000/reservation.json"));
+    let body = reservation["requests"][0].as_str().unwrap();
+    assert!(body.len() > 256 * 1024 && body.len() < 2 * 1024 * 1024);
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap(), seen);
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("large"))
+        .arg(temp.path("large"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    for (name, fill) in [
+        ("rendered", json!({"unit":" the","repeat":524288})),
+        ("escaped", json!({"unit":"\"\"","repeat":600000})),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn fill_requires_bounded_controls_and_unique_placeholders() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"] = json!([
+        {"role":"system","content":"header {salt}"},
+        {"role":"user","content":"{fill}footer"}
+    ]);
+    for (name, fill) in [
+        ("unit-bound", json!({"unit":"é".repeat(32),"repeat":1})),
+        ("repeat-bound", json!({"unit":"x","repeat":1000000})),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        successful(&run(&temp, &server, name, &w));
+    }
+    for (name, fill, first, second) in [
+        (
+            "missing",
+            json!({"unit":"x","repeat":1}),
+            "header {salt}",
+            "footer",
+        ),
+        (
+            "duplicate-fill",
+            json!({"unit":"x","repeat":1}),
+            "{fill}",
+            "{fill}",
+        ),
+        (
+            "duplicate-salt",
+            json!({"unit":"x","repeat":1}),
+            "{salt}",
+            "{fill}{salt}",
+        ),
+        (
+            "empty-unit",
+            json!({"unit":"","repeat":1}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "long-unit",
+            json!({"unit":"é".repeat(33),"repeat":1}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "zero-repeat",
+            json!({"unit":"x","repeat":0}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "large-repeat",
+            json!({"unit":"x","repeat":1000001}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "unknown-field",
+            json!({"unit":"x","repeat":1,"extra":true}),
+            "header",
+            "{fill}",
+        ),
+    ] {
+        w["cases"][0]["fill"] = fill;
+        w["cases"][0]["messages"][0]["content"] = json!(first);
+        w["cases"][0]["messages"][1]["content"] = json!(second);
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn absent_fill_preserves_literal_placeholders_and_plan_identity() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("{salt}{fill}{fill}{salt}");
+    successful(&run(&temp, &server, "omitted", &w));
+    w["cases"][0]["fill"] = Value::Null;
+    successful(&run(&temp, &server, "null", &w));
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 2);
+    for body in seen {
+        assert_eq!(body["messages"][0]["content"], "{salt}{fill}{fill}{salt}");
+    }
+    let omitted = value(temp.path("omitted/plan.json"));
+    let null = value(temp.path("null/plan.json"));
+    for plan in [&omitted, &null] {
+        assert!(plan["workload"]["cases"][0].get("fill").is_none());
+        assert!(plan["cache_namespace"].is_null());
+    }
+    assert_eq!(omitted["workload_sha256"], null["workload_sha256"]);
+    successful(
+        &cli()
+            .arg("compare")
+            .arg(temp.path("omitted"))
+            .arg(temp.path("null"))
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, index, request| {
+        if request["stream"] == true {
+            normal(s, index, request);
+        } else {
+            header(&mut s, "application/json");
+            write!(s, "{}", json!({"choices":[{"message":{"content":"x"},"finish_reason":"stop"}],"usage":{"completion_tokens":8}})).unwrap();
+        }
+    });
+    let mut w = workload(2, 0, 1);
+    w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+    w["cases"][0]["fill"] = json!({"unit":" the","repeat":100});
+    for (name, stream, base) in [
+        ("stream", true, 2 * 65536 + 6 * 256 * 1024 + 512 * 1024),
+        ("body", false, 6 * 65536 + 512 * 1024),
+    ] {
+        w["request"]["stream"] = json!(stream);
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 400) - 1);
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 400));
+        successful(&run(&temp, &server, name, &w));
+        assert_eq!(wave(&temp, name, 0)["attempts"][0]["status"], "complete");
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn fill_wave_reservation_bound_counts_escaped_request_bytes() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    // A quote unit doubles when the body is embedded as a JSON string in the receipt.
+    for (name, unit, rejected, admitted) in [("plain", "x", 40, 1), ("escaped", "\"", 9, 8)] {
+        let mut w = workload(rejected, 0, 1);
+        w["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
+        w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+        w["cases"][0]["fill"] = json!({"unit":unit,"repeat":1000000});
+        let sent = server.count.load(Ordering::SeqCst);
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+        assert_eq!(server.count.load(Ordering::SeqCst), sent);
+        w["cells"][0]["concurrency"] = json!(admitted);
+        successful(&run(&temp, &server, name, &w));
+        let reservation = value(temp.path(name).join("wave-000000/reservation.json"));
+        let body = reservation["requests"][0].as_str().unwrap();
+        assert!(body.len() < 2 * 1024 * 1024);
+        let escaped = serde_json::to_string(body).unwrap().len();
+        assert!(escaped * rejected as usize > 32 * 1024 * 1024);
+        assert!(escaped * admitted as usize <= 32 * 1024 * 1024);
+        let output = cli()
+            .arg("compare")
+            .arg(temp.path(name))
+            .arg(temp.path(name))
+            .output()
+            .unwrap();
+        successful(&output);
+    }
+}
+
+#[test]
+fn fill_body_at_the_request_cap_is_refused_before_any_run_directory() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["request"]["seed"] = Value::Null;
+    w["limits"]["wave_buffer_bytes"] = json!(8 * 1024 * 1024);
+    w["cases"][0]["messages"][0]["content"] = json!("{fill}");
+    w["cases"][0]["fill"] = json!({"unit":"xxx","repeat":1000});
+    successful(&run(&temp, &server, "probe", &w));
+    let reservation = value(temp.path("probe").join("wave-000000/reservation.json"));
+    let base = reservation["requests"][0].as_str().unwrap().len() - 3000;
+    // Without seed or salt the admission sample equals the sent body; admission
+    // keeps two bytes of lane-digit slack, so a sample at the cap is refused.
+    let cap = 2 * 1024 * 1024;
+    let repeat = (cap - base) / 3;
+    let pad = "y".repeat(cap - base - 3 * repeat);
+    w["cases"][0]["fill"]["repeat"] = json!(repeat);
+    w["cases"][0]["messages"][0]["content"] = json!(format!("{{fill}}{pad}"));
+    assert_eq!(run(&temp, &server, "cap", &w).status.code(), Some(1));
+    assert!(!temp.path("cap").exists());
+    w["cases"][0]["messages"][0]["content"] = json!(format!("{{fill}}{pad}y"));
+    w["cases"][0]["fill"]["repeat"] = json!(repeat - 1);
+    successful(&run(&temp, &server, "under", &w));
+    let reservation = value(temp.path("under").join("wave-000000/reservation.json"));
+    assert_eq!(reservation["requests"][0].as_str().unwrap().len(), cap - 2);
 }
 
 #[test]
@@ -1721,11 +1997,212 @@ fn faster_streaming_decode_has_positive_matched_rate_change() {
         .filter_map(|word| word.trim_end_matches(';').strip_suffix('%'))
         .map(|number| number.parse().unwrap())
         .collect();
-    assert_eq!(percentages.len(), 3);
+    assert_eq!(percentages.len(), 4);
     for (actual, field) in percentages.iter().zip([
         "wave_latency_change_percent",
         "achieved_throughput_change_percent",
         "decode_rate_change_percent",
+    ]) {
+        let expected = report["changes"][0][field].as_f64().unwrap();
+        assert!((actual - expected).abs() <= 0.005);
+    }
+}
+
+#[test]
+fn streaming_prefill_rate_uses_prompt_tokens_and_first_text_time() {
+    let temp = Temp::new();
+    let interval = Duration::from_millis(150);
+    let server = Server::new(move |mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(if i < 2 {
+            Duration::from_millis(30)
+        } else {
+            interval
+        });
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), (i % 2 == 0).then_some(0));
+    });
+    successful(&run(&temp, &server, "run", &workload(2, 1, 2)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["baseline"][0]["lane_prompt_tokens"],
+        json!([[4, 4], [4, 4]])
+    );
+    let lanes = report["baseline"][0]["lane_prefill_tokens_per_second"]
+        .as_array()
+        .unwrap();
+    assert_eq!(lanes.len(), 2);
+    let mut rates = Vec::new();
+    for (trial, values) in lanes.iter().enumerate() {
+        let receipt = wave(&temp, "run", trial + 1);
+        let values = values.as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        for (lane, value) in values.iter().enumerate() {
+            let rate = value.as_f64().unwrap();
+            let attempt = &receipt["attempts"][lane];
+            let tokens = attempt["usage"]["prompt_tokens"].as_u64().unwrap();
+            let first = attempt["timing"]["first_generated_text_us"]
+                .as_u64()
+                .unwrap();
+            let expected = tokens as f64 * 1_000_000.0 / first as f64;
+            assert!((rate - expected).abs() < 1e-9);
+            let paced = tokens as f64 / interval.as_secs_f64();
+            assert!(rate > paced * 0.5 && rate < paced * 1.5, "{rate}");
+            rates.push(rate);
+        }
+    }
+    rates.sort_by(f64::total_cmp);
+    let median = report["baseline"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((median - (rates[1] + rates[2]) / 2.0).abs() < 1e-9);
+    assert_eq!(report["baseline"], report["candidate"]);
+    assert_eq!(report["changes"][0]["prefill_rate_change_percent"], 0.0);
+}
+
+#[test]
+fn cached_prompt_tokens_withhold_prefill_rate() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, _, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(30));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), Some(1));
+    });
+    successful(&run(&temp, &server, "run", &workload(1, 0, 1)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["baseline"][0]["lane_prompt_tokens"], json!([[4]]));
+    assert_eq!(
+        report["baseline"][0]["lane_prefill_tokens_per_second"],
+        json!([[null]])
+    );
+    assert_eq!(
+        report["baseline"][0].get("median_prefill_tokens_per_second"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        report["changes"][0].get("prefill_rate_change_percent"),
+        Some(&Value::Null)
+    );
+    assert!(report["changes"][0]["decode_rate_change_percent"].is_number());
+}
+
+#[test]
+fn unequal_prompt_tokens_keep_prefill_rate_change_and_stay_visible() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(30));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        frame(
+            &mut s,
+            json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":if i == 0 { 4 } else { 5 },"completion_tokens":8}}),
+        );
+        s.write_all(b"data: [DONE]\n\n").unwrap();
+    });
+    let work = workload(1, 0, 1);
+    successful(&run(&temp, &server, "baseline", &work));
+    successful(&run(&temp, &server, "candidate", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["baseline"][0]["lane_prompt_tokens"], json!([[4]]));
+    assert_eq!(report["candidate"][0]["lane_prompt_tokens"], json!([[5]]));
+    for side in ["baseline", "candidate"] {
+        assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
+    }
+    // Per-run text salts tokenize to different counts; the per-token rate must still compare.
+    let change = &report["changes"][0];
+    assert!(change["prefill_rate_change_percent"].is_number());
+    assert_eq!(change["eligible"], true);
+    assert_eq!(change["observed_output_amounts_match"], true);
+    assert_eq!(change["ineligibility_reasons"], json!([]));
+    for field in [
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+    ] {
+        assert!(change[field].is_number(), "{field}");
+    }
+}
+
+#[test]
+fn faster_first_text_has_positive_matched_prefill_rate_change() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(8), None);
+    });
+    let work = workload(1, 0, 1);
+    successful(&run(&temp, &server, "baseline", &work));
+    successful(&run(&temp, &server, "candidate", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let change = report["changes"][0]["prefill_rate_change_percent"]
+        .as_f64()
+        .unwrap();
+    assert!(change > 0.0, "{change}");
+    let baseline = report["baseline"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    let candidate = report["candidate"][0]["median_prefill_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((change - 100.0 * (candidate / baseline - 1.0)).abs() < 1e-9);
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    let percentages: Vec<f64> = text
+        .split_whitespace()
+        .filter_map(|word| word.trim_end_matches(';').strip_suffix('%'))
+        .map(|number| number.parse().unwrap())
+        .collect();
+    assert_eq!(percentages.len(), 4);
+    for (actual, field) in percentages.iter().zip([
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+        "prefill_rate_change_percent",
     ]) {
         let expected = report["changes"][0][field].as_f64().unwrap();
         assert!((actual - expected).abs() <= 0.005);
