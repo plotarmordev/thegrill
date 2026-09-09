@@ -135,15 +135,32 @@ impl Workload {
                 if fill.unit.is_empty()
                     || fill.unit.len() > 64
                     || !(1..=1_000_000).contains(&fill.repeat)
-                    || case.messages.iter().map(|m| m.content.matches("{fill}").count()).sum::<usize>() != 1
-                    || case.messages.iter().map(|m| m.content.matches("{salt}").count()).sum::<usize>() > 1
+                    || case
+                        .messages
+                        .iter()
+                        .map(|m| m.content.matches("{fill}").count())
+                        .sum::<usize>()
+                        != 1
+                    || case
+                        .messages
+                        .iter()
+                        .map(|m| m.content.matches("{salt}").count())
+                        .sum::<usize>()
+                        > 1
                 {
-                    return Err(format!("case {} has invalid fill controls or placeholders", case.id));
+                    return Err(format!(
+                        "case {} has invalid fill controls or placeholders",
+                        case.id
+                    ));
                 }
                 if case.messages.iter().map(|m| m.content.len()).sum::<usize>()
-                    + fill.unit.len() * fill.repeat as usize > REQUEST_CAP
+                    + fill.unit.len() * fill.repeat as usize
+                    > REQUEST_CAP
                 {
-                    return Err(format!("case {} exceeds the rendered request bound", case.id));
+                    return Err(format!(
+                        "case {} exceeds the rendered request bound",
+                        case.id
+                    ));
                 }
             }
         }
@@ -199,7 +216,10 @@ impl Workload {
             } else {
                 6 * l.response_bytes + 512 * 1024
             } + case.messages.iter().map(|m| m.content.len()).sum::<usize>()
-                + case.fill.as_ref().map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
+                + case
+                    .fill
+                    .as_ref()
+                    .map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
             if per_request * cell.concurrency as usize > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} exceeds the admitted wave buffer bound",

@@ -809,13 +809,17 @@ fn fill_renders_distinct_lane_and_trial_salts_and_observe_plans_load() {
     let expected: std::collections::HashSet<_> = (0..3)
         .flat_map(|index| {
             (0..2).map(move |lane| {
-                format!("header {}-{index}-{lane}\n the the the\nfooter", &namespace[..16])
+                format!(
+                    "header {}-{index}-{lane}\n the the the\nfooter",
+                    &namespace[..16]
+                )
             })
         })
         .collect();
     let seen: Vec<_> = server.seen.try_iter().collect();
     assert_eq!(seen.len(), 6);
-    let actual: std::collections::HashSet<_> = seen.iter()
+    let actual: std::collections::HashSet<_> = seen
+        .iter()
         .map(|body| {
             assert!(body.get("cache_salt").is_none());
             body["messages"][0]["content"].as_str().unwrap().to_owned()
@@ -843,7 +847,10 @@ fn fill_request_cap_admits_large_complete_bodies_and_loads_them() {
     w["cases"][0]["fill"] = json!({"unit":" the","repeat":70000});
     successful(&run(&temp, &server, "large", &w));
     let seen = server.seen.try_recv().unwrap();
-    assert_eq!(seen["messages"][0]["content"], format!("header{}footer", " the".repeat(70000)));
+    assert_eq!(
+        seen["messages"][0]["content"],
+        format!("header{}footer", " the".repeat(70000))
+    );
     let reservation = value(temp.path("large/wave-000000/reservation.json"));
     let body = reservation["requests"][0].as_str().unwrap();
     assert!(body.len() > 256 * 1024 && body.len() < 2 * 1024 * 1024);
@@ -884,14 +891,54 @@ fn fill_requires_bounded_controls_and_unique_placeholders() {
         successful(&run(&temp, &server, name, &w));
     }
     for (name, fill, first, second) in [
-        ("missing", json!({"unit":"x","repeat":1}), "header {salt}", "footer"),
-        ("duplicate-fill", json!({"unit":"x","repeat":1}), "{fill}", "{fill}"),
-        ("duplicate-salt", json!({"unit":"x","repeat":1}), "{salt}", "{fill}{salt}"),
-        ("empty-unit", json!({"unit":"","repeat":1}), "header", "{fill}"),
-        ("long-unit", json!({"unit":"é".repeat(33),"repeat":1}), "header", "{fill}"),
-        ("zero-repeat", json!({"unit":"x","repeat":0}), "header", "{fill}"),
-        ("large-repeat", json!({"unit":"x","repeat":1000001}), "header", "{fill}"),
-        ("unknown-field", json!({"unit":"x","repeat":1,"extra":true}), "header", "{fill}"),
+        (
+            "missing",
+            json!({"unit":"x","repeat":1}),
+            "header {salt}",
+            "footer",
+        ),
+        (
+            "duplicate-fill",
+            json!({"unit":"x","repeat":1}),
+            "{fill}",
+            "{fill}",
+        ),
+        (
+            "duplicate-salt",
+            json!({"unit":"x","repeat":1}),
+            "{salt}",
+            "{fill}{salt}",
+        ),
+        (
+            "empty-unit",
+            json!({"unit":"","repeat":1}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "long-unit",
+            json!({"unit":"é".repeat(33),"repeat":1}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "zero-repeat",
+            json!({"unit":"x","repeat":0}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "large-repeat",
+            json!({"unit":"x","repeat":1000001}),
+            "header",
+            "{fill}",
+        ),
+        (
+            "unknown-field",
+            json!({"unit":"x","repeat":1,"extra":true}),
+            "header",
+            "{fill}",
+        ),
     ] {
         w["cases"][0]["fill"] = fill;
         w["cases"][0]["messages"][0]["content"] = json!(first);
@@ -923,13 +970,15 @@ fn absent_fill_preserves_literal_placeholders_and_plan_identity() {
         assert!(plan["cache_namespace"].is_null());
     }
     assert_eq!(omitted["workload_sha256"], null["workload_sha256"]);
-    successful(&cli()
-        .arg("compare")
-        .arg(temp.path("omitted"))
-        .arg(temp.path("null"))
-        .arg("--json")
-        .output()
-        .unwrap());
+    successful(
+        &cli()
+            .arg("compare")
+            .arg(temp.path("omitted"))
+            .arg(temp.path("null"))
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
 }
 
 #[test]
@@ -965,10 +1014,10 @@ fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
 fn fill_wave_reservation_bound_counts_encoded_request_bytes() {
     let temp = Temp::new();
     let server = Server::new(normal);
-    for (index, (name, unit, concurrency)) in [
-        ("plain", "x", 24),
-        ("escaped", "\"", 12),
-    ].into_iter().enumerate() {
+    for (index, (name, unit, concurrency)) in [("plain", "x", 24), ("escaped", "\"", 12)]
+        .into_iter()
+        .enumerate()
+    {
         let mut w = workload(concurrency, 0, 1);
         w["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
         w["cases"][0]["messages"][0]["content"] = json!("{fill}");
@@ -2006,10 +2055,7 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
         .unwrap();
     successful(&output);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        report["baseline"][0]["lane_prompt_tokens"],
-        json!([[4]])
-    );
+    assert_eq!(report["baseline"][0]["lane_prompt_tokens"], json!([[4]]));
     assert_eq!(
         report["baseline"][0]["lane_prefill_tokens_per_second"],
         json!([[null]])
