@@ -78,7 +78,7 @@ fn execute(cli: Cli) -> model::Result<bool> {
                 print_json(&comparison)?;
             } else {
                 println!("Descriptive deployment comparison; not a causal or capacity verdict.");
-                for (index, change) in comparison.changes.iter().enumerate() {
+                for (cell, change) in comparison.changes.iter().enumerate() {
                     print!("{}: ", change.cell);
                     for (index, (name, value)) in [
                         ("wave latency", change.wave_latency_change_percent),
@@ -105,7 +105,7 @@ fn execute(cli: Cli) -> model::Result<bool> {
                     }
                     println!();
                     if let Some(drift) = &comparison.drift {
-                        let drift = &drift[index];
+                        let drift = &drift[cell];
                         print!("  reference drift: ");
                         for (index, (name, value)) in [
                             ("wave latency", drift.wave_latency_percent),

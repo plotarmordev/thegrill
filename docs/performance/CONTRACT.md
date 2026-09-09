@@ -245,14 +245,18 @@ not overlap (`a.max < b.min || b.max < a.min`); touching endpoints overlap.
 two decimals for latency and tokens/s with one decimal for rates. Withholding
 for spread does not change `eligible` or `ineligibility_reasons`, which describe
 run comparability. Absent scalars and ranges are explicit JSON nulls.
+Disjoint ranges from three trials is a coarse filter, not a significance test:
+about one identical pair in ten separates by chance, and one outlier lane can
+withhold a real change. A withheld change is not evidence of equality.
 `compare A B --reference A2` checks the reference against the same workload,
 collector identity and transport controls, and includes its cell summaries in
-`reference`. `drift` reports raw median changes from A to A2 for wave latency,
-achieved throughput, decode and prefill, without overlap gating. An A-to-B change
-whose absolute value is no greater than that metric's absolute reference drift
-is additionally withheld with the change and drift percentages in `withheld`.
-Reference drift is a noise floor, not a performance claim; absent reference and
-drift fields are explicit nulls, and human output prints absent drift as `n/a`.
+`reference`. The baseline range then becomes the union of A's and A2's ranges
+before the overlap test, and overlap strings say so; a reference cell without a
+range leaves A's range unchanged. `drift` reports raw median changes from A to
+A2 for each metric without gating: a noise floor for reading, not a claim.
+Absent reference and drift fields are explicit nulls; human output prints absent
+drift as `n/a`. The comparison JSON is `version` 2: `*_change_percent` is null
+for an eligible cell whenever its ranges overlap, which version 1 never did.
 
 ## Validation
 

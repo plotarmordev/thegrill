@@ -624,6 +624,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
         .enumerate()
         .map(|(index, (a, b))| {
             let drift = drift.as_ref().map(|drift| &drift[index]);
+            let a2 = reference.as_ref().map(|reference| &reference[index]);
             let same = a
                 .lane_completion_tokens
                 .iter()
@@ -640,37 +641,38 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
             let mut withheld = Vec::new();
+            // A repeat of the baseline widens its range: the candidate must clear the
+            // noise the baseline itself demonstrated, not just three trials of it.
             let mut matched_change = |name: &str,
                                       value: Option<f64>,
                                       a: Option<[f64; 2]>,
+                                      a2: Option<[f64; 2]>,
                                       b: Option<[f64; 2]>,
-                                      drift: Option<f64>| {
+                                      unit: (f64, usize)| {
                 let value = value.filter(|_| same)?;
                 let (a, b) = a.zip(b)?;
-                let separate = a[1] < b[0] || b[1] < a[0];
-                if !separate {
-                    withheld.push(if name == "wave latency" {
-                        format!(
-                            "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
-                            a[0] / 1_000_000.0,
-                            a[1] / 1_000_000.0,
-                            b[0] / 1_000_000.0,
-                            b[1] / 1_000_000.0
-                        )
+                let a = match a2 {
+                    Some(a2) => [a[0].min(a2[0]), a[1].max(a2[1])],
+                    None => a,
+                };
+                if a[1] < b[0] || b[1] < a[0] {
+                    return Some(value);
+                }
+                let (divisor, decimals) = unit;
+                let [a0, a1, b0, b1] = [a[0], a[1], b[0], b[1]].map(|v| v / divisor);
+                withheld.push(format!(
+                    "{name}: ranges overlap, {a0:.*}-{a1:.*} vs {b0:.*}-{b1:.*}{}",
+                    decimals,
+                    decimals,
+                    decimals,
+                    decimals,
+                    if a2.is_some() {
+                        " (baseline pooled with reference)"
                     } else {
-                        format!(
-                            "{name}: ranges overlap, {:.1}-{:.1} vs {:.1}-{:.1}",
-                            a[0], a[1], b[0], b[1]
-                        )
-                    });
-                }
-                if let Some(drift) = drift.filter(|drift| value.abs() <= drift.abs()) {
-                    withheld.push(format!(
-                        "{name}: change {value:+.2}% within reference drift {drift:+.2}%"
-                    ));
-                    return None;
-                }
-                separate.then_some(value)
+                        ""
+                    }
+                ));
+                None
             };
             CellChange {
                 cell: a.cell.clone(),
@@ -683,8 +685,9 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     "wave latency",
                     change(a.median_wave_latency_us, b.median_wave_latency_us),
                     a.wave_latency_us_range,
+                    a2.and_then(|a2| a2.wave_latency_us_range),
                     b.wave_latency_us_range,
-                    drift.and_then(|d| d.wave_latency_percent),
+                    (1_000_000.0, 2),
                 ),
                 achieved_throughput_change_percent: matched_change(
                     "achieved throughput",
@@ -693,8 +696,9 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                         b.median_achieved_completion_tokens_per_second,
                     ),
                     a.achieved_completion_tokens_per_second_range,
+                    a2.and_then(|a2| a2.achieved_completion_tokens_per_second_range),
                     b.achieved_completion_tokens_per_second_range,
-                    drift.and_then(|d| d.achieved_throughput_percent),
+                    (1.0, 1),
                 ),
                 decode_rate_change_percent: matched_change(
                     "decode rate",
@@ -703,8 +707,9 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                         b.median_decode_tokens_per_second,
                     ),
                     a.decode_tokens_per_second_range,
+                    a2.and_then(|a2| a2.decode_tokens_per_second_range),
                     b.decode_tokens_per_second_range,
-                    drift.and_then(|d| d.decode_rate_percent),
+                    (1.0, 1),
                 ),
                 prefill_rate_change_percent: matched_change(
                     "prefill rate",
@@ -713,15 +718,16 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                         b.median_prefill_tokens_per_second,
                     ),
                     a.prefill_tokens_per_second_range,
+                    a2.and_then(|a2| a2.prefill_tokens_per_second_range),
                     b.prefill_tokens_per_second_range,
-                    drift.and_then(|d| d.prefill_rate_percent),
+                    (1.0, 1),
                 ),
                 withheld,
             }
         })
         .collect();
     Ok(Comparison {
-        version: 1,
+        version: 2,
         claim: "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
         baseline_model: left.plan.model,
         candidate_model: right.plan.model,

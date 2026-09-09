@@ -2166,6 +2166,14 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
                     .starts_with("decode rate: ranges overlap")
             })
     );
+    // Null for the cache rule, not for overlap: nothing withheld names prefill.
+    assert!(
+        !report["changes"][0]["withheld"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().starts_with("prefill rate"))
+    );
 }
 
 #[test]
@@ -2546,7 +2554,7 @@ fn comparison_latency_change_survives_overlapping_throughput() {
 }
 
 #[test]
-fn comparison_reference_drift_withholds_smaller_and_equal_changes() {
+fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
     let temp = Temp::new();
     let server = spread_server(&[(100, 100, 8), (150, 150, 8), (350, 350, 8)]);
     let work = workload(1, 0, 1);
@@ -2623,18 +2631,20 @@ fn comparison_reference_drift_withholds_smaller_and_equal_changes() {
                     / report["baseline"][0][median].as_f64().unwrap()
                     - 1.0);
             assert!((d - expected).abs() < 1e-9);
-            assert!(c.abs() <= d.abs());
-            if reference == "b" {
-                assert_eq!(c, d);
-            }
+            assert!(c != 0.0);
+            // A and B alone are disjoint points; pooling the reference into the
+            // baseline range covers B, so the change is withheld as overlap.
             assert_eq!(change.get(field), Some(&Value::Null));
-            let reason = format!("{name}: change {c:+.2}% within reference drift {d:+.2}%");
-            assert!(
-                change["withheld"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(reason))
-            );
+            let reason = change["withheld"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|w| {
+                    w.as_str()
+                        .filter(|w| w.starts_with(&format!("{name}: ranges overlap")))
+                })
+                .unwrap();
+            assert!(reason.ends_with("(baseline pooled with reference)"));
             assert!(text.contains(&format!("  {reason}\n")));
             drift_parts.push(format!("{name} {d:+.2}%"));
         }
@@ -2644,7 +2654,7 @@ fn comparison_reference_drift_withholds_smaller_and_equal_changes() {
 }
 
 #[test]
-fn comparison_change_exceeding_reference_drift_remains_present() {
+fn comparison_change_outside_pooled_reference_range_remains_present() {
     let temp = Temp::new();
     let server = spread_server(&[
         (100, 100, 8),
@@ -2718,13 +2728,20 @@ fn comparison_change_exceeding_reference_drift_remains_present() {
             a[range][0].as_f64().unwrap() <= a2[range][1].as_f64().unwrap()
                 && a2[range][0].as_f64().unwrap() <= a[range][1].as_f64().unwrap()
         );
+        let pooled_max = a[range][1]
+            .as_f64()
+            .unwrap()
+            .max(a2[range][1].as_f64().unwrap());
+        let pooled_min = a[range][0]
+            .as_f64()
+            .unwrap()
+            .min(a2[range][0].as_f64().unwrap());
         assert!(
-            a[range][1].as_f64().unwrap() < b[range][0].as_f64().unwrap()
-                || b[range][1].as_f64().unwrap() < a[range][0].as_f64().unwrap()
+            pooled_max < b[range][0].as_f64().unwrap()
+                || b[range][1].as_f64().unwrap() < pooled_min
         );
         let c = report["changes"][0][field].as_f64().unwrap();
         let d = report["drift"][0][drift_field].as_f64().unwrap();
-        assert!(c.abs() > d.abs());
         let baseline = a[median].as_f64().unwrap();
         assert!((c - 100.0 * (b[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
         assert!((d - 100.0 * (a2[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
