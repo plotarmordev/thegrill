@@ -127,8 +127,8 @@ pub fn throughput(attempts: &[Attempt], elapsed_us: u64) -> (bool, Option<u64>, 
         .map(|n| n as f64 * 1_000_000.0 / elapsed_us as f64);
     (eligible && rate.is_some(), tokens, rate)
 }
-fn decode_rate(attempt: &Attempt, stream: bool) -> Option<f64> {
-    if attempt.status != Status::Complete || !stream {
+fn decode_rate(attempt: &Attempt) -> Option<f64> {
+    if attempt.status != Status::Complete {
         return None;
     }
     let tokens = attempt.usage.completion_tokens?;
@@ -426,7 +426,7 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                     Some(w) => w
                         .attempts
                         .iter()
-                        .map(|a| decode_rate(a, run.plan.workload.request.stream))
+                        .map(decode_rate)
                         .collect(),
                     None => vec![None; spec.concurrency as usize],
                 })
