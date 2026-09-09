@@ -12,8 +12,10 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 
 `request` declares `profile`, `stream`, `output: {tokens, mode}`, `cache`, and
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
-decimal sampling values. No other generation fields are sent or inferred.
-In particular, model-side thinking defaults are not silently overridden.
+decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
+and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
+No other generation fields are sent or inferred.
+Model-side thinking defaults are not overridden unless declared.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
 
 Each cell names a case, concurrency, warmup trial count and measured trial count.

@@ -726,6 +726,64 @@ fn explicit_fixed_cold_controls_are_sent_and_provider_evidence_is_checked() {
 }
 
 #[test]
+fn explicit_thinking_false_is_sent_on_every_request() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(2, 1, 1);
+    w["request"]["profile"] = json!("vllm-fixed-v1");
+    w["request"]["thinking"] = json!(false);
+    successful(&run(&temp, &server, "run", &w));
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 4);
+    for body in seen {
+        assert_eq!(body["chat_template_kwargs"]["thinking"], false);
+    }
+}
+
+#[test]
+fn explicit_thinking_true_is_sent_on_every_request() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(2, 1, 1);
+    w["request"]["profile"] = json!("vllm-fixed-v1");
+    w["request"]["thinking"] = json!(true);
+    successful(&run(&temp, &server, "run", &w));
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 4);
+    for body in seen {
+        assert_eq!(body["chat_template_kwargs"]["thinking"], true);
+    }
+}
+
+#[test]
+fn omitted_or_null_thinking_preserves_provider_defaults() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["request"]["profile"] = json!("vllm-fixed-v1");
+    successful(&run(&temp, &server, "omitted", &w));
+    w["request"]["thinking"] = Value::Null;
+    successful(&run(&temp, &server, "null", &w));
+    let seen: Vec<_> = server.seen.try_iter().collect();
+    assert_eq!(seen.len(), 2);
+    for body in seen {
+        assert!(body.get("chat_template_kwargs").is_none());
+    }
+}
+
+#[test]
+fn portable_thinking_is_rejected_before_dispatch() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let mut w = workload(1, 0, 1);
+    w["request"]["thinking"] = json!(false);
+    let output = run(&temp, &server, "run", &w);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    assert!(!temp.path("run").exists());
+}
+
+#[test]
 fn warm_prefix_protocol_reuses_primed_lane_salts_but_not_other_lanes() {
     let temp = Temp::new();
     let server = Server::new(|mut s, i, _| {
