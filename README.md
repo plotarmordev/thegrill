@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/the-grill.webp" width="180" height="180" alt="The Grill: an open charcoal barbecue">
+</p>
+
 # The Grill
 
 **Benchmark serving recipes. Evaluate model answers. Two tools, separate results.**
