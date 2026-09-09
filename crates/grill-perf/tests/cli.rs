@@ -2059,16 +2059,8 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
         report["baseline"][0]["lane_prefill_tokens_per_second"],
         json!([[null]])
     );
-    assert!(
-        report["baseline"][0]
-            .get("median_prefill_tokens_per_second")
-            .is_none()
-    );
-    assert!(
-        report["changes"][0]
-            .get("prefill_rate_change_percent")
-            .is_none()
-    );
+    assert!(report["baseline"][0]["median_prefill_tokens_per_second"].is_null());
+    assert!(report["changes"][0]["prefill_rate_change_percent"].is_null());
     assert!(report["changes"][0]["decode_rate_change_percent"].is_number());
 }
 
@@ -2104,7 +2096,7 @@ fn unequal_prompt_tokens_withhold_only_prefill_rate_change() {
         assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
     }
     let change = &report["changes"][0];
-    assert!(change.get("prefill_rate_change_percent").is_none());
+    assert!(change["prefill_rate_change_percent"].is_null());
     assert_eq!(change["eligible"], true);
     assert_eq!(change["observed_output_amounts_match"], true);
     assert_eq!(change["ineligibility_reasons"], json!([]));
