@@ -1521,3 +1521,201 @@ fn endpoint_size_and_control_characters_fail_before_output_creation() {
     }
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn streaming_decode_rate_uses_post_first_text_interval_and_measured_lanes() {
+    let temp = Temp::new();
+    let interval = Duration::from_millis(150);
+    let server = Server::new(move |mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        thread::sleep(Duration::from_millis(100));
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(if i < 2 {
+            Duration::from_millis(30)
+        } else {
+            interval
+        });
+        finish(&mut s, Some(8), None);
+    });
+    successful(&run(&temp, &server, "run", &workload(2, 1, 2)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let lanes = report["baseline"][0]["lane_decode_tokens_per_second"]
+        .as_array()
+        .unwrap();
+    assert_eq!(lanes.len(), 2);
+    let mut rates = Vec::new();
+    for (trial, values) in lanes.iter().enumerate() {
+        let receipt = wave(&temp, "run", trial + 1);
+        let values = values.as_array().unwrap();
+        assert_eq!(values.len(), 2);
+        for (lane, value) in values.iter().enumerate() {
+            let rate = value.as_f64().unwrap();
+            let attempt = &receipt["attempts"][lane];
+            let tokens = attempt["usage"]["completion_tokens"].as_u64().unwrap();
+            let first = attempt["timing"]["first_generated_text_us"].as_u64().unwrap();
+            let settle = attempt["timing"]["settle_us"].as_u64().unwrap();
+            let expected = (tokens - 1) as f64 * 1_000_000.0 / (settle - first) as f64;
+            assert!((rate - expected).abs() < 1e-9);
+            let paced = (tokens - 1) as f64 / interval.as_secs_f64();
+            assert!(rate > paced * 0.5 && rate < paced * 1.5, "{rate}");
+            rates.push(rate);
+        }
+    }
+    rates.sort_by(f64::total_cmp);
+    let median = report["baseline"][0]["median_decode_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((median - (rates[1] + rates[2]) / 2.0).abs() < 1e-9);
+}
+
+#[test]
+fn nonstreaming_decode_rate_is_null() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, _, _| {
+        header(&mut s, "application/json");
+        write!(s, "{}", json!({"choices":[{"message":{"content":"x"},"finish_reason":"stop"}],"usage":{"completion_tokens":8}})).unwrap();
+    });
+    let mut work = workload(1, 0, 1);
+    work["request"]["stream"] = json!(false);
+    successful(&run(&temp, &server, "run", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["baseline"][0]["lane_decode_tokens_per_second"],
+        json!([[null]])
+    );
+    assert!(
+        report["baseline"][0]
+            .get("median_decode_tokens_per_second")
+            .unwrap()
+            .is_null()
+    );
+    assert!(
+        report["changes"][0]
+            .get("decode_rate_change_percent")
+            .unwrap()
+            .is_null()
+    );
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .output()
+        .unwrap();
+    successful(&human);
+    assert_eq!(human.stdout.iter().filter(|b| **b == b'%').count(), 2);
+}
+
+#[test]
+fn single_completion_token_decode_rate_is_null() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, _, _| {
+        header(&mut s, "text/event-stream");
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(30));
+        finish(&mut s, Some(1), None);
+    });
+    successful(&run(&temp, &server, "run", &workload(1, 0, 1)));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("run"))
+        .arg(temp.path("run"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["baseline"][0]["lane_decode_tokens_per_second"],
+        json!([[null]])
+    );
+    assert!(
+        report["baseline"][0]
+            .get("median_decode_tokens_per_second")
+            .unwrap()
+            .is_null()
+    );
+    assert!(
+        report["changes"][0]
+            .get("decode_rate_change_percent")
+            .unwrap()
+            .is_null()
+    );
+}
+
+#[test]
+fn faster_streaming_decode_has_positive_matched_rate_change() {
+    let temp = Temp::new();
+    let server = Server::new(|mut s, i, _| {
+        header(&mut s, "text/event-stream");
+        frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+        thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
+        finish(&mut s, Some(8), None);
+    });
+    let work = workload(1, 0, 1);
+    successful(&run(&temp, &server, "baseline", &work));
+    successful(&run(&temp, &server, "candidate", &work));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let change = report["changes"][0]["decode_rate_change_percent"]
+        .as_f64()
+        .unwrap();
+    assert!(change > 0.0, "{change}");
+    let baseline = report["baseline"][0]["median_decode_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    let candidate = report["candidate"][0]["median_decode_tokens_per_second"]
+        .as_f64()
+        .unwrap();
+    assert!((change - 100.0 * (candidate / baseline - 1.0)).abs() < 1e-9);
+    assert!(
+        report["changes"][0]["achieved_throughput_change_percent"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    let human = cli()
+        .arg("compare")
+        .arg(temp.path("baseline"))
+        .arg(temp.path("candidate"))
+        .output()
+        .unwrap();
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    let percentages: Vec<f64> = text
+        .split_whitespace()
+        .filter_map(|word| word.trim_end_matches(';').strip_suffix('%'))
+        .map(|number| number.parse().unwrap())
+        .collect();
+    assert_eq!(percentages.len(), 3);
+    for (actual, field) in percentages.iter().zip([
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+    ]) {
+        let expected = report["changes"][0][field].as_f64().unwrap();
+        assert!((actual - expected).abs() <= 0.005);
+    }
+}

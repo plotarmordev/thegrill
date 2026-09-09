@@ -80,10 +80,16 @@ fn execute(cli: Cli) -> model::Result<bool> {
                         change.wave_latency_change_percent,
                         change.achieved_throughput_change_percent,
                     ) {
-                        (Some(latency), Some(rate)) => println!(
-                            "{}: wave latency {latency:+.2}%; achieved throughput {rate:+.2}%",
-                            change.cell
-                        ),
+                        (Some(latency), Some(rate)) => {
+                            print!(
+                                "{}: wave latency {latency:+.2}%; achieved throughput {rate:+.2}%",
+                                change.cell
+                            );
+                            if let Some(decode) = change.decode_rate_change_percent {
+                                print!("; decode rate {decode:+.2}%");
+                            }
+                            println!();
+                        }
                         _ => println!(
                             "{}: {}",
                             change.cell,

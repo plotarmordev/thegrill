@@ -113,6 +113,10 @@ verification rather than being repaired.
 - **Achieved completion throughput** uses complete provider-reported completion
   counts divided by that entire wave interval. It is not an answer-only token
   rate or a claim of steady-state server capacity.
+- **Per-stream decode rate** excludes prefill/TTFT and is defined to match the
+  sparkDash-comparable `(completion_tokens - 1) / (last - first)` rate. Settlement
+  stands in for last-token time and includes final `[DONE]`/usage frame parsing,
+  so this client-observed rate is slightly conservative.
 - **First body**, **first generated text** and **first answer text** are separate
   observations. Role-only events do not count as text; reasoning is generated
   text but not answer text. These are client observations, not GPU token times.
