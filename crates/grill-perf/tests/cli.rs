@@ -1560,7 +1560,9 @@ fn streaming_decode_rate_uses_post_first_text_interval_and_measured_lanes() {
             let rate = value.as_f64().unwrap();
             let attempt = &receipt["attempts"][lane];
             let tokens = attempt["usage"]["completion_tokens"].as_u64().unwrap();
-            let first = attempt["timing"]["first_generated_text_us"].as_u64().unwrap();
+            let first = attempt["timing"]["first_generated_text_us"]
+                .as_u64()
+                .unwrap();
             let settle = attempt["timing"]["settle_us"].as_u64().unwrap();
             let expected = (tokens - 1) as f64 * 1_000_000.0 / (settle - first) as f64;
             assert!((rate - expected).abs() < 1e-9);
