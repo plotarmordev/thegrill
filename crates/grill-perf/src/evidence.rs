@@ -623,7 +623,6 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
         .zip(&candidate)
         .enumerate()
         .map(|(index, (a, b))| {
-            let drift = drift.as_ref().map(|drift| &drift[index]);
             let a2 = reference.as_ref().map(|reference| &reference[index]);
             let same = a
                 .lane_completion_tokens
