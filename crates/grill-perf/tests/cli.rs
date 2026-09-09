@@ -777,10 +777,15 @@ fn portable_thinking_is_rejected_before_dispatch() {
     let server = Server::new(normal);
     let mut w = workload(1, 0, 1);
     w["request"]["thinking"] = json!(false);
-    let output = run(&temp, &server, "run", &w);
+    let output = run(&temp, &server, "portable", &w);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(server.count.load(Ordering::SeqCst), 0);
-    assert!(!temp.path("run").exists());
+    assert!(!temp.path("portable").exists());
+    // Same declaration under the explicit profile is admitted, so the refusal
+    // above is the profile rule, not unknown-field rejection.
+    w["request"]["profile"] = json!("vllm-fixed-v1");
+    successful(&run(&temp, &server, "fixed", &w));
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
