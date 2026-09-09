@@ -999,10 +999,10 @@ fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
         ("body", false, 6 * 65536 + 512 * 1024),
     ] {
         w["request"]["stream"] = json!(stream);
-        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 6 + 400) - 1);
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 400) - 1);
         assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
         assert!(!temp.path(name).exists());
-        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 6 + 400));
+        w["limits"]["wave_buffer_bytes"] = json!(2 * (base + 400));
         successful(&run(&temp, &server, name, &w));
         assert_eq!(wave(&temp, name, 0)["attempts"][0]["status"], "complete");
     }
@@ -1010,28 +1010,35 @@ fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
 }
 
 #[test]
-fn fill_wave_reservation_bound_counts_encoded_request_bytes() {
+fn fill_wave_reservation_bound_counts_escaped_request_bytes() {
     let temp = Temp::new();
     let server = Server::new(normal);
-    for (index, (name, unit, concurrency)) in [("plain", "x", 24), ("escaped", "\"", 12)]
-        .into_iter()
-        .enumerate()
-    {
-        let mut w = workload(concurrency, 0, 1);
+    // A quote unit doubles when the body is embedded as a JSON string in the receipt.
+    for (name, unit, rejected, admitted) in [("plain", "x", 40, 1), ("escaped", "\"", 12, 7)] {
+        let mut w = workload(rejected, 0, 1);
         w["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
         w["cases"][0]["messages"][0]["content"] = json!("{fill}");
         w["cases"][0]["fill"] = json!({"unit":unit,"repeat":1000000});
+        let sent = server.count.load(Ordering::SeqCst);
         assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
         assert!(!temp.path(name).exists());
-        assert_eq!(server.count.load(Ordering::SeqCst), index);
-        w["cells"][0]["concurrency"] = json!(1);
+        assert_eq!(server.count.load(Ordering::SeqCst), sent);
+        w["cells"][0]["concurrency"] = json!(admitted);
         successful(&run(&temp, &server, name, &w));
         let reservation = value(temp.path(name).join("wave-000000/reservation.json"));
-        let bytes = reservation["requests"][0].as_str().unwrap().len();
-        assert!(bytes < 2 * 1024 * 1024);
-        assert!(bytes * concurrency as usize > 20 * 1024 * 1024);
+        let body = reservation["requests"][0].as_str().unwrap();
+        assert!(body.len() < 2 * 1024 * 1024);
+        let escaped = serde_json::to_string(body).unwrap().len();
+        assert!(escaped * rejected as usize > 32 * 1024 * 1024);
+        assert!(escaped * admitted as usize <= 32 * 1024 * 1024);
+        let output = cli()
+            .arg("compare")
+            .arg(temp.path(name))
+            .arg(temp.path(name))
+            .output()
+            .unwrap();
+        successful(&output);
     }
-    assert_eq!(server.count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -2059,8 +2066,14 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
         report["baseline"][0]["lane_prefill_tokens_per_second"],
         json!([[null]])
     );
-    assert!(report["baseline"][0]["median_prefill_tokens_per_second"].is_null());
-    assert!(report["changes"][0]["prefill_rate_change_percent"].is_null());
+    assert_eq!(
+        report["baseline"][0].get("median_prefill_tokens_per_second"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        report["changes"][0].get("prefill_rate_change_percent"),
+        Some(&Value::Null)
+    );
     assert!(report["changes"][0]["decode_rate_change_percent"].is_number());
 }
 
@@ -2096,7 +2109,10 @@ fn unequal_prompt_tokens_withhold_only_prefill_rate_change() {
         assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
     }
     let change = &report["changes"][0];
-    assert!(change["prefill_rate_change_percent"].is_null());
+    assert_eq!(
+        change.get("prefill_rate_change_percent"),
+        Some(&Value::Null)
+    );
     assert_eq!(change["eligible"], true);
     assert_eq!(change["observed_output_amounts_match"], true);
     assert_eq!(change["ineligibility_reasons"], json!([]));

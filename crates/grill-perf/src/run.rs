@@ -139,9 +139,11 @@ pub fn execute(o: &Options) -> Result<Summary> {
                 trial,
                 concurrency: cell.concurrency,
             };
-            if wire::request_body(&plan, &bound, lane)?.len() * cell.concurrency as usize
-                > 20 * 1024 * 1024
-            {
+            // Reservation receipts embed each body as a JSON string; the 40 MiB
+            // loader cap must hold after that second escaping plus pretty-print.
+            let body = wire::request_body(&plan, &bound, lane)?;
+            let escaped = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+            if escaped.len() * cell.concurrency as usize > 32 * 1024 * 1024 {
                 return Err(format!(
                     "cell {} exceeds the reservation receipt bound",
                     cell.id

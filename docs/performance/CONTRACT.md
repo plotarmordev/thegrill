@@ -13,8 +13,7 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 `request` declares `profile`, `stream`, `output: {tokens, mode}`, `cache`, and
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
 decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
-and is sent as both `chat_template_kwargs.thinking` and
-`chat_template_kwargs.enable_thinking`; null leaves the provider default.
+and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
 No other generation fields are sent or inferred.
 Model-side thinking defaults are not overridden unless declared.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
@@ -44,14 +43,13 @@ and JSON nesting is limited to 64. Per-request total/idle deadlines are explicit
 positive, at most ten minutes, with idle no greater than total.
 
 Admission checks the wave-buffer allowance against concurrency times
-`2*response_bytes + 6*256KiB + 512KiB + rendered_bytes` for streaming, or
-`6*response_bytes + 512KiB + rendered_bytes` for nonstreaming, where
-`rendered_bytes` is the cell's case declared content sum plus `unit.len()*repeat`
-(zero fill bytes when absent). The latter budgets body-sized JSON scratch and
-decoded fields rather than assuming frame-sized parsing.
-Encoded request bytes at the admission bound widths times concurrency must not
-exceed 20 MiB, leaving room for embedded-body JSON escaping within the 40 MiB
-reservation receipt limit.
+`2*response_bytes + 6*256KiB + 512KiB + fill_bytes` for streaming, or
+`6*response_bytes + 512KiB + fill_bytes` for nonstreaming, where `fill_bytes` is
+the cell's case `unit.len()*repeat` (zero when absent). The latter budgets
+body-sized JSON scratch and decoded fields rather than assuming frame-sized parsing.
+Each request body, JSON-string-escaped as it is embedded in the reservation receipt
+and rendered at the admission bound widths, times concurrency must not exceed
+32 MiB, within the 40 MiB reservation receipt limit.
 Serialized reservation buffers are released before dispatch. These are
 conservative owned-buffer allowances, **not** RSS or kernel/socket-memory
 guarantees. The allowance cannot exceed 512 MiB. HTTP-library, TLS and process
@@ -78,7 +76,7 @@ observation immediately before its request is executed. It records:
 | `settle_us` | Dispatch to completion or failure settlement, including collection/parse work. |
 | `capture_parse_us` | Accumulated elapsed intervals inside capture/parse sections; not process CPU time or server time. |
 | Derived per-stream decode tokens/s | For a complete streaming attempt with `completion_tokens = n >= 2`, `(n - 1) * 1_000_000 / (settle_us - first_generated_text_us)` when the first generated text time is present and settlement is later; otherwise null. Derived offline, not persisted in wave receipts. Settlement includes final `[DONE]`/usage frame parsing, making this slightly conservative relative to last-token timing. |
-| Derived per-stream prefill tokens/s | For a complete streaming attempt with `prompt_tokens = p >= 1`, `first_generated_text_us = t > 0`, and provider-reported cached prompt tokens absent or zero, `p * 1_000_000 / t`; otherwise null. Matches sparkDash prompt_tokens/TTFT, including queueing and first-token generation. Derived offline, not persisted in wave receipts; absent optional summary medians and changes are omitted from JSON. |
+| Derived per-stream prefill tokens/s | For a complete streaming attempt with `prompt_tokens = p >= 1`, `first_generated_text_us = t > 0`, and provider-reported cached prompt tokens absent or zero, `p * 1_000_000 / t`; otherwise null. Matches sparkDash prompt_tokens/TTFT, including queueing and first-token generation. Derived offline, not persisted in wave receipts. |
 
 Fragmented events become observable when their framing boundary arrives. Multiple
 events in one received chunk share its arrival observation. Gateway buffering,

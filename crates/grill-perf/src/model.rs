@@ -210,16 +210,16 @@ impl Workload {
                 return Err("reported-prefix-hit requires explicit warmup priming".into());
             }
             let case = self.cases.iter().find(|case| case.id == cell.case).unwrap();
+            let fill_bytes = case
+                .fill
+                .as_ref()
+                .map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
             // Streaming semantics are frame-bounded; nonstreaming decoding is body-bounded.
             let per_request = if r.stream {
                 2 * l.response_bytes + 6 * FRAME_CAP + 512 * 1024
             } else {
                 6 * l.response_bytes + 512 * 1024
-            } + case.messages.iter().map(|m| m.content.len()).sum::<usize>()
-                + case
-                    .fill
-                    .as_ref()
-                    .map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
+            } + fill_bytes;
             if per_request * cell.concurrency as usize > l.wave_buffer_bytes {
                 return Err(format!(
                     "cell {} exceeds the admitted wave buffer bound",
