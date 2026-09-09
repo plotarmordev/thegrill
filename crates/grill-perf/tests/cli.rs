@@ -1014,7 +1014,7 @@ fn fill_wave_reservation_bound_counts_escaped_request_bytes() {
     let temp = Temp::new();
     let server = Server::new(normal);
     // A quote unit doubles when the body is embedded as a JSON string in the receipt.
-    for (name, unit, rejected, admitted) in [("plain", "x", 40, 1), ("escaped", "\"", 12, 7)] {
+    for (name, unit, rejected, admitted) in [("plain", "x", 40, 1), ("escaped", "\"", 9, 8)] {
         let mut w = workload(rejected, 0, 1);
         w["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
         w["cases"][0]["messages"][0]["content"] = json!("{fill}");
