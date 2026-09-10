@@ -1,5 +1,6 @@
 mod evidence;
 mod lifecycle;
+mod metrics;
 mod model;
 mod run;
 mod wire;

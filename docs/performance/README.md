@@ -264,6 +264,62 @@ reported count. A flag plus a reported zero is **not universal proof of cold
 cache state**. Model weights, operating-system/JIT/GPU caches and engine state
 are not inspected or flushed. Missing usage remains unknown, never zero.
 
+## Optional provider snapshots
+
+Add `--metrics-url https://your-server.example/metrics` to `run` to retain bounded
+vLLM Prometheus diagnostics. The endpoint follows the model transport's URL/TLS
+policy, but uses a separate client and **never receives model authorization**.
+There is no discovery, redirect, retry, idle gate or additional model request.
+An endpoint requiring authentication will report a scrape failure; this option
+does not add metrics credentials.
+
+The fixed allowlist contains `vllm:spec_decode_num_draft_tokens_total`,
+`vllm:spec_decode_num_accepted_tokens_total`, `vllm:num_requests_running` and
+`vllm:num_requests_waiting`. Counters are matched by name and the complete
+canonical label set, never summed across engines/models. Before/after samples,
+counter deltas, null reset/missing results and compatible acceptance ratios
+appear in `compare RUN RUN --json` under `baseline_metrics`; gauges remain
+snapshots. A nondecreasing counter does not prove that no restart occurred.
+These are **server-wide diagnostics, not this workload's attributed tokens**.
+Other clients can contribute to the same series.
+
+The before scrape follows durable wave reservation and finishes before the
+measured origin. The after scrape starts only after all lanes settle, including
+failed/interrupted lanes. Scrape timestamps, durations and total telemetry
+overhead are separate from measured wave latency. **Outside the timer is not
+measurement-neutral**: scraping and evidence publication can change server load,
+cache warmth and between-wave cadence. Comparison requires identical telemetry
+configuration, including endpoint identity; opted-in and opted-out runs do not
+silently qualify as matching conditions.
+Signals still cancel model lanes, but telemetry is deadline-bounded rather than
+signal-cancelled: an active snapshot and the required after snapshot can delay
+exit. Cooperative pause continues to drain and publish the whole admitted wave.
+
+The frozen protocol allows a deadline of at most 2 seconds per scrape, 1 MiB
+body, 64 KiB line, 256 selected sample series, 16 labels and 4096 encoded label-set
+bytes per selected series. Comments and unselected samples consume body/line
+bounds but are skipped before label/value parsing and selected-series accounting. The whole-run
+telemetry allowance is 30 seconds and retained raw data is at most 16 MiB,
+with at most twice the planned wave count in requests. Each new scrape gets
+the smaller of its deadline and remaining time. Elapsed capture/parse and raw
+publication time are charged, not a full deadline for fast scrapes. Companion
+publication overhead is charged before the next wave. Raw admission reserves a full
+body allowance. Exhaustion retains `skipped_budget`, without another call.
+Filesystem synchronization and OS scheduling cannot be given a hard wall-clock
+guarantee; actual overhead is retained, and scheduling overrun consumes the
+remaining scrape allowance rather than renewing it.
+
+Resume reconstructs consumption from verified retained snapshots, not a new
+budget. Unsettled, interrupted or partially published work is not resumable.
+Scrape failures preserve bounded raw bytes and errors without changing otherwise
+valid performance eligibility. Missing promised evidence, changed hashes and
+local publication failures remain integrity/I/O errors.
+
+Metrics endpoints, labels and raw bodies can expose private model names, request
+identifiers or other server content, including unsupported metrics and comments.
+Review all retained bytes before sharing; the allowlist is not a privacy filter.
+See the [snapshot schema and bounds](CONTRACT.md#provider-snapshot-protocol).
+
 ## Deployment declarations and privacy
 
 `--deployment FILE` optionally records a closed JSON object with nullable
