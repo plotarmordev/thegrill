@@ -1358,6 +1358,146 @@ fn timeout_settles_partial_evidence_without_starting_more_waves() {
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn longer_deadline_declarations_complete_without_waiting_for_the_budget_and_load() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    for total in [600_000, 2_700_000, 3_600_000] {
+        let name = total.to_string();
+        let mut w = workload(1, 0, 1);
+        w["limits"]["total_ms"] = json!(total);
+        w["limits"]["idle_ms"] = json!(total);
+        successful(&run(&temp, &server, &name, &w));
+        assert_eq!(wave(&temp, &name, 0)["attempts"][0]["status"], "complete");
+        successful(
+            &cli()
+                .arg("compare")
+                .arg(temp.path(&name))
+                .arg(temp.path(&name))
+                .arg("--json")
+                .output()
+                .unwrap(),
+        );
+    }
+    let compared = cli()
+        .arg("compare")
+        .arg(temp.path("600000"))
+        .arg(temp.path("2700000"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(compared.status.code(), Some(1));
+}
+
+#[test]
+fn deadline_and_buffer_admission_names_the_failed_field_before_dispatch() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    for (name, field, supplied, related) in [
+        ("total-zero", "total_ms", 0, "3600000"),
+        ("total-over", "total_ms", 3_600_001, "3600000"),
+        ("idle-zero", "idle_ms", 0, "positive"),
+        ("idle-over", "idle_ms", 3001, "limits.total_ms=3000"),
+        ("response-under", "response_bytes", 1023, "8388608"),
+        (
+            "response-over",
+            "response_bytes",
+            8 * 1024 * 1024 + 1,
+            "1024",
+        ),
+        (
+            "wave-over",
+            "wave_buffer_bytes",
+            512 * 1024 * 1024 + 1,
+            "536870912",
+        ),
+        ("wave-under", "wave_buffer_bytes", 1, "cell cell"),
+    ] {
+        let mut w = workload(1, 0, 1);
+        w["limits"][field] = json!(supplied);
+        let output = run(&temp, &server, name, &w);
+        assert_eq!(output.status.code(), Some(1));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(&format!("limits.{field}")), "{error}");
+        assert!(error.contains(&supplied.to_string()), "{error}");
+        assert!(error.contains(related), "{error}");
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn idle_still_expires_and_body_traffic_cannot_reset_total() {
+    for (name, total, idle, traffic, expected) in [
+        ("idle", 3_600_000, 200, false, "idle_timeout"),
+        ("tie", 200, 200, false, "total_timeout"),
+        ("traffic", 1200, 400, true, "total_timeout"),
+    ] {
+        let temp = Temp::new();
+        let (ready, releases) = std::sync::mpsc::sync_channel(1);
+        let server = Server::new(move |mut s, _, _| {
+            header(&mut s, "text/event-stream");
+            let (release, wait) = std::sync::mpsc::sync_channel(1);
+            ready.send(release).unwrap();
+            if traffic {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    if s.write_all(b": heartbeat\n\n").is_err() {
+                        break;
+                    }
+                    match wait.recv_timeout(Duration::from_millis(20)) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            } else {
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        });
+        let mut w = workload(1, 0, 2);
+        w["limits"]["total_ms"] = json!(total);
+        w["limits"]["idle_ms"] = json!(idle);
+        let input = temp.path("input.json");
+        fs::write(&input, serde_json::to_vec(&w).unwrap()).unwrap();
+        let mut child = cli()
+            .arg("run")
+            .arg(input)
+            .args([
+                "--endpoint",
+                &server.endpoint,
+                "--model",
+                "fixture-model",
+                "--local-http",
+                "--json",
+                "--out",
+            ])
+            .arg(temp.path(name))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        server.wait_for_request(&mut child);
+        let release = releases.recv_timeout(Duration::from_secs(3)).unwrap();
+        let output = child.wait_with_output().unwrap();
+        // The collector closes the connection at expiry; the heartbeat writer
+        // may already have observed that close instead of waiting for release.
+        let _ = release.send(());
+        assert_eq!(output.status.code(), Some(2));
+        let receipt = wave(&temp, name, 0);
+        let attempt = &receipt["attempts"][0];
+        assert_eq!(attempt["status"], expected);
+        assert!(attempt["timing"]["first_generated_text_us"].is_null());
+        if traffic {
+            assert!(attempt["timing"]["first_body_us"].is_number());
+            assert!(attempt["timing"]["settle_us"].as_u64().unwrap() >= total as u64 * 1000);
+            let raw = fs::read(temp.path(name).join("wave-000000/response-0000.bin")).unwrap();
+            assert!(raw.starts_with(b": heartbeat\n\n"));
+        }
+        assert_eq!(server.count.load(Ordering::SeqCst), 1);
+        assert!(!temp.path(name).join("wave-000001").exists());
+    }
+}
+
 fn cancellation_case(signal: i32) {
     let temp = Temp::new();
     let (ready, releases) = std::sync::mpsc::sync_channel(2);
