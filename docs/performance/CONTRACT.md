@@ -53,7 +53,19 @@ IDs are unique short ASCII identifiers.
 
 Response limits are 1 KiB..8 MiB per request. SSE line and event caps are 256 KiB,
 and JSON nesting is limited to 64. Per-request total/idle deadlines are explicit,
-positive, at most ten minutes, with idle no greater than total.
+positive, with `total_ms` at most 3,600,000 (one hour) and idle no greater than
+total. This finite ceiling is an admission policy, not a runtime guarantee.
+Selected budgets remain explicit workload identity; existing declarations are
+not increased automatically. Admission errors identify the failed deadline or
+buffer field and relation, before dispatch.
+
+Both clocks start at dispatch. Only nonempty body chunks reset idle; headers,
+empty chunks and server-side progress do not. SSE comments can reset idle without
+generated text. Total never resets, and completion parsing/settlement must fit
+it. Cancellation takes precedence over total expiry, then idle expiry. Raising
+total alone cannot prevent a shorter idle timeout during quiet prefill.
+Longer selected budgets can lengthen active-wave drain and cooperative pause
+latency. No retry, hidden override or buffer expansion accompanies the ceiling.
 
 Admission checks the wave-buffer allowance against concurrency times
 `2*response_bytes + 6*256KiB + 512KiB + fill_bytes` for streaming, or

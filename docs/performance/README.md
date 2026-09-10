@@ -59,8 +59,12 @@ three measured trials per size) instead of one request per size; output is
 exactly 8 tokens rather than a cap of 8 so runs stay length matched; the salt is
 per attempt; thinking is disabled through `chat_template_kwargs.thinking` only,
 so check `first_generated_channel` is `answer` in the receipts.
-Both deadlines are set to the ten-minute `total_ms` ceiling because prefill
-sends no bytes before the first token; check larger sizes fit it.
+Both selected deadlines remain ten minutes because prefill may send no bytes
+before the first token; they are not the admission ceiling. The supported
+`total_ms` ceiling is one hour, with positive `idle_ms <= total_ms`. Raise both
+explicit declarations when a longer quiet prefill is intended; raising total
+alone does not fix idle expiry. This is a bounded policy, not a server-runtime
+guarantee, and longer budgets can lengthen cooperative pause/wave drain.
 
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):

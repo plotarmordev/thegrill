@@ -194,14 +194,32 @@ impl Workload {
             return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
         }
         let l = &self.limits;
-        if l.total_ms == 0
-            || l.total_ms > 600_000
-            || l.idle_ms == 0
-            || l.idle_ms > l.total_ms
-            || !(1024..=8 * 1024 * 1024).contains(&l.response_bytes)
-            || l.wave_buffer_bytes > 512 * 1024 * 1024
-        {
-            return Err("invalid deadline or buffering limits".into());
+        if l.total_ms == 0 || l.total_ms > 3_600_000 {
+            return Err(format!(
+                "limits.total_ms={} must be in 1..=3600000",
+                l.total_ms
+            ));
+        }
+        if l.idle_ms == 0 {
+            return Err(format!("limits.idle_ms={} must be positive", l.idle_ms));
+        }
+        if l.idle_ms > l.total_ms {
+            return Err(format!(
+                "limits.idle_ms={} must be <= limits.total_ms={}",
+                l.idle_ms, l.total_ms
+            ));
+        }
+        if !(1024..=8 * 1024 * 1024).contains(&l.response_bytes) {
+            return Err(format!(
+                "limits.response_bytes={} must be in 1024..=8388608",
+                l.response_bytes
+            ));
+        }
+        if l.wave_buffer_bytes > 512 * 1024 * 1024 {
+            return Err(format!(
+                "limits.wave_buffer_bytes={} must be <= 536870912",
+                l.wave_buffer_bytes
+            ));
         }
         let mut names = std::collections::HashSet::new();
         let mut attempts = 0u64;
@@ -233,10 +251,11 @@ impl Workload {
             } else {
                 6 * l.response_bytes + 512 * 1024
             } + fill_bytes;
-            if per_request * cell.concurrency as usize > l.wave_buffer_bytes {
+            let required = per_request * cell.concurrency as usize;
+            if required > l.wave_buffer_bytes {
                 return Err(format!(
-                    "cell {} exceeds the admitted wave buffer bound",
-                    cell.id
+                    "cell {} requires limits.wave_buffer_bytes >= {required}, supplied {}; concurrency={}, stream={}, response_bytes={}, fill_bytes={fill_bytes}",
+                    cell.id, l.wave_buffer_bytes, cell.concurrency, r.stream, l.response_bytes
                 ));
             }
             let n = u64::from(cell.trials) + u64::from(cell.warmup_trials);
