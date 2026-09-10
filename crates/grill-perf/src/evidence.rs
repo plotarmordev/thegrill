@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -127,7 +127,7 @@ pub fn throughput(attempts: &[Attempt], elapsed_us: u64) -> (bool, Option<u64>, 
         .map(|n| n as f64 * 1_000_000.0 / elapsed_us as f64);
     (eligible && rate.is_some(), tokens, rate)
 }
-fn decode_rate(attempt: &Attempt) -> Option<f64> {
+pub(crate) fn decode_sample(attempt: &Attempt) -> Option<(u64, u64)> {
     if attempt.status != Status::Complete {
         return None;
     }
@@ -137,9 +137,9 @@ fn decode_rate(attempt: &Attempt) -> Option<f64> {
     if tokens < 2 || settle <= first {
         return None;
     }
-    Some((tokens - 1) as f64 * 1_000_000.0 / (settle - first) as f64)
+    Some((tokens - 1, settle - first))
 }
-fn prefill_rate(attempt: &Attempt) -> Option<f64> {
+pub(crate) fn prefill_sample(attempt: &Attempt) -> Option<(u64, u64)> {
     if attempt.status != Status::Complete
         || attempt.usage.cached_prompt_tokens.is_some_and(|n| n > 0)
     {
@@ -150,7 +150,13 @@ fn prefill_rate(attempt: &Attempt) -> Option<f64> {
     if tokens == 0 || first == 0 {
         return None;
     }
-    Some(tokens as f64 * 1_000_000.0 / first as f64)
+    Some((tokens, first))
+}
+fn decode_rate(attempt: &Attempt) -> Option<f64> {
+    decode_sample(attempt).map(|(n, d)| n as f64 * 1_000_000.0 / d as f64)
+}
+fn prefill_rate(attempt: &Attempt) -> Option<f64> {
+    prefill_sample(attempt).map(|(n, d)| n as f64 * 1_000_000.0 / d as f64)
 }
 pub struct Loaded {
     pub plan: Plan,
@@ -158,8 +164,32 @@ pub struct Loaded {
     pub states: Vec<&'static str>,
     pub history: crate::lifecycle::History,
     pub metrics: Option<crate::metrics::Summary>,
+    pub policy: Option<crate::policy::Policy>,
+    pub plan_sha256: String,
+    pub evidence_sha256: String,
+    pub lineage_sha256: String,
 }
 pub fn load(root: &Path) -> Result<Loaded> {
+    load_verified(root).map_err(|error| error.detail)
+}
+pub(crate) struct LoadError {
+    pub reason: crate::policy::Reason,
+    pub detail: String,
+}
+impl From<String> for LoadError {
+    fn from(detail: String) -> Self {
+        Self {
+            reason: crate::policy::Reason::InvalidEvidence,
+            detail,
+        }
+    }
+}
+impl From<&str> for LoadError {
+    fn from(detail: &str) -> Self {
+        detail.to_owned().into()
+    }
+}
+pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     directory(root)?;
     let plan_bytes = read(&root.join("plan.json"), 8 * 1024 * 1024)?;
     let plan: Plan = decode(&plan_bytes)?;
@@ -212,8 +242,36 @@ pub fn load(root: &Path) -> Result<Loaded> {
     {
         return Err("workload or schedule identity mismatch".into());
     }
+    let policy = plan
+        .policy_sha256
+        .as_ref()
+        .map(|hash| {
+            let bytes = read(&root.join("policy.json"), crate::policy::CAP).map_err(|detail| {
+                LoadError {
+                    reason: crate::policy::Reason::InvalidPolicy,
+                    detail,
+                }
+            })?;
+            if digest(&bytes) != *hash {
+                return Err(LoadError {
+                    reason: crate::policy::Reason::PolicyHashMismatch,
+                    detail: "policy sidecar hash mismatch".into(),
+                });
+            }
+            crate::policy::parse(&bytes, &plan).map_err(|reason| LoadError {
+                detail: reason.as_str().into(),
+                reason,
+            })
+        })
+        .transpose()?;
     crate::wire::endpoint(&plan.endpoint, plan.local_http)?;
     let plan_hash = digest(&plan_bytes);
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(b"grill-perf-evidence-v1\0");
+    fingerprint.update(plan_hash.as_bytes());
+    fingerprint.update(plan.source_sha256.as_bytes());
+    let mut lineage = Sha256::new();
+    lineage.update(b"grill-perf-acquisition-lineage-v1\0");
     let mut waves = Vec::with_capacity(plan.waves.len());
     let mut states = Vec::with_capacity(plan.waves.len());
     let mut metrics_budget = crate::metrics::Budget::default();
@@ -221,6 +279,7 @@ pub fn load(root: &Path) -> Result<Loaded> {
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
+            fingerprint.update(b"not_started\0");
             waves.push(None);
             states.push("not_started");
             continue;
@@ -228,6 +287,8 @@ pub fn load(root: &Path) -> Result<Loaded> {
         directory(&dir)?;
         let reservation_bytes = read(&dir.join("reservation.json"), 40 * 1024 * 1024)?;
         let reservation: Reservation = decode(&reservation_bytes)?;
+        let reservation_hash = digest(&reservation_bytes);
+        fingerprint.update(reservation_hash.as_bytes());
         if reservation.version != 1
             || reservation.plan_sha256 != plan_hash
             || reservation.wave != *spec
@@ -251,14 +312,33 @@ pub fn load(root: &Path) -> Result<Loaded> {
         }
         let path = dir.join("wave.json");
         if !exists(&path)? {
+            fingerprint.update(b"reserved_unsettled\0");
             waves.push(None);
             states.push("reserved_unsettled");
             continue;
         }
-        let wave: Wave = decode(&read(&path, FILE_CAP)?)?;
+        let wave_bytes = read(&path, FILE_CAP)?;
+        fingerprint.update(b"published\0");
+        fingerprint.update(digest(&wave_bytes).as_bytes());
+        let wave: Wave = decode(&wave_bytes)?;
+        lineage.update(
+            digest(
+                &serde_json::to_vec(&(
+                    &wave.spec,
+                    &wave.attempts,
+                    wave.elapsed_us,
+                    wave.dispatch_spread_us,
+                    wave.preparation_us,
+                    wave.reservation_publication_us,
+                    wave.body_publication_us,
+                ))
+                .map_err(|e| e.to_string())?,
+            )
+            .as_bytes(),
+        );
         if wave.version != 1
             || wave.plan_sha256 != plan_hash
-            || wave.reservation_sha256 != digest(&reservation_bytes)
+            || wave.reservation_sha256 != reservation_hash
             || wave.spec != *spec
             || wave.attempts.len() != spec.concurrency as usize
         {
@@ -363,6 +443,8 @@ pub fn load(root: &Path) -> Result<Loaded> {
         states.push("published");
     }
     let history = crate::lifecycle::history(root, &plan, &plan_hash, &states, &waves)?;
+    fingerprint.update(history.evidence_sha256.as_bytes());
+    lineage.update(history.lineage_sha256.as_bytes());
     Ok(Loaded {
         metrics: plan.metrics.as_ref().map(|config| crate::metrics::Summary {
             config: config.clone(),
@@ -373,6 +455,10 @@ pub fn load(root: &Path) -> Result<Loaded> {
         waves,
         states,
         history,
+        policy,
+        plan_sha256: plan_hash,
+        evidence_sha256: hex(&fingerprint.finalize()),
+        lineage_sha256: hex(&lineage.finalize()),
     })
 }
 #[derive(Serialize)]
@@ -646,7 +732,7 @@ pub struct ReferenceIdentity {
     pub reasons: Vec<String>,
     pub scope: &'static str,
 }
-fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
+pub(crate) fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
     let mut reasons = Vec::new();
     let mut mismatch = false;
     let mut declaration = |name: &str, a: Option<&str>, a2: Option<&str>| match (
@@ -718,6 +804,15 @@ fn complete_lane_observations(values: &[Vec<Option<f64>>]) -> bool {
     values.iter().flatten().all(Option::is_some)
 }
 
+pub(crate) fn compatible(a: &Plan, b: &Plan) -> bool {
+    a.workload_sha256 == b.workload_sha256
+        && a.tool_version == b.tool_version
+        && a.collector_sha256 == b.collector_sha256
+        && a.local_http == b.local_http
+        && a.pool_max_idle_per_host == b.pool_max_idle_per_host
+        && a.metrics == b.metrics
+}
+
 pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;
@@ -727,13 +822,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
     for (side, other) in
         std::iter::once(("candidate", &right)).chain(reference.iter().map(|run| ("reference", run)))
     {
-        if left.plan.workload_sha256 != other.plan.workload_sha256
-            || left.plan.tool_version != other.plan.tool_version
-            || left.plan.collector_sha256 != other.plan.collector_sha256
-            || left.plan.local_http != other.plan.local_http
-            || left.plan.pool_max_idle_per_host != other.plan.pool_max_idle_per_host
-            || left.plan.metrics != other.plan.metrics
-        {
+        if !compatible(&left.plan, &other.plan) {
             return Err(format!(
                 "{side}: incompatible workload, tool, transport or metrics controls; no matched comparison produced"
             ));

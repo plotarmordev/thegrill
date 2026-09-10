@@ -4,6 +4,29 @@ Workloads and wave receipts remain v1. New execution plans are v2, adding mandat
 execution-session provenance without changing request rendering or wave timing.
 Legacy v1 plans remain readable offline but cannot be paused or resumed.
 
+Plans may additionally bind `policy.json` through optional `policy_sha256`.
+The field is omitted when unused; existing unbound plans retain their bytes.
+Policy-bearing plans require a reader that supports this declaration.
+
+## Captured policy decisions
+
+`run --policy FILE` captures and validates the same exact pre-dispatch policy
+for baseline, candidate and repeat. It changes neither generation requests nor
+ordinary measurement eligibility. Offline `decide` verifies the saved evidence
+and policy bindings; it never applies a new policy to unbound historical runs.
+
+The decision envelope is version 1, separate from comparison JSON version 3.
+PASS means complete observed evidence satisfies every required policy gate;
+REGRESSION means a qualified observed adverse bound exceeds the declared
+tolerance. INCONCLUSIVE preserves missing or insufficient evidence and excessive
+reference variability; ERROR denotes invalid or unverifiable input. These are
+descriptive policy outcomes, not significance, causality or universal guarantees.
+An eligible comparison or successful process exit alone is not a decision.
+
+The [policy guide](README.md#captured-observed-envelope-policy) defines the closed
+schema, exact checked rational arithmetic, complete-coverage requirements,
+reference-spread gate, outcome precedence and command-specific exits.
+
 ## Workload admission
 
 The workload has `version`, `name`, `request`, `limits`, `cases` and `cells`.
