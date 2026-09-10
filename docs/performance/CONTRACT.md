@@ -113,6 +113,9 @@ the completion offset and observed surplus are recorded. Bytes never read are no
 claimed as retained. Missing usage stays null. Reported lengths exceeding the cap,
 exact-length mismatches and unmet reported-prefix requirements make the wave
 ineligible. Usage is provider evidence, not verified billing or engine attestation.
+In particular, a reported prefix miss after warmup can reflect server-specific
+cache-block alignment rather than collector malfunction; priming alone does not
+establish reusable cache blocks. The reported-hit requirement is not relaxed.
 Contradictory reported reasoning counts greater than completion counts are
 ineligible; they are not repaired or silently included in a rate.
 
