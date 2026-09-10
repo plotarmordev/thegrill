@@ -12,8 +12,10 @@ struct StreamOptions {
     include_usage: bool,
 }
 #[derive(Serialize)]
-struct ChatTemplateKwargs {
-    thinking: bool,
+#[serde(untagged)]
+enum ChatTemplateKwargs {
+    Legacy { thinking: bool },
+    EnableThinking { enable_thinking: bool },
 }
 #[derive(Serialize)]
 struct Body<'a> {
@@ -112,7 +114,20 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         seed: r
             .seed
             .map(|seed| seed + i64::from(wave.trial) * 64 + i64::from(lane)),
-        chat_template_kwargs: r.thinking.map(|thinking| ChatTemplateKwargs { thinking }),
+        chat_template_kwargs: match (r.thinking, r.thinking_control) {
+            (Some(thinking), None) => Some(ChatTemplateKwargs::Legacy { thinking }),
+            (None, Some(ThinkingControl::VllmEnableThinkingV1 { enabled })) => {
+                Some(ChatTemplateKwargs::EnableThinking {
+                    enable_thinking: enabled,
+                })
+            }
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                return Err(
+                    "request.thinking and request.thinking_control are mutually exclusive".into(),
+                );
+            }
+        },
         stream_options: r.stream.then_some(StreamOptions {
             include_usage: true,
         }),

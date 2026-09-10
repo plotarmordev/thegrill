@@ -57,6 +57,14 @@ pub struct RequestSettings {
     // Omitted when absent so plans recorded before this field keep their digest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_control: Option<ThinkingControl>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ThinkingControl {
+    #[serde(rename = "vllm-enable-thinking-v1")]
+    VllmEnableThinkingV1 { enabled: bool },
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -172,9 +180,15 @@ impl Workload {
         {
             return Err("invalid output budget or sampling controls".into());
         }
+        if r.thinking.is_some() && r.thinking_control.is_some() {
+            return Err(
+                "request.thinking and request.thinking_control are mutually exclusive".into(),
+            );
+        }
         if r.profile == Profile::PortableChatV1
             && (r.output.mode == OutputMode::Exact
                 || r.cache != Cache::Observe
+                || r.thinking_control.is_some()
                 || r.thinking.is_some())
         {
             return Err("exact output, required prefix evidence, and thinking controls need the explicit vllm-fixed-v1 request profile".into());
