@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "prefill-ladder-v1",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": { "tokens": 1, "mode": "cap" },
+    "cache": "reported-prefix-zero",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "vllm-enable-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 2700000,
+    "idle_ms": 2700000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 4194304
+  },
+  "cases": [
+    {
+      "id": "prefill-2k",
+      "messages": [
+        { "role": "user", "content": "[prefill-ladder {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 2048 }
+    },
+    {
+      "id": "prefill-8k",
+      "messages": [
+        { "role": "user", "content": "[prefill-ladder {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 8192 }
+    },
+    {
+      "id": "prefill-32k",
+      "messages": [
+        { "role": "user", "content": "[prefill-ladder {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 32768 }
+    },
+    {
+      "id": "prefill-128k",
+      "messages": [
+        { "role": "user", "content": "[prefill-ladder {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "unit": " the", "repeat": 131072 }
+    }
+  ],
+  "cells": [
+    { "id": "prefill-2k-1", "case": "prefill-2k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-8k-1", "case": "prefill-8k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-32k-1", "case": "prefill-32k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-128k-1", "case": "prefill-128k", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}
