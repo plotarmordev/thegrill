@@ -66,6 +66,60 @@ explicit declarations when a longer quiet prefill is intended; raising total
 alone does not fix idle expiry. This is a bounded policy, not a server-runtime
 guarantee, and longer budgets can lengthen cooperative pause/wave drain.
 
+[`prefill-ladder-v1.json`](../../crates/grill-perf/examples/prefill-ladder-v1.json)
+is a separate strict-cold ladder with approximate prompt targets of
+2k/8k/32k/128k, not a revision of the sparkDash workload. It uses the existing
+`" the"` fill generator with an early per-attempt `{salt}`, concurrency 1,
+one warmup and three measured trials per size. Repeat counts are size proxies,
+not measured tokenizer counts: the template, salt, header/footer and tokenizer
+determine actual prompt tokens. Check reported usage and the server's context
+limit before interpreting a size label as a token count.
+
+The ladder streams with an output **cap** of 1, not exact output, temperature
+zero and top_p one. It explicitly requests
+`thinking_control: {"kind":"vllm-enable-thinking-v1","enabled":false}`.
+The template must support `chat_template_kwargs.enable_thinking`; this example
+does not establish live provider compatibility or prove the setting was honored.
+Reported reasoning and observed answer channels remain separate evidence.
+Both selected deadlines are 2,700,000 ms, within the 3,600,000 ms ceiling.
+
+`reported-prefix-zero` requires explicit provider-reported zero cached prompt
+tokens. Missing or nonzero cache evidence remains ineligible; neither the salt
+nor a prefill rate proves a cold cache. Switching to `observe` changes the
+workload and its claim. Real tokenizer counts, long-context endpoint support,
+thinking-control compliance and live prefill rates remain unverified.
+
+### Larger-prompt buffer sizing
+
+The ladder's response cap is 65,536 bytes, independent of request size.
+For streaming, the admitted per-wave allowance is
+`concurrency * (2*response_bytes + 6*256KiB + 512KiB + fill_bytes)`,
+where `fill_bytes = unit.len()*repeat`. At concurrency 1 the non-fill
+allowance is 2,228,224 bytes:
+
+| Approximate target | `" the"` repeats | Fill bytes | Required wave allowance |
+|---|---:|---:|---:|
+| 128k (shipped) | 131,072 | 524,288 | 2,752,512 bytes |
+| 256k (sizing example only) | 262,144 | 1,048,576 | 3,276,800 bytes |
+
+The declared 4,194,304-byte wave budget covers these allowances. The hypothetical
+256k row is not a shipped or live-qualified case. Fill bytes exclude the rendered
+header/footer, template controls and JSON envelope. Each complete serialized
+request must independently fit 2,097,152 bytes; increasing `response_bytes`
+does not increase that request cap.
+
+The space/letter fill needs no JSON escaping, but arbitrary fill does: a control
+byte can expand to a six-byte `\uXXXX` escape. A 524,288-byte control-character
+fill can therefore require 3,145,728 bytes before the envelope and fail the
+request cap. Reservation receipts embed request bodies as JSON strings, escaping
+quotes and backslashes again. Admission also bounds those escaped strings times
+concurrency within the reservation allowance described in the
+[contract](CONTRACT.md#workload-admission).
+Rendered messages, encoded requests and escaped reservation copies coexist
+during preparation; the wave formula counts fill only once and is not a peak
+RSS guarantee. Serialized reservation buffers are released before dispatch.
+Neither the response cap nor the wave allowance proves server context capacity.
+
 For a smaller compatibility probe, use
 [`recipe-smoke.json`](../../crates/grill-perf/examples/recipe-smoke.json):
 concurrency 1 and 2, a 64-token cap, and nine requests per run.

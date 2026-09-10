@@ -1173,6 +1173,73 @@ fn absent_fill_preserves_literal_placeholders_and_plan_identity() {
 }
 
 #[test]
+fn prefill_ladder_admits_and_requires_reported_zero_prefix_evidence() {
+    let workload: Value =
+        serde_json::from_str(include_str!("../examples/prefill-ladder-v1.json")).unwrap();
+    for (name, cached, error) in [
+        ("zero", Some(0), None),
+        (
+            "missing",
+            None,
+            Some("provider_prefix_cache_usage_unavailable"),
+        ),
+        (
+            "nonzero",
+            Some(1),
+            Some("provider_reported_prefix_cache_nonzero"),
+        ),
+    ] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut s, _, request| {
+            assert_eq!(
+                request["chat_template_kwargs"],
+                json!({"enable_thinking":false})
+            );
+            header(&mut s, "text/event-stream");
+            frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
+            finish(&mut s, Some(1), cached);
+        });
+        let output = run(&temp, &server, name, &workload);
+        if let Some(error) = error {
+            assert_eq!(output.status.code(), Some(2));
+            let receipt = wave(&temp, name, 0);
+            assert_eq!(receipt["attempts"][0]["status"], "complete");
+            assert!(
+                receipt["attempts"][0]["eligibility_errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == error)
+            );
+            assert!(receipt["achieved_completion_tokens_per_second"].is_null());
+        } else {
+            successful(&output);
+            let plan = value(temp.path(name).join("plan.json"));
+            for spec in plan["waves"].as_array().unwrap() {
+                let receipt = wave(&temp, name, spec["index"].as_u64().unwrap() as usize);
+                assert_eq!(receipt["attempts"][0]["status"], "complete");
+                assert!(
+                    receipt["attempts"][0]["eligibility_errors"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(receipt["achieved_completion_tokens_per_second"].is_number());
+            }
+            successful(
+                &cli()
+                    .arg("compare")
+                    .arg(temp.path(name))
+                    .arg(temp.path(name))
+                    .arg("--json")
+                    .output()
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
 fn fill_bytes_count_toward_each_cells_wave_buffer_bound() {
     let temp = Temp::new();
     let server = Server::new(|mut s, index, request| {
