@@ -1,3 +1,4 @@
+mod bundle;
 mod evidence;
 mod lifecycle;
 mod metrics;
@@ -50,6 +51,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify the declared shared recipe bundle without network calls.
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommand,
+    },
+}
+#[derive(Subcommand)]
+enum BundleCommand {
+    Verify {
+        manifest: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
     let encoded = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
@@ -71,6 +85,17 @@ fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
         Command::Run(options) => show_summary(run::execute(&options)?, options.json)
             .map(|complete| if complete { 0 } else { 2 }),
+        Command::Bundle {
+            command: BundleCommand::Verify { manifest, json },
+        } => {
+            let verification = bundle::verify(&manifest)?;
+            if json {
+                print_json(&verification)?;
+            } else {
+                bundle::show(&verification);
+            }
+            Ok(0)
+        }
         Command::Pause { run } => {
             lifecycle::pause(&run)?;
             println!(

@@ -3786,6 +3786,8 @@ fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
         false
     );
 }
+#[path = "support/bundle.rs"]
+mod bundle_tests;
 #[path = "support/metrics.rs"]
 mod metrics_tests;
 #[path = "support/policy.rs"]

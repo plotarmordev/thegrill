@@ -78,6 +78,16 @@ target/release/grill-perf compare results/setup-a results/setup-b --json
 
 [Full speed benchmark guide](docs/performance/README.md)
 
+For separately qualified DeepSeek and GLM studies, use the
+[shared recipe workflow](docs/performance/SHARED-RECIPES.md): externally pinned
+source installation, offline `bundle verify`, an explicit precollection policy,
+and independent baseline/candidate/repeat acquisitions. `decide` evaluates the
+captured observed-envelope policy; successful `compare` output is not PASS.
+The shared workflow does not establish live qualification or cross-recipe
+equivalence. Publish only a
+[manually reviewed report](docs/performance/SHARED-REPORT-TEMPLATE.md), not private
+run evidence.
+
 ## Quality evaluation (WIP)
 
 Use **`grill`** to collect model answers and check them against task rules.

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "sparkdash-decode-v1",
+      "file": "sparkdash-decode-v1.json",
+      "source_sha256": "d661f6a6ff4718b8999b9796844345e9023b55b971b51d6fea1307e177eecdee",
+      "workload_sha256": "89dd5320c4f000cc7a15b1d352c721f1e26ddaf9911cccafe7818761d3acffef"
+    },
+    {
+      "id": "sparkdash-prefill-v1",
+      "file": "sparkdash-prefill-v1.json",
+      "source_sha256": "edf255fb30c20e934060ff08af1cfc2c680e6d1b4a2bf9417ce5d96389380468",
+      "workload_sha256": "549cf323c7117fd31097dc80ffdc267e6b748eab98f13d0a80b69f00b7274f3c"
+    },
+    {
+      "id": "glm-decode-v1",
+      "file": "glm-decode-v1.json",
+      "source_sha256": "508791d3e04a7cb7bc82f06084a5cac718834387123c826c7f378f43f912cb98",
+      "workload_sha256": "2129bcb5239d58d900a112ca5c2d511136292d54ab9d0c21dce6eaf9e37155a9",
+      "base": "sparkdash-decode-v1"
+    },
+    {
+      "id": "glm-prefill-v1",
+      "file": "glm-prefill-v1.json",
+      "source_sha256": "ffe1956899f4fc704f047fcaeb85733ebd100beff71676ca59b9bb7235ac16a7",
+      "workload_sha256": "31312a9a8ad58b7fb6d66bc927d79ce789a5bb6f31737ceb36d8e8d8d8d391f5",
+      "base": "sparkdash-prefill-v1"
+    }
+  ],
+  "recipes": {
+    "deepseek": {
+      "decode": "sparkdash-decode-v1",
+      "prefill": "sparkdash-prefill-v1"
+    },
+    "glm": {
+      "decode": "glm-decode-v1",
+      "prefill": "glm-prefill-v1"
+    }
+  }
+}
