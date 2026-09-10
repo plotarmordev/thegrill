@@ -4,6 +4,119 @@
 It does not start servers, download models, grade answers or require quality
 packs. Its `run`, `pause`, `resume` and offline `compare` workflows are separate from `grill`.
 
+## Captured observed-envelope policy
+
+`run WORKLOAD --policy FILE ...` validates a bounded policy declaration before
+dispatch and saves its exact bytes as `policy.json` before publishing the plan.
+Every baseline, candidate and baseline repeat must capture the same policy.
+Omitting the option preserves the legacy plan, request and receipt encoding;
+an unbound run cannot acquire a policy retrospectively through `decide`.
+`resume` reads the captured declaration, with no replacement-policy option.
+Policy-bearing plans require this reader; older readers may reject the new
+optional `policy_sha256` field.
+
+The declaration is a closed JSON object, bounded to 64 KiB:
+
+```json
+{
+  "version": 1,
+  "method": "observed-envelope-v1",
+  "id": "approved-workload-envelope",
+  "collector_sha256": "REPLACE_WITH_ACTUAL_BINARY_SHA256",
+  "workload_source_sha256": "REPLACE_WITH_EXACT_WORKLOAD_FILE_SHA256",
+  "min_trials": 3,
+  "cells": [
+    {
+      "cell": "REPLACE_WITH_WORKLOAD_CELL_ID",
+      "metrics": [
+        {
+          "metric": "wave_latency_us",
+          "max_regression_bps": 0,
+          "max_reference_spread_bps": 0
+        }
+      ]
+    }
+  ]
+}
+```
+
+Replace the illustrative pins and cell with real values before admission; both
+pins must be lowercase SHA-256 hex. Enumerate every workload cell exactly once.
+Each cell declares a nonempty unique subset of `wave_latency_us`,
+`achieved_completion_tokens_per_second`, `decode_tokens_per_second` and
+`prefill_tokens_per_second`. Metric direction is intrinsic. `min_trials` is
+3–100 and cannot exceed any cell's declared measured trials. Decisions require
+at least one declared warmup per cell. Regression tolerances are integer basis
+points in 0–9999; the observed reference-spread budget is in 0–1,000,000.
+100 basis points equals one percent. These are schema bounds, not recommended
+scientific margins; the zero values above illustrate strict equality budgets,
+not a generally suitable operating policy.
+
+Collection checks the pins against the exact workload source and actual
+collector executable. Offline loading checks the captured pins against each
+recorded plan, not the evaluator's current executable. The decision separately
+identifies that evaluator. Policy bytes, not normalized JSON, determine binding.
+Present corrupt or conflicting bindings produce `ERROR`; missing bindings or a
+missing repeat produce `INCONCLUSIVE`, never a retrospective application.
+
+```sh
+target/release/grill-perf decide results/baseline results/candidate \
+  --reference results/baseline-repeat --json
+```
+
+This offline command requires distinct, ordered baseline/candidate/repeat
+acquisitions, currently qualified `declared_match` baseline/repeat declarations,
+complete eligible uninterrupted sessions, complete warmups and measured trials,
+and equal ordered trial/lane completion amounts. Copied evidence under another
+path does not establish a distinct acquisition. Starts and deployment
+declarations do not authenticate nonoverlap, restoration or independent
+execution. Operators remain responsible for approval before collection and for
+restoring the baseline without overlapping runs.
+
+Every declared gate remains in the result, including unavailable metrics and
+partial lanes. Raw verified observations form rational pairs: latency is
+`(elapsed_us, 1)`, aggregate throughput is `(completion_tokens, elapsed_us)`,
+decode is `(completion_tokens - 1, settle_us - first_generated_text_us)` and
+prefill is `(prompt_tokens, first_generated_text_us)`. Availability and cache
+rules match the descriptive measurements. Serialized rate ranges use these
+tokens-per-microsecond pairs; multiplying by 1,000,000 gives tokens/second.
+Zero or undefined intervals and nonpositive reference minima cannot qualify.
+A defined zero candidate throughput is not silently dropped, but still must
+satisfy the output-amount and eligibility requirements.
+
+Baseline and repeat extrema are pooled as `[L,U]`, candidate extrema as `[l,u]`.
+The reference variability gate requires `U/L - 1` within the declared spread
+budget. Latency adverse bounds are `[l/U - 1, u/L - 1]`; rate-loss bounds are
+`[1 - u/L, 1 - l/U]`. Negative adverse bounds describe observed improvement.
+The decision uses checked integer cross-products, not rounded percentages or
+floating-point epsilon: `PASS` requires the worst bound within tolerance;
+`REGRESSION` requires the best bound strictly beyond tolerance; otherwise the
+gate is `INCONCLUSIVE`. Floating adverse bounds are descriptive only.
+Arithmetic overflow produces `ERROR`. Reference spread is an operator-selected
+observed variability gate, not a confidence bound.
+
+Aggregate precedence is `ERROR`, `REGRESSION`, `INCONCLUSIVE`, then `PASS`.
+A qualified regression is not erased by another gate's uncertainty. `PASS`
+requires every gate, not a favorable filtered subset. No outcome establishes
+statistical significance, causal effect, universal no-regression or live
+qualification.
+
+The versioned decision JSON separates eligibility from policy outcome and
+includes policy identity, evaluator identity, role-labelled verified evidence
+hashes, scope, expected/observed coverage, rational ranges, tolerances and bounded
+reason codes. Fingerprints bind exact plan/workload, session states and ordered
+wave/raw-response/companion evidence, including missing states. They are not
+execution attestations. Identical verified inputs and evaluator yield identical
+JSON without a new timestamp, filesystem paths or raw private diagnostics.
+Raw evidence and existing descriptive comparison output remain private by
+default; a decision summary is not replay evidence.
+
+Only a successfully printed versioned decision envelope constitutes a decision.
+For `decide`, exits are `PASS` 0, `ERROR` 1, `INCONCLUSIVE` 2 and `REGRESSION` 3.
+Parsing or output failures can share exit values without producing a decision.
+Existing `compare` exit 0 remains an eligibility-only result, never `PASS`;
+other commands retain their exit semantics.
+
 ## Build and use
 
 Requirements match the workspace: Linux, Rust/Cargo 1.98 and the native build

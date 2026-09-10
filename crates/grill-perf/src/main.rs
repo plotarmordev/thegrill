@@ -2,6 +2,7 @@ mod evidence;
 mod lifecycle;
 mod metrics;
 mod model;
+mod policy;
 mod run;
 mod wire;
 
@@ -40,6 +41,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Apply the captured observed-envelope policy to verified offline evidence.
+    Decide {
+        baseline: PathBuf,
+        candidate: PathBuf,
+        #[arg(long)]
+        reference: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
     let encoded = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
@@ -57,17 +67,37 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
     }
     writeln!(output).map_err(|e| e.to_string())
 }
-fn execute(cli: Cli) -> model::Result<bool> {
+fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
-        Command::Run(options) => show_summary(run::execute(&options)?, options.json),
+        Command::Run(options) => show_summary(run::execute(&options)?, options.json)
+            .map(|complete| if complete { 0 } else { 2 }),
         Command::Pause { run } => {
             lifecycle::pause(&run)?;
             println!(
                 "pause requested; active wave will drain before admission stops; inspect session run.json for paused/completed outcome"
             );
-            Ok(true)
+            Ok(0)
         }
-        Command::Resume { run, json } => show_summary(run::resume(&run, json)?, json),
+        Command::Resume { run, json } => show_summary(run::resume(&run, json)?, json)
+            .map(|complete| if complete { 0 } else { 2 }),
+        Command::Decide {
+            baseline,
+            candidate,
+            reference,
+            json,
+        } => {
+            let decision = policy::decide(&baseline, &candidate, reference.as_deref());
+            if json {
+                print_json(&decision)?;
+            } else {
+                // The same versioned envelope makes output completion observable.
+                println!(
+                    "Observed policy decision; not a statistical or causal claim. Eligibility is separate from the policy outcome."
+                );
+                print_json(&decision)?;
+            }
+            Ok(decision.decision.exit())
+        }
         Command::Compare {
             baseline,
             candidate,
@@ -142,7 +172,11 @@ fn execute(cli: Cli) -> model::Result<bool> {
                     }
                 }
             }
-            Ok(comparison.changes.iter().all(|c| c.eligible))
+            Ok(if comparison.changes.iter().all(|c| c.eligible) {
+                0
+            } else {
+                2
+            })
         }
     }
 }
@@ -181,8 +215,7 @@ fn main() -> std::process::ExitCode {
         }
     };
     match execute(cli) {
-        Ok(true) => std::process::ExitCode::SUCCESS,
-        Ok(false) => std::process::ExitCode::from(2),
+        Ok(code) => std::process::ExitCode::from(code),
         Err(error) => {
             eprintln!("grill-perf: {}", error.escape_debug());
             std::process::ExitCode::from(1)

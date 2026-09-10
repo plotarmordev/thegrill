@@ -3050,16 +3050,17 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
 #[test]
 fn comparison_change_outside_pooled_reference_range_remains_present() {
     let temp = Temp::new();
-    let server = spread_server(&[
-        (100, 100, 8),
-        (200, 200, 8),
-        (400, 400, 8),
-        (500, 500, 8),
-        (110, 110, 8),
-        (190, 190, 8),
-    ]);
+    let server = Server::new(|mut stream, _, _| {
+        header(&mut stream, "text/event-stream");
+        frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+        finish(&mut stream, Some(8), Some(0));
+    });
     let work = workload(1, 0, 2);
-    for name in ["a", "b", "a2"] {
+    for (name, first_times) in [
+        ("a", [100_000u64, 200_000]),
+        ("b", [400_000, 500_000]),
+        ("a2", [50_000, 250_000]),
+    ] {
         successful(&run_declared(
             &temp,
             &server,
@@ -3068,6 +3069,25 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
             "fixture-model",
             &deployment(),
         ));
+        // Synthetic observations make the pooled-envelope premise independent of
+        // scheduler load; the real CLI still verifies and compares the receipts.
+        for (index, first) in first_times.into_iter().enumerate() {
+            let path = temp.path(name).join(format!("wave-{index:06}/wave.json"));
+            let mut receipt = value(&path);
+            let elapsed = first * 2;
+            let timing = &mut receipt["attempts"][0]["timing"];
+            timing["dispatch_offset_us"] = json!(0);
+            timing["headers_us"] = json!(1);
+            timing["first_body_us"] = json!(first);
+            timing["first_generated_text_us"] = json!(first);
+            timing["first_answer_text_us"] = json!(first);
+            timing["settle_us"] = json!(elapsed);
+            timing["capture_parse_us"] = json!(0);
+            receipt["elapsed_us"] = json!(elapsed);
+            receipt["dispatch_spread_us"] = json!(0);
+            receipt["achieved_completion_tokens_per_second"] = json!(8_000_000.0 / elapsed as f64);
+            fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        }
     }
     let output = cli()
         .arg("compare")
@@ -3119,10 +3139,6 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
         let a = &report["baseline"][0];
         let b = &report["candidate"][0];
         let a2 = &report["reference"][0];
-        assert!(
-            a[range][0].as_f64().unwrap() <= a2[range][1].as_f64().unwrap()
-                && a2[range][0].as_f64().unwrap() <= a[range][1].as_f64().unwrap()
-        );
         let pooled_max = a[range][1]
             .as_f64()
             .unwrap()
@@ -3772,3 +3788,5 @@ fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
 }
 #[path = "support/metrics.rs"]
 mod metrics_tests;
+#[path = "support/policy.rs"]
+mod policy_tests;

@@ -107,7 +107,7 @@ pub struct Workload {
     pub cases: Vec<Case>,
     pub cells: Vec<Cell>,
 }
-fn identifier(s: &str) -> bool {
+pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.bytes()
@@ -363,6 +363,8 @@ pub struct Plan {
     pub waves: Vec<WaveSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<crate::metrics::Config>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_sha256: Option<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

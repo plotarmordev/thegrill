@@ -43,6 +43,9 @@ pub struct Options {
     /// Optional JSON declarations of model revision, runtime, hardware and settings.
     #[arg(long)]
     pub deployment: Option<PathBuf>,
+    /// Capture an exact observed-envelope declaration before dispatch.
+    #[arg(long)]
+    pub policy: Option<PathBuf>,
     /// Optional bounded server-wide diagnostics; can perturb between-wave cadence.
     #[arg(long)]
     pub metrics_url: Option<String>,
@@ -118,6 +121,11 @@ pub fn execute(o: &Options) -> Result<Summary> {
     };
     let cache_mechanism = (workload.request.profile == Profile::VllmFixedV1)
         .then(|| "declared-vllm-prefix-cache".into());
+    let policy_bytes = o
+        .policy
+        .as_ref()
+        .map(|path| evidence::read(path, crate::policy::CAP))
+        .transpose()?;
     let plan = Plan {
         version: 2,
         kind: "performance-run-v1".into(),
@@ -138,7 +146,11 @@ pub fn execute(o: &Options) -> Result<Summary> {
         cache_namespace,
         waves,
         metrics,
+        policy_sha256: policy_bytes.as_deref().map(evidence::digest),
     };
+    if let Some(bytes) = &policy_bytes {
+        crate::policy::parse(bytes, &plan).map_err(|e| e.as_str().to_owned())?;
+    }
     // Seed magnitude peaks at a corner of the trial/lane range and index 1023 is
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
     // each of the cache salt and the text salt, so an interior body can exceed a
@@ -172,6 +184,9 @@ pub fn execute(o: &Options) -> Result<Summary> {
     evidence::fresh(&o.out)?;
     let _owner = lifecycle::ownership(&o.out)?;
     evidence::write(&o.out.join("workload.json"), &source)?;
+    if let Some(bytes) = &policy_bytes {
+        evidence::write(&o.out.join("policy.json"), bytes)?;
+    }
     let plan_bytes = evidence::json(&o.out.join("plan.json"), &plan)?;
     evidence::sync(&o.out)?;
     let plan_hash = evidence::digest(&plan_bytes);

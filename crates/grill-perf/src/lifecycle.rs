@@ -1,5 +1,6 @@
 use crate::{evidence, model::*, run::Summary};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
@@ -55,6 +56,8 @@ pub struct History {
     pub next_wave: usize,
     pub last_status: Option<String>,
     pub open: bool,
+    pub evidence_sha256: String,
+    pub lineage_sha256: String,
 }
 
 pub fn dir(root: &Path, index: usize) -> PathBuf {
@@ -115,6 +118,8 @@ pub fn history(
             next_wave: 0,
             last_status: None,
             open: false,
+            evidence_sha256: evidence::digest(b"legacy-session-absent"),
+            lineage_sha256: evidence::digest(b"legacy-session-absent"),
         });
     }
     if indices.is_empty() {
@@ -124,15 +129,20 @@ pub fn history(
     let mut last_status = None;
     let mut open = false;
     let mut publication_uncertain = false;
+    let mut fingerprint = Sha256::new();
+    let mut lineage = Sha256::new();
     for (expected, index) in indices.iter().copied().enumerate() {
         if index != expected || open {
             return Err("noncontiguous or overlapping execution sessions".into());
         }
         let path = dir(root, index);
         evidence::directory(&path)?;
+        let session_bytes = evidence::read(&path.join("session.json"), FILE_CAP)?;
+        fingerprint.update(evidence::digest(&session_bytes).as_bytes());
         let session: Session =
-            serde_json::from_slice(&evidence::read(&path.join("session.json"), FILE_CAP)?)
-                .map_err(|e| format!("invalid session: {e}"))?;
+            serde_json::from_slice(&session_bytes).map_err(|e| format!("invalid session: {e}"))?;
+        lineage.update(session.started_unix_ms.to_le_bytes());
+        lineage.update((session.first_wave as u64).to_le_bytes());
         if session.version != 1
             || session.index != index
             || session.first_wave != next_wave
@@ -146,11 +156,15 @@ pub fn history(
         }
         if exists(&path.join("run.json"))? {
             let end_bytes = evidence::read(&path.join("run.json"), FILE_CAP)?;
+            fingerprint.update(b"settled\0");
+            fingerprint.update(evidence::digest(&end_bytes).as_bytes());
+            lineage.update(evidence::digest(&end_bytes).as_bytes());
             let end: Summary = serde_json::from_slice(&end_bytes)
                 .map_err(|e| format!("invalid session outcome: {e}"))?;
             if index == 0 {
                 let receipt = root.join("run.json");
                 if exists(&receipt)? {
+                    fingerprint.update(b"root-present\0");
                     if evidence::read(&receipt, FILE_CAP)? != end_bytes {
                         return Err("first root receipt differs from session zero outcome".into());
                     }
@@ -158,6 +172,7 @@ pub fn history(
                     // Session publication precedes root publication. Do not repair or
                     // mistake this crash window (or later loss) for settled evidence.
                     publication_uncertain = true;
+                    fingerprint.update(b"root-missing\0");
                 }
             }
             if end.version != 1
@@ -217,6 +232,7 @@ pub fn history(
             next_wave = end_wave;
             last_status = Some(end.status);
         } else {
+            fingerprint.update(b"unsettled\0");
             open = true;
             last_status = None;
         }
@@ -238,6 +254,8 @@ pub fn history(
         next_wave,
         last_status,
         open,
+        evidence_sha256: evidence::hex(&fingerprint.finalize()),
+        lineage_sha256: evidence::hex(&lineage.finalize()),
     })
 }
 
