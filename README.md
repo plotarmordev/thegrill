@@ -50,7 +50,7 @@ target/release/grill-perf run crates/grill-perf/examples/sparkdash-decode-v1.jso
 
 The decode workload sends **72 requests**, the prefill workload **16**. For a server without vLLM controls, `quick.json` sends **28 requests** with a **1,024 token** cap and no thinking control.
 
-**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs. A repeat of setup A saved as `results/setup-a-repeat` lets the comparison measure drift.
+**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs. To compare a repeat of setup A, record complete `--deployment` declarations on both A runs and retain the same declared model and endpoint. Matching declarations do not verify server restoration or run timing order.
 
 **3. Compare the saved results.** No server connection is needed for this step. Add `--reference results/setup-a-repeat` if you have the repeat.
 

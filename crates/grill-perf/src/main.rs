@@ -78,6 +78,13 @@ fn execute(cli: Cli) -> model::Result<bool> {
                 print_json(&comparison)?;
             } else {
                 println!("Descriptive deployment comparison; not a causal or capacity verdict.");
+                if let Some(identity) = &comparison.reference_identity {
+                    println!("Reference identity: {}", identity.status.as_str());
+                    println!("  {}", identity.scope);
+                    for reason in &identity.reasons {
+                        println!("  {reason}");
+                    }
+                }
                 for (cell, change) in comparison.changes.iter().enumerate() {
                     print!("{}: ", change.cell);
                     for (index, (name, value)) in [
@@ -125,6 +132,9 @@ fn execute(cli: Cli) -> model::Result<bool> {
                             }
                         }
                         println!();
+                        for reason in &drift.withheld {
+                            println!("  reference drift withheld: {reason}");
+                        }
                     }
                     for reason in change.withheld.iter().chain(&change.ineligibility_reasons) {
                         println!("  {reason}");

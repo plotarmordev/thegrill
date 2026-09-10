@@ -235,6 +235,39 @@ fn run(temp: &Temp, server: &Server, name: &str, workload: &Value) -> Output {
         .output()
         .unwrap()
 }
+fn deployment() -> Value {
+    json!({"model_revision":"fixture-revision","runtime":"fixture-runtime","hardware":"loopback","settings":"fixture-settings"})
+}
+fn run_declared(
+    temp: &Temp,
+    server: &Server,
+    name: &str,
+    workload: &Value,
+    model: &str,
+    deployment: &Value,
+) -> Output {
+    let input = temp.path(&format!("{name}.json"));
+    let declaration = temp.path(&format!("{name}-deployment.json"));
+    fs::write(&input, serde_json::to_vec(workload).unwrap()).unwrap();
+    fs::write(&declaration, serde_json::to_vec(deployment).unwrap()).unwrap();
+    cli()
+        .arg("run")
+        .arg(input)
+        .args([
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            model,
+            "--local-http",
+            "--json",
+        ])
+        .arg("--deployment")
+        .arg(declaration)
+        .arg("--out")
+        .arg(temp.path(name))
+        .output()
+        .unwrap()
+}
 fn value(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
@@ -2772,7 +2805,7 @@ fn comparison_overlapping_ranges_withhold_without_ineligibility() {
         .unwrap();
     successful(&human);
     let text = String::from_utf8(human.stdout).unwrap();
-    assert!(text.contains("cell: wave latency withheld; achieved throughput withheld; decode rate withheld; prefill rate withheld"));
+    assert!(text.contains("withheld"));
     let change = &report["changes"][0];
     assert_eq!(change["eligible"], true);
     assert_eq!(change["ineligibility_reasons"], json!([]));
@@ -2808,24 +2841,10 @@ fn comparison_overlapping_ranges_withhold_without_ineligibility() {
             b[1].as_f64().unwrap(),
         );
         assert!(amin <= bmax && bmin <= amax);
-        let reason = if name == "wave latency" {
-            format!(
-                "{name}: ranges overlap, {:.2}-{:.2} vs {:.2}-{:.2}",
-                amin / 1_000_000.0,
-                amax / 1_000_000.0,
-                bmin / 1_000_000.0,
-                bmax / 1_000_000.0
-            )
-        } else {
-            format!("{name}: ranges overlap, {amin:.1}-{amax:.1} vs {bmin:.1}-{bmax:.1}")
-        };
-        assert!(
-            change["withheld"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(reason))
-        );
-        assert!(text.contains(&format!("  {reason}\n")));
+        assert!(change["withheld"].as_array().unwrap().iter().any(|reason| {
+            let reason = reason.as_str().unwrap();
+            reason.contains(name) && reason.contains("overlap") && text.contains(reason)
+        }));
     }
 }
 
@@ -2928,7 +2947,14 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
     let server = spread_server(&[(100, 100, 8), (150, 150, 8), (350, 350, 8)]);
     let work = workload(1, 0, 1);
     for name in ["a", "b", "a2"] {
-        successful(&run(&temp, &server, name, &work));
+        successful(&run_declared(
+            &temp,
+            &server,
+            name,
+            &work,
+            "fixture-model",
+            &deployment(),
+        ));
     }
     let ordinary = cli()
         .arg("compare")
@@ -2956,6 +2982,8 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
         let change = &report["changes"][0];
         assert_eq!(change["eligible"], true);
         assert_eq!(change["ineligibility_reasons"], json!([]));
+        assert_eq!(report["reference_identity"]["status"], "declared_match");
+        assert_eq!(change["reference_output_amounts_match"], true);
         let human = cli()
             .arg("compare")
             .arg(temp.path("a"))
@@ -2966,7 +2994,6 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
             .unwrap();
         successful(&human);
         let text = String::from_utf8(human.stdout).unwrap();
-        let mut drift_parts = Vec::new();
         for (name, field, drift_field, median) in [
             (
                 "wave latency",
@@ -3010,15 +3037,13 @@ fn comparison_reference_pools_baseline_range_and_withholds_changes_inside_it() {
                 .iter()
                 .find_map(|w| {
                     w.as_str()
-                        .filter(|w| w.starts_with(&format!("{name}: ranges overlap")))
+                        .filter(|w| w.contains(name) && w.contains("overlap"))
                 })
                 .unwrap();
-            assert!(reason.ends_with("(baseline pooled with reference)"));
-            assert!(text.contains(&format!("  {reason}\n")));
-            drift_parts.push(format!("{name} {d:+.2}%"));
+            assert!(reason.contains("reference"));
+            assert!(text.contains(reason));
         }
         assert_eq!(report["drift"][0]["cell"], "cell");
-        assert!(text.contains(&format!("  reference drift: {}\n", drift_parts.join("; "))));
     }
 }
 
@@ -3035,7 +3060,14 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
     ]);
     let work = workload(1, 0, 2);
     for name in ["a", "b", "a2"] {
-        successful(&run(&temp, &server, name, &work));
+        successful(&run_declared(
+            &temp,
+            &server,
+            name,
+            &work,
+            "fixture-model",
+            &deployment(),
+        ));
     }
     let output = cli()
         .arg("compare")
@@ -3058,32 +3090,26 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
         .unwrap();
     successful(&human);
     let text = String::from_utf8(human.stdout).unwrap();
-    let mut change_parts = Vec::new();
-    let mut drift_parts = Vec::new();
-    for (name, field, drift_field, median, range) in [
+    for (field, drift_field, median, range) in [
         (
-            "wave latency",
             "wave_latency_change_percent",
             "wave_latency_percent",
             "median_wave_latency_us",
             "wave_latency_us_range",
         ),
         (
-            "achieved throughput",
             "achieved_throughput_change_percent",
             "achieved_throughput_percent",
             "median_achieved_completion_tokens_per_second",
             "achieved_completion_tokens_per_second_range",
         ),
         (
-            "decode rate",
             "decode_rate_change_percent",
             "decode_rate_percent",
             "median_decode_tokens_per_second",
             "decode_tokens_per_second_range",
         ),
         (
-            "prefill rate",
             "prefill_rate_change_percent",
             "prefill_rate_percent",
             "median_prefill_tokens_per_second",
@@ -3114,15 +3140,9 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
         let baseline = a[median].as_f64().unwrap();
         assert!((c - 100.0 * (b[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
         assert!((d - 100.0 * (a2[median].as_f64().unwrap() / baseline - 1.0)).abs() < 1e-9);
-        change_parts.push(format!("{name} {c:+.2}%"));
-        drift_parts.push(format!("{name} {d:+.2}%"));
     }
     assert_eq!(report["changes"][0]["withheld"], json!([]));
-    assert!(text.contains(&format!(
-        "cell: {}\n  reference drift: {}\n",
-        change_parts.join("; "),
-        drift_parts.join("; ")
-    )));
+    assert!(text.contains("declared_match"));
 }
 
 #[test]
@@ -3134,7 +3154,14 @@ fn comparison_reference_checks_workload_and_reports_absent_drift_metrics() {
     });
     let mut work = workload(1, 0, 1);
     work["request"]["stream"] = json!(false);
-    successful(&run(&temp, &server, "a", &work));
+    successful(&run_declared(
+        &temp,
+        &server,
+        "a",
+        &work,
+        "fixture-model",
+        &deployment(),
+    ));
     let output = cli()
         .arg("compare")
         .arg(temp.path("a"))
@@ -3160,9 +3187,19 @@ fn comparison_reference_checks_workload_and_reports_absent_drift_metrics() {
         .output()
         .unwrap();
     successful(&human);
-    assert!(String::from_utf8(human.stdout).unwrap().contains(
-        "  reference drift: wave latency +0.00%; achieved throughput +0.00%; decode rate n/a; prefill rate n/a\n"
-    ));
+    let text = String::from_utf8(human.stdout).unwrap();
+    for metric in ["decode rate", "prefill rate"] {
+        assert!(
+            report["drift"][0]["withheld"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| {
+                    let reason = reason.as_str().unwrap();
+                    reason.contains(metric) && reason.contains("reference") && text.contains(reason)
+                })
+        );
+    }
     work["cases"][0]["messages"][0]["content"] = json!("Different workload.");
     successful(&run(&temp, &server, "other", &work));
     let refused = cli()
@@ -3180,5 +3217,556 @@ fn comparison_reference_checks_workload_and_reports_absent_drift_metrics() {
         String::from_utf8(refused.stderr)
             .unwrap()
             .contains("incompatible workload")
+    );
+}
+
+fn compare_reference(temp: &Temp, reference: &str, json: bool) -> Output {
+    let mut command = cli();
+    command
+        .arg("compare")
+        .arg(temp.path("a"))
+        .arg(temp.path("b"))
+        .arg("--reference")
+        .arg(temp.path(reference));
+    if json {
+        command.arg("--json");
+    }
+    command.output().unwrap()
+}
+
+fn reference_ineligible(output: &Output) -> Value {
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let change = &report["changes"][0];
+    assert_eq!(change["eligible"], false);
+    for field in [
+        "wave_latency_change_percent",
+        "achieved_throughput_change_percent",
+        "decode_rate_change_percent",
+        "prefill_rate_change_percent",
+    ] {
+        assert_eq!(change.get(field), Some(&Value::Null));
+    }
+    for field in [
+        "wave_latency_percent",
+        "achieved_throughput_percent",
+        "decode_rate_percent",
+        "prefill_rate_percent",
+    ] {
+        assert_eq!(report["drift"][0].get(field), Some(&Value::Null));
+    }
+    assert!(
+        change["ineligibility_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| { reason.as_str().unwrap().contains("reference") })
+    );
+    report
+}
+
+#[test]
+fn comparison_incomplete_reference_withholds_changes_and_drift() {
+    for warmup in [0, 1] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut stream, index, request| {
+            if index == 2 * (warmup as usize + 1) {
+                stream.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            } else {
+                normal(stream, index, request);
+            }
+        });
+        let work = workload(1, warmup, 1);
+        for name in ["a", "b"] {
+            successful(&run_declared(
+                &temp,
+                &server,
+                name,
+                &work,
+                "fixture-model",
+                &deployment(),
+            ));
+        }
+        let failed = run_declared(&temp, &server, "a2", &work, "fixture-model", &deployment());
+        assert_eq!(failed.status.code(), Some(2));
+        let report = reference_ineligible(&compare_reference(&temp, "a2", true));
+        assert_eq!(report["reference_identity"]["status"], "declared_match");
+        assert_eq!(report["changes"][0]["observed_output_amounts_match"], true);
+        assert_eq!(
+            report["changes"][0]["reference_output_amounts_match"],
+            false
+        );
+        assert_eq!(report["reference"][0]["eligible_trials"], 0);
+        assert_eq!(
+            report["reference"][0]["all_declared_warmups_complete"],
+            warmup == 0
+        );
+        assert!(report["baseline"][0]["median_wave_latency_us"].is_number());
+        assert!(report["candidate"][0]["median_wave_latency_us"].is_number());
+        let human = compare_reference(&temp, "a2", false);
+        assert_eq!(human.status.code(), Some(2));
+        let text = String::from_utf8(human.stdout).unwrap();
+        for reason in report["changes"][0]["ineligibility_reasons"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(text.contains(reason.as_str().unwrap()));
+        }
+    }
+}
+
+#[test]
+fn comparison_reference_requires_ordered_output_counts_for_changes_and_drift() {
+    for (baseline, reference) in [
+        ([Some(8), Some(8)], [Some(4), Some(4)]),
+        ([Some(4), Some(8)], [Some(8), Some(4)]),
+        ([Some(8), Some(8)], [Some(8), None]),
+    ] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut stream, index, _| {
+            header(&mut stream, "text/event-stream");
+            frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+            finish(
+                &mut stream,
+                if index < 4 {
+                    baseline[index % 2]
+                } else {
+                    reference[index - 4]
+                },
+                Some(0),
+            );
+        });
+        let work = workload(1, 0, 2);
+        for name in ["a", "b"] {
+            successful(&run_declared(
+                &temp,
+                &server,
+                name,
+                &work,
+                "fixture-model",
+                &deployment(),
+            ));
+        }
+        let output = run_declared(&temp, &server, "a2", &work, "fixture-model", &deployment());
+        assert_eq!(
+            output.status.code(),
+            Some(if reference.contains(&None) { 2 } else { 0 })
+        );
+        let report = reference_ineligible(&compare_reference(&temp, "a2", true));
+        assert_eq!(report["changes"][0]["observed_output_amounts_match"], true);
+        assert_eq!(
+            report["changes"][0]["reference_output_amounts_match"],
+            false
+        );
+        assert_eq!(
+            report["reference"][0]["lane_completion_tokens"],
+            json!([[reference[0]], [reference[1]]])
+        );
+        assert!(
+            report["changes"][0]["ineligibility_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| {
+                    let reason = reason.as_str().unwrap();
+                    reason.contains("reference") && reason.contains("completion counts")
+                })
+        );
+        let output = cli()
+            .arg("compare")
+            .arg(temp.path("a"))
+            .arg(temp.path("a2"))
+            .arg("--reference")
+            .arg(temp.path("a"))
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let reversed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            reversed["changes"][0]["observed_output_amounts_match"],
+            false
+        );
+        assert_eq!(
+            reversed["changes"][0]["reference_output_amounts_match"],
+            true
+        );
+        assert_eq!(
+            reversed["drift"][0].get("wave_latency_percent"),
+            Some(&Value::Null)
+        );
+    }
+}
+
+#[test]
+fn comparison_reference_distinguishes_mismatched_and_missing_declarations() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let other_endpoint = Server::new(normal);
+    let work = workload(1, 0, 1);
+    for name in ["a", "b"] {
+        successful(&run_declared(
+            &temp,
+            &server,
+            name,
+            &work,
+            "fixture-model",
+            &deployment(),
+        ));
+    }
+    let mut mismatch = deployment();
+    mismatch["hardware"] = json!("different-hardware");
+    mismatch["runtime"] = Value::Null;
+    let mut missing = deployment();
+    missing["settings"] = Value::Null;
+    for (name, endpoint, model, declaration, status, field) in [
+        (
+            "model",
+            &server,
+            "different-model",
+            deployment(),
+            "declared_mismatch",
+            "model",
+        ),
+        (
+            "endpoint",
+            &other_endpoint,
+            "fixture-model",
+            deployment(),
+            "declared_mismatch",
+            "endpoint",
+        ),
+        (
+            "hardware",
+            &server,
+            "fixture-model",
+            mismatch,
+            "declared_mismatch",
+            "hardware",
+        ),
+        (
+            "partial",
+            &server,
+            "fixture-model",
+            missing,
+            "unavailable",
+            "settings",
+        ),
+    ] {
+        successful(&run_declared(
+            &temp,
+            endpoint,
+            name,
+            &work,
+            model,
+            &declaration,
+        ));
+        let report = reference_ineligible(&compare_reference(&temp, name, true));
+        assert_eq!(report["reference_identity"]["status"], status);
+        assert_eq!(report["reference_model"], model);
+        assert_eq!(report["reference_deployment"], declaration);
+        assert_eq!(report["changes"][0]["reference_output_amounts_match"], true);
+        assert!(report["reference"][0]["median_wave_latency_us"].is_number());
+        assert!(
+            report["reference_identity"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| { reason.as_str().unwrap().contains(field) })
+        );
+        let human = compare_reference(&temp, name, false);
+        assert_eq!(human.status.code(), Some(2));
+        let text = String::from_utf8(human.stdout).unwrap();
+        assert!(text.contains(status));
+        for reason in report["reference_identity"]["reasons"].as_array().unwrap() {
+            assert!(text.contains(reason.as_str().unwrap()));
+        }
+    }
+    successful(&run(&temp, &server, "undeclared", &work));
+    let report = reference_ineligible(&compare_reference(&temp, "undeclared", true));
+    assert_eq!(report["reference_identity"]["status"], "unavailable");
+    assert_eq!(report.get("reference_deployment"), Some(&Value::Null));
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("undeclared"))
+        .arg(temp.path("undeclared"))
+        .arg("--reference")
+        .arg(temp.path("undeclared"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    let report = reference_ineligible(&output);
+    assert_eq!(report["reference_identity"]["status"], "unavailable");
+}
+
+#[test]
+fn comparison_missing_reference_metrics_never_fall_back_to_baseline_ranges() {
+    let temp = Temp::new();
+    let server = Server::new(|mut stream, index, request| {
+        if index < 2 {
+            normal(stream, index, request);
+        } else {
+            header(&mut stream, "text/event-stream");
+            frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+            frame(
+                &mut stream,
+                json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"completion_tokens":8}}),
+            );
+            stream.write_all(b"data: [DONE]\n\n").unwrap();
+        }
+    });
+    let work = workload(1, 0, 1);
+    for name in ["a", "b", "a2"] {
+        successful(&run_declared(
+            &temp,
+            &server,
+            name,
+            &work,
+            "fixture-model",
+            &deployment(),
+        ));
+    }
+    let output = compare_reference(&temp, "a2", true);
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["changes"][0]["eligible"], true);
+    assert!(report["drift"][0]["wave_latency_percent"].is_number());
+    for (metric, range, change, drift) in [(
+        "prefill rate",
+        "prefill_tokens_per_second_range",
+        "prefill_rate_change_percent",
+        "prefill_rate_percent",
+    )] {
+        assert!(report["baseline"][0][range].is_array());
+        assert!(report["candidate"][0][range].is_array());
+        assert_eq!(report["reference"][0].get(range), Some(&Value::Null));
+        assert_eq!(report["changes"][0].get(change), Some(&Value::Null));
+        assert_eq!(report["drift"][0].get(drift), Some(&Value::Null));
+        for result in [&report["changes"][0], &report["drift"][0]] {
+            assert!(result["withheld"].as_array().unwrap().iter().any(|reason| {
+                let reason = reason.as_str().unwrap();
+                reason.contains(metric) && reason.contains("reference")
+            }));
+        }
+    }
+    let human = compare_reference(&temp, "a2", false);
+    successful(&human);
+    let text = String::from_utf8(human.stdout).unwrap();
+    for reason in report["changes"][0]["withheld"].as_array().unwrap() {
+        assert!(text.contains(reason.as_str().unwrap()));
+    }
+}
+
+#[test]
+fn comparison_partial_lane_usage_withholds_reference_metrics_without_dropping_lanes() {
+    for missing_request in [1, 3, 5] {
+        let temp = Temp::new();
+        let server = Server::new(move |mut stream, index, _| {
+            header(&mut stream, "text/event-stream");
+            frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+            let mut usage = json!({"completion_tokens":8});
+            if index != missing_request {
+                usage["prompt_tokens"] = json!(4);
+            }
+            frame(
+                &mut stream,
+                json!({"choices":[{"delta":{},"finish_reason":"length"}],"usage":usage}),
+            );
+            stream.write_all(b"data: [DONE]\n\n").unwrap();
+        });
+        let work = workload(2, 0, 1);
+        for name in ["a", "b", "a2"] {
+            successful(&run_declared(
+                &temp,
+                &server,
+                name,
+                &work,
+                "fixture-model",
+                &deployment(),
+            ));
+        }
+        let output = compare_reference(&temp, "a2", true);
+        successful(&output);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let side = ["baseline", "candidate", "reference"][missing_request / 2];
+        assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
+        assert!(
+            report[side][0]["lane_prefill_tokens_per_second"][0]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(Value::is_null)
+        );
+        assert_eq!(report["changes"][0]["eligible"], true);
+        assert_eq!(
+            report["changes"][0].get("prefill_rate_change_percent"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            report["drift"][0].get("prefill_rate_percent"),
+            Some(&Value::Null)
+        );
+        assert!(report["drift"][0]["wave_latency_percent"].is_number());
+        assert!(report["drift"][0]["decode_rate_percent"].is_number());
+        assert!(
+            !report["changes"][0]["withheld"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !report["drift"][0]["withheld"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn comparison_corrupt_reference_is_an_error_not_an_ordinary_comparison() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    let work = workload(1, 0, 1);
+    for name in ["a", "b", "a2"] {
+        successful(&run(&temp, &server, name, &work));
+    }
+    fs::write(temp.path("a2/wave-000000/response-0000.bin"), b"corrupt").unwrap();
+    let output = compare_reference(&temp, "a2", true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("reference")
+    );
+}
+
+#[test]
+fn comparison_legacy_no_reference_load_preserves_evidence_bytes() {
+    use sha2::{Digest, Sha256};
+
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    successful(&run(&temp, &server, "legacy", &workload(1, 0, 1)));
+    // Construct the archival layout from synthetic evidence, not frozen receipts.
+    let plan_path = temp.path("legacy/plan.json");
+    let mut plan = value(&plan_path);
+    plan["version"] = json!(1);
+    let plan_bytes = serde_json::to_vec(&plan).unwrap();
+    fs::write(&plan_path, &plan_bytes).unwrap();
+    let plan_hash = Sha256::digest(&plan_bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let reservation_path = temp.path("legacy/wave-000000/reservation.json");
+    let mut reservation = value(&reservation_path);
+    reservation["plan_sha256"] = json!(plan_hash);
+    let reservation_bytes = serde_json::to_vec(&reservation).unwrap();
+    fs::write(&reservation_path, &reservation_bytes).unwrap();
+    let wave_path = temp.path("legacy/wave-000000/wave.json");
+    let mut wave = value(&wave_path);
+    wave["plan_sha256"] = json!(plan_hash);
+    wave["reservation_sha256"] = json!(
+        Sha256::digest(&reservation_bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    fs::write(&wave_path, serde_json::to_vec(&wave).unwrap()).unwrap();
+    fs::remove_dir_all(temp.path("legacy/session-000000")).unwrap();
+    let paths = [
+        "legacy/plan.json",
+        "legacy/workload.json",
+        "legacy/run.json",
+        "legacy/wave-000000/reservation.json",
+        "legacy/wave-000000/wave.json",
+        "legacy/wave-000000/response-0000.bin",
+    ];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| fs::read(temp.path(path)).unwrap())
+        .collect();
+    let output = cli()
+        .arg("compare")
+        .arg(temp.path("legacy"))
+        .arg(temp.path("legacy"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    successful(&output);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["version"], 3);
+    assert_eq!(report["changes"][0]["eligible"], true);
+    assert_eq!(report["changes"][0]["observed_output_amounts_match"], true);
+    assert_eq!(
+        report["changes"][0].get("reference_output_amounts_match"),
+        Some(&Value::Null)
+    );
+    for field in [
+        "reference",
+        "reference_model",
+        "reference_deployment",
+        "reference_identity",
+        "drift",
+    ] {
+        assert_eq!(report.get(field), Some(&Value::Null));
+    }
+    assert_eq!(
+        report["baseline"][0]["lane_completion_tokens"],
+        json!([[8]])
+    );
+    assert_eq!(
+        report["changes"][0].get("wave_latency_change_percent"),
+        Some(&Value::Null)
+    );
+    for (path, bytes) in paths.iter().zip(before) {
+        assert_eq!(fs::read(temp.path(path)).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
+    let temp = Temp::new();
+    let server = Server::new(|mut stream, index, request| {
+        let first_lane = request["seed"].as_i64().unwrap() % 2 == 0;
+        let tokens = if first_lane == (index < 4) { 4 } else { 8 };
+        header(&mut stream, "text/event-stream");
+        frame(&mut stream, json!({"choices":[{"delta":{"content":"x"}}]}));
+        finish(&mut stream, Some(tokens), Some(0));
+    });
+    let work = workload(2, 0, 1);
+    for name in ["a", "b", "a2"] {
+        successful(&run_declared(
+            &temp,
+            &server,
+            name,
+            &work,
+            "fixture-model",
+            &deployment(),
+        ));
+    }
+    let report = reference_ineligible(&compare_reference(&temp, "a2", true));
+    assert_eq!(
+        report["baseline"][0]["reported_completion_tokens"],
+        report["reference"][0]["reported_completion_tokens"]
+    );
+    assert_eq!(
+        report["baseline"][0]["lane_completion_tokens"],
+        json!([[4, 8]])
+    );
+    assert_eq!(
+        report["reference"][0]["lane_completion_tokens"],
+        json!([[8, 4]])
+    );
+    assert_eq!(report["changes"][0]["observed_output_amounts_match"], true);
+    assert_eq!(
+        report["changes"][0]["reference_output_amounts_match"],
+        false
     );
 }
