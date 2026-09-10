@@ -23,17 +23,18 @@ workspace `rust-version` and the public build instructions at the chosen revisio
 Do not substitute an emulated or cross-compiled installation for the native
 installation smoke. Installation and bundle verification require no model service.
 
-Obtain a reviewed **full immutable Git commit SHA** externally. Set
-`SOURCE_GIT_SHA` to that exact published commit, and `SOURCE` to an absolute,
-new checkout path. A branch or moving tag is not an installation pin. This
-example deliberately supplies no invented future commit: the integration owner
-must publish the reviewed code commit before finalizing an externally pinned
-installation example.
+The initial CPU-qualified source pin is
+`a6729f9ab5410587bb9da1adb7b34944a9cfc436`.
+It identifies the collector and bundle, not a live recipe qualification.
+Set `SOURCE` to an absolute, new checkout path. For a later release, obtain
+another reviewed full immutable SHA; a branch or moving tag is not a pin.
+Stop if a command fails, and verify the checkout SHA before building.
 
 ```sh
+SOURCE_GIT_SHA=a6729f9ab5410587bb9da1adb7b34944a9cfc436
 git clone https://github.com/plotarmordev/thegrill.git "${SOURCE:?absolute new checkout path required}"
 git -C "$SOURCE" checkout --detach "${SOURCE_GIT_SHA:?reviewed full published commit SHA required}"
-git -C "$SOURCE" rev-parse HEAD
+test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SOURCE_GIT_SHA"
 cargo build --manifest-path "$SOURCE/Cargo.toml" -p grill-perf --release --locked
 GRILL_PERF="$SOURCE/target/release/grill-perf"
 "$GRILL_PERF" --version
@@ -55,9 +56,10 @@ The Git source revision is not `source_sha256`: that field hashes the exact
 workload file bytes. The normalized `workload_sha256` is the existing typed
 Workload serialization digest, not a generic JSON canonicalization.
 
-The installation smoke above must succeed on the clean native host before
-installation is reported as verified. This document is a procedure, not evidence
-that that smoke or live collection has run.
+At this pin, a clean-source native Linux ARM64 build, offline bundle verification
+and the full four-entry CLI workflow were exercised with synthetic loopback
+responses. This is CPU installation/protocol evidence, not model qualification.
+Repeat the installation smoke on the target host before reporting it as verified.
 
 ## Verify and select the exact workload
 
@@ -293,10 +295,10 @@ uninterrupted performance acquisitions. Preserve every cell and metric; do not
 select only favorable gates or treat a withheld comparison percentage as zero.
 
 Maintain separate source-reviewed, loopback-tested and live-qualified statuses
-for each recipe and workload. The new data and both control-mapping CLI fixtures
-are planned for integration validation, not reported as executed here. Live
-qualification of this shared workflow remains pending: DeepSeek first under
-coordination, GLM separately later. Earlier smoke receipts do not qualify this
+for each recipe and workload. Both explicit control mappings and all four
+workload entries were exercised through the CLI against synthetic responses.
+Live qualification remains pending: DeepSeek first under coordination, GLM
+separately later. Earlier model smoke receipts do not qualify this new
 bundle/policy workflow.
 
 Use the [manual reviewed report template](SHARED-REPORT-TEMPLATE.md) only after
