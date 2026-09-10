@@ -182,6 +182,17 @@ Cache modes:
 | `reported-prefix-zero` | Unique per-request salt; require reported prefix-cache count zero. |
 | `reported-prefix-hit` | Stable salt per cell/lane; require explicit warmup and reported hits in measured waves. |
 
+Warmup is necessary for `reported-prefix-hit`, but does not guarantee a hit.
+Servers may reuse only complete cache blocks, with engine-specific alignment
+requirements. A short prompt can therefore report zero cached tokens after priming.
+Consult the server's cache mechanism and inspect `cached_prompt_tokens`; use a
+longer appropriately aligned prompt when testing warm decode, without assuming
+length alone guarantees reuse.
+
+If cache hits are not required for your measurement, use a separate `observe`
+workload. That changes the workload and the claim; it does not repair an
+ineligible `reported-prefix-hit` run or make the two workloads comparable.
+
 Required prefix modes need `vllm-fixed-v1`. Plans name the declared mechanism
 and the provider observation source; the response record retains the actual
 reported count. A flag plus a reported zero is **not universal proof of cold
