@@ -273,18 +273,53 @@ not overlap (`a.max < b.min || b.max < a.min`); touching endpoints overlap.
 two decimals for latency and tokens/s with one decimal for rates. Withholding
 for spread does not change `eligible` or `ineligibility_reasons`, which describe
 run comparability. Absent scalars and ranges are explicit JSON nulls.
-Disjoint ranges from three trials is a coarse filter, not a significance test:
-about one identical pair in ten separates by chance, and one outlier lane can
-withhold a real change. A withheld change is not evidence of equality.
-`compare A B --reference A2` checks the reference against the same workload,
-collector identity and transport controls, and includes its cell summaries in
-`reference`. The baseline range then becomes the union of A's and A2's ranges
-before the overlap test, and overlap strings say so; a reference cell without a
-range leaves A's range unchanged. `drift` reports raw median changes from A to
-A2 for each metric without gating: a noise floor for reading, not a claim.
-Absent reference and drift fields are explicit nulls; human output prints absent
-drift as `n/a`. The comparison JSON is `version` 2: `*_change_percent` is null
-for an eligible cell whenever its ranges overlap, which version 1 never did.
+Disjoint observed ranges are a descriptive filter, not a significance test,
+bootstrap confidence interval or equivalence test. A withheld change is not
+evidence of equality.
+
+`compare A B --reference A2` verifies the supplied reference against the same
+workload, collector identity and transport controls. Corrupt or structurally
+incompatible reference evidence is a command error with reference context.
+Valid but incomplete or ineligible reference evidence makes the affected cell
+ineligible: changes and drift are null, and reference-specific reasons are
+reported. This includes incomplete declared warmups and unsettled or continued
+execution sessions. All run summaries and ordered raw observations remain
+available; no supplied reference silently becomes an ordinary A/B comparison.
+
+`reference_model`, `reference_deployment` and `reference_identity` disclose
+baseline-repeat declarations. Identity status is `declared_match` only when
+model, endpoint and every deployment field (`model_revision`, `runtime`,
+`hardware`, `settings`) are present and equal. A known differing declaration
+is `declared_mismatch`, even if another field is missing; otherwise missing
+declarations are `unavailable`. Both nonmatching statuses make reference-aware
+cells ineligible, with reasons, without discarding any run's summaries.
+Matching declarations do not verify physical server restoration, cache state,
+temporal A/B/A ordering or causal effect. JSON and human output state this
+limitation; the result is only a descriptive declared-repeat comparison.
+
+`observed_output_amounts_match` retains its A/B meaning.
+`reference_output_amounts_match` reports the A/A2 ordered trial/lane completion
+count check and is null without a reference. Complete equal ordered counts
+across A, B and A2 are required for both changes and drift; equal totals or
+permutations are insufficient.
+
+For a qualified repeat, the baseline range becomes the union of A's and A2's
+ranges before the existing overlap test. Missing lane observations on A, B or A2
+withhold that stream metric and its drift with a reference-specific reason;
+surviving lanes cannot silently stand in for a complete paired metric.
+A missing reference metric range likewise never permits A-only fallback.
+Other metrics remain usable; absent decode/prefill observations do not alone
+make a nonstreaming cell ineligible. `drift` reports qualified A-to-A2 median
+changes without an overlap filter; its `withheld` array explains null metrics
+and failed qualification. Drift is descriptive, not a validated noise bound.
+
+Comparison JSON advances to `version` 3 for reference qualification and identity
+disclosure. Reference metadata, summaries and drift are explicit nulls when
+no reference is supplied. Ordinary no-reference numerical results and eligibility
+retain the previous range method. Run, plan, reservation and wave receipt
+formats and legacy readers are unchanged. Exit status follows cell eligibility:
+supplied ineligible reference evidence cannot produce an eligible A/B exit;
+metric-specific absence or overlap alone does not change cell eligibility.
 
 ## Validation
 

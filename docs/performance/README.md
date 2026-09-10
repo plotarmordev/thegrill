@@ -207,13 +207,20 @@ verification rather than being repaired.
   as a speed improvement.
 - Min/max ranges accompany complete-cell medians. A matched percentage is shown
   only when the runs' ranges do not overlap; `withheld` explains overlap without
-  making an otherwise comparable cell ineligible. Three trials make this a coarse
-  filter, not a significance test: identical setups separate by chance about one
-  time in ten, and one outlier lane can withhold a real change, so a withheld
-  change is not evidence of equality. Repeat setup A and pass
-  `--reference results/setup-a-repeat`: the baseline range becomes the union of
-  both A runs before the overlap test, and `drift` reports the raw A-to-repeat
-  median change as a noise floor.
+  making an otherwise comparable cell ineligible. Observed ranges are descriptive,
+  not a significance or equivalence test; a withheld change is not evidence of
+  equality. Repeat setup A and pass `--reference results/setup-a-repeat` only
+  with complete matching model, endpoint and deployment declarations. A qualified
+  repeat widens the baseline range with both A runs before the overlap test.
+  `drift` reports the qualified A-to-repeat median change, not a validated noise
+  bound. Matching declarations do not verify server restoration, cache state,
+  run timing order or causal effect.
+- A supplied reference never silently falls back to A/B alone. Invalid reference
+  files are errors; incomplete evidence, unequal ordered output counts or missing
+  or mismatched declarations make the reference-aware cell ineligible, with
+  reasons. Summaries remain inspectable. Missing decode/prefill lane observations
+  on any side withhold those reference-aware metrics and drift, even when other
+  lanes have measurements. Omit `--reference` explicitly for ordinary A/B.
 - A compatible comparison requires the same normalized workload, collector
   binary fingerprint and transport controls. Model/endpoint deployments may
   differ; this is a descriptive deployment comparison, not causal attribution.
@@ -263,6 +270,13 @@ are not inspected or flushed. Missing usage remains unknown, never zero.
 `model_revision`, `runtime`, `hardware` and `settings` strings. These are operator
 declarations, not verification that a server loaded those bytes. Keep secrets
 out of declarations. Use exact public model/runtime references where available.
+Reference comparison requires every field on both A runs: omitted deployment or
+nullable fields yield identity `unavailable`, not a match. Known differences
+yield `declared_mismatch`; complete equal declarations yield `declared_match`.
+Comparison JSON exposes these statuses and reasons under `reference_identity`
+alongside `reference_model` and `reference_deployment`. Its output version
+advances for this reference qualification contract; saved receipt formats do
+not change.
 
 Runs retain prompts, request bodies and raw provider responses. They are private
 evidence, **not automatically safe public exports**. There is no upload command.

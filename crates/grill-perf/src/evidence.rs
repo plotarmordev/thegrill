@@ -542,6 +542,7 @@ pub struct CellChange {
     pub cell: String,
     pub eligible: bool,
     pub observed_output_amounts_match: bool,
+    pub reference_output_amounts_match: Option<bool>,
     pub ineligibility_reasons: Vec<String>,
     pub withheld: Vec<String>,
     pub wave_latency_change_percent: Option<f64>,
@@ -552,6 +553,7 @@ pub struct CellChange {
 #[derive(Serialize)]
 pub struct Drift {
     pub cell: String,
+    pub withheld: Vec<String>,
     pub wave_latency_percent: Option<f64>,
     pub achieved_throughput_percent: Option<f64>,
     pub decode_rate_percent: Option<f64>,
@@ -565,6 +567,9 @@ pub struct Comparison {
     pub candidate_model: String,
     pub baseline_deployment: Option<Deployment>,
     pub candidate_deployment: Option<Deployment>,
+    pub reference_model: Option<String>,
+    pub reference_deployment: Option<Deployment>,
+    pub reference_identity: Option<ReferenceIdentity>,
     pub baseline: Vec<CellSummary>,
     pub candidate: Vec<CellSummary>,
     pub reference: Option<Vec<CellSummary>>,
@@ -576,60 +581,138 @@ fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
         .filter(|(a, _)| *a > 0.0)
         .map(|(a, b)| 100.0 * (b / a - 1.0))
 }
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceIdentityStatus {
+    DeclaredMatch,
+    DeclaredMismatch,
+    Unavailable,
+}
+impl ReferenceIdentityStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclaredMatch => "declared_match",
+            Self::DeclaredMismatch => "declared_mismatch",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct ReferenceIdentity {
+    pub status: ReferenceIdentityStatus,
+    pub reasons: Vec<String>,
+    pub scope: &'static str,
+}
+fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
+    let mut reasons = Vec::new();
+    let mut mismatch = false;
+    let mut declaration = |name: &str, a: Option<&str>, a2: Option<&str>| match (
+        a.filter(|s| !s.is_empty()),
+        a2.filter(|s| !s.is_empty()),
+    ) {
+        (Some(a), Some(a2)) if a != a2 => {
+            mismatch = true;
+            reasons.push(format!(
+                "reference: {name} declaration differs from baseline"
+            ));
+        }
+        (Some(_), Some(_)) => {}
+        (a, a2) => {
+            if a.is_none() {
+                reasons.push(format!(
+                    "reference: baseline {name} declaration unavailable"
+                ));
+            }
+            if a2.is_none() {
+                reasons.push(format!("reference: {name} declaration unavailable"));
+            }
+        }
+    };
+    declaration("model", Some(&a.model), Some(&a2.model));
+    declaration("endpoint", Some(&a.endpoint), Some(&a2.endpoint));
+    let a = a.deployment.as_ref();
+    let a2 = a2.deployment.as_ref();
+    declaration(
+        "model_revision",
+        a.and_then(|d| d.model_revision.as_deref()),
+        a2.and_then(|d| d.model_revision.as_deref()),
+    );
+    declaration(
+        "runtime",
+        a.and_then(|d| d.runtime.as_deref()),
+        a2.and_then(|d| d.runtime.as_deref()),
+    );
+    declaration(
+        "hardware",
+        a.and_then(|d| d.hardware.as_deref()),
+        a2.and_then(|d| d.hardware.as_deref()),
+    );
+    declaration(
+        "settings",
+        a.and_then(|d| d.settings.as_deref()),
+        a2.and_then(|d| d.settings.as_deref()),
+    );
+    ReferenceIdentity {
+        status: if mismatch {
+            ReferenceIdentityStatus::DeclaredMismatch
+        } else if reasons.is_empty() {
+            ReferenceIdentityStatus::DeclaredMatch
+        } else {
+            ReferenceIdentityStatus::Unavailable
+        },
+        reasons,
+        scope: "Matching declarations do not verify server restoration, cache state, timing order or causal effect.",
+    }
+}
+fn output_amounts_match(a: &CellSummary, b: &CellSummary) -> bool {
+    a.lane_completion_tokens
+        .iter()
+        .flatten()
+        .all(Option::is_some)
+        && a.lane_completion_tokens == b.lane_completion_tokens
+}
+fn complete_lane_observations(values: &[Vec<Option<f64>>]) -> bool {
+    values.iter().flatten().all(Option::is_some)
+}
+
 pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;
-    let reference = reference.map(load).transpose()?;
-    for other in std::iter::once(&right).chain(reference.iter()) {
+    let reference = reference
+        .map(|path| load(path).map_err(|e| format!("reference: {e}")))
+        .transpose()?;
+    for (side, other) in
+        std::iter::once(("candidate", &right)).chain(reference.iter().map(|run| ("reference", run)))
+    {
         if left.plan.workload_sha256 != other.plan.workload_sha256
             || left.plan.tool_version != other.plan.tool_version
             || left.plan.collector_sha256 != other.plan.collector_sha256
             || left.plan.local_http != other.plan.local_http
             || left.plan.pool_max_idle_per_host != other.plan.pool_max_idle_per_host
         {
-            return Err(
-                "incompatible workload, tool or transport controls; no matched comparison produced"
-                    .into(),
-            );
+            return Err(format!(
+                "{side}: incompatible workload, tool or transport controls; no matched comparison produced"
+            ));
         }
     }
     let baseline = summarize(&left);
     let candidate = summarize(&right);
+    let reference_identity = reference
+        .as_ref()
+        .map(|run| reference_identity(&left.plan, &run.plan));
+    let reference_model = reference.as_ref().map(|run| run.plan.model.clone());
+    let reference_deployment = reference
+        .as_ref()
+        .and_then(|run| run.plan.deployment.clone());
     let reference = reference.as_ref().map(summarize);
-    let drift: Option<Vec<Drift>> = reference.as_ref().map(|reference| {
-        baseline
-            .iter()
-            .zip(reference)
-            .map(|(a, a2)| Drift {
-                cell: a.cell.clone(),
-                wave_latency_percent: change(a.median_wave_latency_us, a2.median_wave_latency_us),
-                achieved_throughput_percent: change(
-                    a.median_achieved_completion_tokens_per_second,
-                    a2.median_achieved_completion_tokens_per_second,
-                ),
-                decode_rate_percent: change(
-                    a.median_decode_tokens_per_second,
-                    a2.median_decode_tokens_per_second,
-                ),
-                prefill_rate_percent: change(
-                    a.median_prefill_tokens_per_second,
-                    a2.median_prefill_tokens_per_second,
-                ),
-            })
-            .collect()
-    });
-    let changes = baseline
+    let changes: Vec<CellChange> = baseline
         .iter()
         .zip(&candidate)
         .enumerate()
         .map(|(index, (a, b))| {
             let a2 = reference.as_ref().map(|reference| &reference[index]);
-            let same = a
-                .lane_completion_tokens
-                .iter()
-                .flatten()
-                .all(Option::is_some)
-                && a.lane_completion_tokens == b.lane_completion_tokens;
+            let same = output_amounts_match(a, b);
+            let reference_same = a2.map(|a2| output_amounts_match(a, a2));
             let mut reasons: Vec<String> = a
                 .issues
                 .iter()
@@ -639,46 +722,83 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             if !same {
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
-            let mut withheld = Vec::new();
-            // A repeat of the baseline widens its range: the candidate must clear the
-            // noise the baseline itself demonstrated, not just three trials of it.
-            let mut matched_change = |name: &str,
-                                      value: Option<f64>,
-                                      a: Option<[f64; 2]>,
-                                      a2: Option<[f64; 2]>,
-                                      b: Option<[f64; 2]>,
-                                      unit: (f64, usize)| {
-                let value = value.filter(|_| same)?;
-                let (a, b) = a.zip(b)?;
-                let a = match a2 {
-                    Some(a2) => [a[0].min(a2[0]), a[1].max(a2[1])],
-                    None => a,
-                };
-                if a[1] < b[0] || b[1] < a[0] {
-                    return Some(value);
+            if let Some(a2) = a2 {
+                reasons.extend(a2.issues.iter().map(|s| format!("reference: {s}")));
+                if a2.median_wave_latency_us.is_none() {
+                    reasons
+                        .push("reference: complete eligible measured evidence unavailable".into());
                 }
-                let (divisor, decimals) = unit;
-                let [a0, a1, b0, b1] = [a[0], a[1], b[0], b[1]].map(|v| v / divisor);
-                withheld.push(format!(
-                    "{name}: ranges overlap, {a0:.*}-{a1:.*} vs {b0:.*}-{b1:.*}{}",
-                    decimals,
-                    decimals,
-                    decimals,
-                    decimals,
-                    if a2.is_some() {
-                        " (baseline pooled with reference)"
-                    } else {
-                        ""
+                if reference_same != Some(true) {
+                    reasons.push(
+                        "reference: paired trial/lane completion counts missing or unequal".into(),
+                    );
+                }
+            }
+            if let Some(identity) = &reference_identity {
+                reasons.extend(identity.reasons.iter().cloned());
+            }
+            let reference_qualified = a2.is_none_or(|a2| {
+                reference_same == Some(true)
+                    && a2.median_wave_latency_us.is_some()
+                    && reference_identity.as_ref().is_some_and(|identity| {
+                        identity.status == ReferenceIdentityStatus::DeclaredMatch
+                    })
+            });
+            let eligible = same
+                && a.median_wave_latency_us.is_some()
+                && b.median_wave_latency_us.is_some()
+                && reference_qualified;
+            let mut withheld = Vec::new();
+            // A supplied repeat must contribute this metric, never disappear into
+            // a baseline-only range when its observations are unavailable.
+            let mut matched_change =
+                |name: &str,
+                 value: Option<f64>,
+                 a: Option<[f64; 2]>,
+                 a2: Option<[f64; 2]>,
+                 b: Option<[f64; 2]>,
+                 unit: (f64, usize),
+                 observations_complete: bool| {
+                    if reference.is_some() && !observations_complete {
+                        withheld.push(format!(
+                            "{name}: reference comparison has missing lane observations"
+                        ));
+                        return None;
                     }
-                ));
-                None
-            };
+                    if a2.is_none() && reference.is_some() {
+                        withheld.push(format!("{name}: reference metric range unavailable"));
+                        return None;
+                    }
+                    let value = value.filter(|_| same && reference_qualified)?;
+                    let (a, b) = a.zip(b)?;
+                    let a = match a2 {
+                        Some(a2) => [a[0].min(a2[0]), a[1].max(a2[1])],
+                        None => a,
+                    };
+                    if a[1] < b[0] || b[1] < a[0] {
+                        return Some(value);
+                    }
+                    let (divisor, decimals) = unit;
+                    let [a0, a1, b0, b1] = [a[0], a[1], b[0], b[1]].map(|v| v / divisor);
+                    withheld.push(format!(
+                        "{name}: ranges overlap, {a0:.*}-{a1:.*} vs {b0:.*}-{b1:.*}{}",
+                        decimals,
+                        decimals,
+                        decimals,
+                        decimals,
+                        if a2.is_some() {
+                            " (baseline pooled with reference)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    None
+                };
             CellChange {
                 cell: a.cell.clone(),
-                eligible: same
-                    && a.median_wave_latency_us.is_some()
-                    && b.median_wave_latency_us.is_some(),
+                eligible,
                 observed_output_amounts_match: same,
+                reference_output_amounts_match: reference_same,
                 ineligibility_reasons: reasons,
                 wave_latency_change_percent: matched_change(
                     "wave latency",
@@ -687,6 +807,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     a2.and_then(|a2| a2.wave_latency_us_range),
                     b.wave_latency_us_range,
                     (1_000_000.0, 2),
+                    true,
                 ),
                 achieved_throughput_change_percent: matched_change(
                     "achieved throughput",
@@ -698,6 +819,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     a2.and_then(|a2| a2.achieved_completion_tokens_per_second_range),
                     b.achieved_completion_tokens_per_second_range,
                     (1.0, 1),
+                    true,
                 ),
                 decode_rate_change_percent: matched_change(
                     "decode rate",
@@ -709,6 +831,10 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     a2.and_then(|a2| a2.decode_tokens_per_second_range),
                     b.decode_tokens_per_second_range,
                     (1.0, 1),
+                    std::iter::once(a)
+                        .chain(std::iter::once(b))
+                        .chain(a2)
+                        .all(|s| complete_lane_observations(&s.lane_decode_tokens_per_second)),
                 ),
                 prefill_rate_change_percent: matched_change(
                     "prefill rate",
@@ -720,18 +846,91 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     a2.and_then(|a2| a2.prefill_tokens_per_second_range),
                     b.prefill_tokens_per_second_range,
                     (1.0, 1),
+                    std::iter::once(a)
+                        .chain(std::iter::once(b))
+                        .chain(a2)
+                        .all(|s| complete_lane_observations(&s.lane_prefill_tokens_per_second)),
                 ),
                 withheld,
             }
         })
         .collect();
+    let drift = reference.as_ref().map(|reference| {
+        baseline
+            .iter()
+            .zip(&candidate)
+            .zip(reference)
+            .zip(&changes)
+            .map(|(((a, b), a2), qualification)| {
+                let mut withheld = qualification.ineligibility_reasons.clone();
+                let mut drift_change =
+                    |name: &str, a: Option<f64>, a2: Option<f64>, observations_complete: bool| {
+                        if !observations_complete {
+                            withheld.push(format!(
+                                "{name}: reference comparison has missing lane observations"
+                            ));
+                            return None;
+                        }
+                        if a2.is_none() {
+                            withheld.push(format!("{name}: reference metric range unavailable"));
+                            return None;
+                        }
+                        if !qualification.eligible {
+                            return None;
+                        }
+                        let value = change(a, a2);
+                        if value.is_none() {
+                            withheld.push(format!(
+                                "{name}: baseline metric unavailable or nonpositive"
+                            ));
+                        }
+                        value
+                    };
+                Drift {
+                    cell: a.cell.clone(),
+                    wave_latency_percent: drift_change(
+                        "wave latency",
+                        a.median_wave_latency_us,
+                        a2.median_wave_latency_us,
+                        true,
+                    ),
+                    achieved_throughput_percent: drift_change(
+                        "achieved throughput",
+                        a.median_achieved_completion_tokens_per_second,
+                        a2.median_achieved_completion_tokens_per_second,
+                        true,
+                    ),
+                    decode_rate_percent: drift_change(
+                        "decode rate",
+                        a.median_decode_tokens_per_second,
+                        a2.median_decode_tokens_per_second,
+                        [a, b, a2]
+                            .into_iter()
+                            .all(|s| complete_lane_observations(&s.lane_decode_tokens_per_second)),
+                    ),
+                    prefill_rate_percent: drift_change(
+                        "prefill rate",
+                        a.median_prefill_tokens_per_second,
+                        a2.median_prefill_tokens_per_second,
+                        [a, b, a2]
+                            .into_iter()
+                            .all(|s| complete_lane_observations(&s.lane_prefill_tokens_per_second)),
+                    ),
+                    withheld,
+                }
+            })
+            .collect()
+    });
     Ok(Comparison {
-        version: 2,
+        version: 3,
         claim: "descriptive-deployment-comparison-not-causal-or-steady-state-capacity",
         baseline_model: left.plan.model,
         candidate_model: right.plan.model,
         baseline_deployment: left.plan.deployment,
         candidate_deployment: right.plan.deployment,
+        reference_model,
+        reference_deployment,
+        reference_identity,
         baseline,
         candidate,
         reference,
