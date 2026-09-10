@@ -3770,3 +3770,5 @@ fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
         false
     );
 }
+#[path = "support/metrics.rs"]
+mod metrics_tests;

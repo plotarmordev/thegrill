@@ -157,6 +157,7 @@ pub struct Loaded {
     pub waves: Vec<Option<Wave>>,
     pub states: Vec<&'static str>,
     pub history: crate::lifecycle::History,
+    pub metrics: Option<crate::metrics::Summary>,
 }
 pub fn load(root: &Path) -> Result<Loaded> {
     directory(root)?;
@@ -168,6 +169,12 @@ pub fn load(root: &Path) -> Result<Loaded> {
     plan.workload.validate()?;
     if let Some(deployment) = &plan.deployment {
         deployment.validate()?;
+    }
+    if let Some(config) = &plan.metrics {
+        if plan.version != 2 {
+            return Err("metrics require execution-session provenance".into());
+        }
+        config.validate(plan.waves.len(), plan.local_http)?;
     }
     let expected_mechanism = (plan.workload.request.profile == Profile::VllmFixedV1)
         .then_some("declared-vllm-prefix-cache");
@@ -209,6 +216,8 @@ pub fn load(root: &Path) -> Result<Loaded> {
     let plan_hash = digest(&plan_bytes);
     let mut waves = Vec::with_capacity(plan.waves.len());
     let mut states = Vec::with_capacity(plan.waves.len());
+    let mut metrics_budget = crate::metrics::Budget::default();
+    let mut metrics_waves = Vec::new();
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
@@ -254,6 +263,29 @@ pub fn load(root: &Path) -> Result<Loaded> {
             || wave.attempts.len() != spec.concurrency as usize
         {
             return Err("wave lineage mismatch".into());
+        }
+        match (&plan.metrics, &wave.metrics) {
+            (Some(config), Some(reference)) => {
+                let summary = crate::metrics::load(
+                    &dir,
+                    reference,
+                    config,
+                    &plan_hash,
+                    spec.index,
+                    &mut metrics_budget,
+                )?;
+                if wave.attempts.iter().any(|a| {
+                    a.timing
+                        .dispatch_offset_us
+                        .checked_add(a.timing.settle_us)
+                        .is_none_or(|n| n > summary.receipt.measured_duration_us)
+                }) {
+                    return Err("metrics measurement boundary contradicts wave settlement".into());
+                }
+                metrics_waves.push(summary);
+            }
+            (None, None) => (),
+            _ => return Err("missing or undeclared metrics companion evidence".into()),
         }
         for (lane, a) in wave.attempts.iter().enumerate() {
             if a.lane as usize != lane
@@ -332,6 +364,11 @@ pub fn load(root: &Path) -> Result<Loaded> {
     }
     let history = crate::lifecycle::history(root, &plan, &plan_hash, &states, &waves)?;
     Ok(Loaded {
+        metrics: plan.metrics.as_ref().map(|config| crate::metrics::Summary {
+            config: config.clone(),
+            budget: metrics_budget,
+            waves: metrics_waves,
+        }),
         plan,
         waves,
         states,
@@ -575,6 +612,12 @@ pub struct Comparison {
     pub reference: Option<Vec<CellSummary>>,
     pub drift: Option<Vec<Drift>>,
     pub changes: Vec<CellChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_metrics: Option<crate::metrics::Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_metrics: Option<crate::metrics::Summary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_metrics: Option<crate::metrics::Summary>,
 }
 fn change(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     a.zip(b)
@@ -678,7 +721,7 @@ fn complete_lane_observations(values: &[Vec<Option<f64>>]) -> bool {
 pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Comparison> {
     let left = load(a)?;
     let right = load(b)?;
-    let reference = reference
+    let mut reference = reference
         .map(|path| load(path).map_err(|e| format!("reference: {e}")))
         .transpose()?;
     for (side, other) in
@@ -689,9 +732,10 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
             || left.plan.collector_sha256 != other.plan.collector_sha256
             || left.plan.local_http != other.plan.local_http
             || left.plan.pool_max_idle_per_host != other.plan.pool_max_idle_per_host
+            || left.plan.metrics != other.plan.metrics
         {
             return Err(format!(
-                "{side}: incompatible workload, tool or transport controls; no matched comparison produced"
+                "{side}: incompatible workload, tool, transport or metrics controls; no matched comparison produced"
             ));
         }
     }
@@ -704,6 +748,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
     let reference_deployment = reference
         .as_ref()
         .and_then(|run| run.plan.deployment.clone());
+    let reference_metrics = reference.as_mut().and_then(|run| run.metrics.take());
     let reference = reference.as_ref().map(summarize);
     let changes: Vec<CellChange> = baseline
         .iter()
@@ -931,6 +976,9 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
         reference_model,
         reference_deployment,
         reference_identity,
+        baseline_metrics: left.metrics,
+        candidate_metrics: right.metrics,
+        reference_metrics,
         baseline,
         candidate,
         reference,

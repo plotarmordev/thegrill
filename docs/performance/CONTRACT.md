@@ -195,6 +195,85 @@ collector binary fingerprint and optional deployment declarations. These do not
 prove which model or hardware an untrusted server used. Raw evidence is not a
 public-safe export.
 
+## Provider snapshot protocol
+
+Opt-in plan field `metrics` is a closed version-1 configuration containing
+`endpoint`, `allowlist`, `scope`, `cadence`, `deadline_us`, `body_bytes`,
+`line_bytes`, `series`, `labels_per_series`, `label_bytes_per_series`,
+`run_budget_us`, `retained_raw_bytes` and `max_requests`. The collector freezes
+the endpoint and bounds described in the usage guide; the loader rejects
+modified policies. The plan-byte hash binds them to every reservation and wave.
+Absent `metrics` serializes absent, preserving opted-out plan/request/receipt
+shapes. Legacy plans cannot acquire telemetry without execution-session
+provenance. Comparison requires equal optional configurations, including endpoint.
+
+Each opted-in published wave requires `metrics: {file, sha256, overhead_us}`;
+`file` is exactly `metrics.json` within that wave directory. The bounded companion
+contains `{version, plan_sha256, wave, before, after, measured_origin_unix_ms,
+measured_duration_us}`. The measurement duration spans the collector origin
+through all lane settlement, not the subsequent scrape or publication.
+`overhead_us` covers both telemetry operations including raw and companion
+publication; it is excluded from wave preparation/body-publication intervals.
+Wall timestamps are observations, not an assumed monotonic clock.
+
+Each snapshot contains `{started_unix_ms, scrape_us, duration_us, charged_us,
+allowance_us, status, error, http_status, raw_bytes, raw_sha256}`.
+`scrape_us` covers capture/parse; `duration_us` also includes raw hashing and
+publication. Its raw entity or retained
+prefix is `metrics-before.bin` or `metrics-after.bin`; skipped snapshots bind
+an empty file. Status is `complete`, `parse_error`, `transport_error`,
+`http_error`, `unsupported`, `deadline`, `body_limit` or `skipped_budget`.
+Only successful, completely captured, identity-encoded HTTP 200 entities supply
+samples. Errors remain diagnostics, not zeros or performance-ineligibility
+reasons. The loader verifies companion lineage/hash, raw bounds/hashes, policy,
+budget arithmetic and complete/parse-error raw semantics. Derived series,
+deltas and ratios are recomputed offline, not trusted from serialized values.
+
+The parser accepts UTF-8 Prometheus text samples, comments, optional integer
+timestamps and quoted labels with newline, quote and backslash escapes. It
+rejects duplicate selected identities, duplicate selected labels, nonfinite selected
+values and negative supported counters. Unselected names are skipped before label/value
+parsing; whole-body UTF-8, byte and line bounds still apply. Label bytes include
+the encoded braces, names, separators and values of each selected series.
+The allowlist is fixed; no histogram expansion or OpenMetrics exemplars are
+interpreted. Empty/missing samples remain unavailable, not zero.
+
+Counter identity is metric name plus canonical complete labels. A delta requires
+both finite samples and a nondecreasing value. A decrease reports
+`reset_observed`; a missing side reports `missing`, with null delta.
+Nondecreasing deltas explicitly leave restart identity unverified. Acceptance
+ratios require matching label sets, usable draft and accepted deltas, positive
+draft delta and accepted delta no greater than draft delta. Gauges are snapshots,
+not deltas. All diagnostics remain server-scoped, not workload-attributed.
+
+Each scrape deadline is the lesser of 2 seconds and remaining 30-second
+whole-run telemetry allowance. Its persisted elapsed duration, including raw
+publication and at least a microsecond, is the charge. Remaining telemetry
+overhead from the wave reference is charged before the next wave. Scheduler
+and filesystem overrun is retained and prevents further
+admission once exhausted. No completed scrape gets a fresh full-deadline charge
+on resume. Every published companion is reloaded in schedule order to reconstruct
+requests, elapsed charges and retained bytes before continuation. Existing
+lifecycle rules refuse continuation of any reserved/unsettled scrape or wave;
+uncommitted reservations therefore cannot reset the allowance.
+
+Raw bodies are bounded by 1 MiB each and 16 MiB across the run. Admission reserves
+a full body cap before making another request. Companions are bounded by 16 KiB
+each and labels are retained only in raw bodies, not JSON receipts. Thus escaped
+labels cannot inflate companion publication. Offline JSON can expand raw labels
+through escaping and diagnostic projections; its input remains bounded by the
+whole-run raw cap and per-scrape series/label limits, not a claim of constant
+output size or RSS. Filesystem latency, kernel/TLS buffering and scheduler
+starvation are not bounded by the network deadline. Published telemetry overhead
+exposes local work rather than claiming zero perturbation.
+
+Raw before evidence is written outside the measured origin, after reservation.
+The after scrape and companion publication follow all lane settlement and precede
+wave publication. A failed companion publication leaves the reservation
+unsettled; it is inspectable as missing performance evidence, never silently
+recovered or resumed. A published wave missing its required companion fails
+integrity verification. Telemetry has no separate inspector or recovery workflow.
+
 ## Lifecycle ownership and continuation
 
 Each collector/resumer holds a nonblocking exclusive `flock` on the nonsymlink

@@ -1,4 +1,4 @@
-use crate::{evidence, lifecycle, model::*, wire};
+use crate::{evidence, lifecycle, metrics, model::*, wire};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
@@ -43,6 +43,9 @@ pub struct Options {
     /// Optional JSON declarations of model revision, runtime, hardware and settings.
     #[arg(long)]
     pub deployment: Option<PathBuf>,
+    /// Optional bounded server-wide diagnostics; can perturb between-wave cadence.
+    #[arg(long)]
+    pub metrics_url: Option<String>,
     #[arg(long)]
     pub auth_env: Option<String>,
     #[arg(long)]
@@ -95,6 +98,14 @@ pub fn execute(o: &Options) -> Result<Summary> {
         .max()
         .unwrap_or(1);
     let waves = workload.waves();
+    let metrics = o
+        .metrics_url
+        .as_ref()
+        .map(|endpoint| {
+            wire::endpoint(endpoint, o.local_http)
+                .map(|url| metrics::Config::new(url.to_string(), waves.len()))
+        })
+        .transpose()?;
     let normalized = serde_json::to_vec(&workload).map_err(|e| e.to_string())?;
     let cache_namespace = if workload.request.cache == Cache::Observe && !workload.salted() {
         None
@@ -126,6 +137,7 @@ pub fn execute(o: &Options) -> Result<Summary> {
         started_unix_ms: unix_ms(),
         cache_namespace,
         waves,
+        metrics,
     };
     // Seed magnitude peaks at a corner of the trial/lane range and index 1023 is
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
@@ -163,12 +175,20 @@ pub fn execute(o: &Options) -> Result<Summary> {
     let plan_bytes = evidence::json(&o.out.join("plan.json"), &plan)?;
     evidence::sync(&o.out)?;
     let plan_hash = evidence::digest(&plan_bytes);
-    collect(&o.out, &plan, &plan_hash, 0, 0, o.json)
+    collect(
+        &o.out,
+        &plan,
+        &plan_hash,
+        0,
+        0,
+        o.json,
+        metrics::Budget::default(),
+    )
 }
 
 pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     let _owner = lifecycle::ownership(root)?;
-    let loaded = evidence::load(root)?;
+    let mut loaded = evidence::load(root)?;
     if loaded.plan.version != 2 {
         return Err("legacy runs cannot be resumed; no execution-session provenance".into());
     }
@@ -177,6 +197,10 @@ pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     {
         return Err("continuation requires the original collector binary and version".into());
     }
+    let metrics_budget = loaded
+        .metrics
+        .take()
+        .map_or(metrics::Budget::default(), |m| m.budget);
     let history = &loaded.history;
     if history.open || history.last_status.as_deref() != Some("paused") {
         return Err("continuation requires a settled cooperative pause; interrupted, failed or reserved/unsettled work is not replayed".into());
@@ -192,6 +216,7 @@ pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
         history.count,
         history.next_wave,
         json,
+        metrics_budget,
     )
 }
 
@@ -202,6 +227,7 @@ fn collect(
     session: usize,
     first_wave: usize,
     json: bool,
+    mut metrics_budget: metrics::Budget,
 ) -> Result<Summary> {
     let url = wire::endpoint(&plan.endpoint, plan.local_http)?;
     let auth = wire::credential(plan.auth_env.as_deref())?;
@@ -243,6 +269,7 @@ fn collect(
     };
     let operation = runtime.block_on(async {
         let client = wire::client(plan.local_http, plan.pool_max_idle_per_host)?;
+        let metrics_client = plan.metrics.as_ref().map(|_| wire::client(plan.local_http, 1)).transpose()?;
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|_| "cannot subscribe to interrupt signal")?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         for spec in &plan.waves[first_wave..] {
@@ -263,9 +290,16 @@ fn collect(
             drop(admission);
             let reservation_publication_us = wire::us(reservation_start);
             let prepared: Vec<_> = reservation.requests.into_iter().map(|body| wire::request(&client, &url, auth.as_ref(), body, plan.workload.request.stream)).collect::<Result<_>>()?;
+            let telemetry_start = plan.metrics.as_ref().map(|_| Instant::now());
+            let before = match (&plan.metrics, &metrics_client) {
+                (Some(config), Some(client)) => Some(metrics::scrape(client, config, &mut metrics_budget, &dir, "before").await?),
+                _ => None,
+            };
+            let before_overhead_us = telemetry_start.map_or(0, wire::us);
             let (stop, cancellation) = watch::channel(interrupted());
             let mut tasks = JoinSet::new();
-            let preparation_us = wire::us(preparation);
+            let preparation_us = wire::us(preparation).saturating_sub(before_overhead_us);
+            let measured_origin_unix_ms = plan.metrics.as_ref().map(|_| metrics::unix_ms());
             let origin = Instant::now();
             for (lane, request) in prepared.into_iter().enumerate() {
                 tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), plan.workload.request.stream, lane as u32, origin, cancellation.clone()));
@@ -282,6 +316,22 @@ fn collect(
                     }
                 }
             }
+            let measured_duration_us = wire::us(origin);
+            let metrics = match (&plan.metrics, &metrics_client, before, measured_origin_unix_ms) {
+                (Some(config), Some(client), Some(before), Some(measured_origin_unix_ms)) => {
+                    let after_start = Instant::now();
+                    let after = metrics::scrape(client, config, &mut metrics_budget, &dir, "after").await?;
+                    let snapshots_us = before.duration_us + after.duration_us;
+                    let mut reference = metrics::publish(&dir, &metrics::Receipt {
+                        version: 1, plan_sha256: plan_hash.into(), wave: spec.index,
+                        before, after, measured_origin_unix_ms, measured_duration_us,
+                    })?;
+                    reference.overhead_us = before_overhead_us + wire::us(after_start);
+                    metrics_budget.finish_wave(reference.overhead_us, snapshots_us)?;
+                    Some(reference)
+                }
+                _ => None,
+            };
             // No hashing, filesystem writes or receipt publication while any peer is active.
             let publication = Instant::now();
             settled.sort_by_key(|a| a.attempt.lane);
@@ -298,7 +348,7 @@ fn collect(
             }
             let network_failed = attempts.iter().any(|a| a.status != Status::Complete);
             let (eligible, tokens, rate) = evidence::throughput(&attempts, last - first);
-            let wave = Wave { version: 1, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us: last - first, dispatch_spread_us: last_dispatch - first, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible };
+            let wave = Wave { version: 1, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us: last - first, dispatch_spread_us: last_dispatch - first, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics };
             evidence::publish(&dir, "wave.json", &wave)?;
             summary.wave_publication_us += wire::us(publication);
             summary.wave_preparation_us += preparation_us;

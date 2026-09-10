@@ -361,6 +361,8 @@ pub struct Plan {
     pub started_unix_ms: u64,
     pub cache_namespace: Option<String>,
     pub waves: Vec<WaveSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<crate::metrics::Config>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -489,6 +491,8 @@ pub struct Wave {
     pub completion_tokens: Option<u64>,
     pub achieved_completion_tokens_per_second: Option<f64>,
     pub eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<crate::metrics::Reference>,
 }
 pub fn eligibility(a: &Attempt, r: &RequestSettings, phase: Phase) -> Vec<String> {
     let mut errors = Vec::new();
