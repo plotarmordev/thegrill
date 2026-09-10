@@ -809,6 +809,168 @@ fn portable_thinking_is_rejected_before_dispatch() {
 }
 
 #[test]
+fn enable_thinking_is_explicit_identity_and_does_not_require_answer_first() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    for (name, enabled) in [("off", false), ("on", true)] {
+        let mut w = workload(2, 1, 1);
+        w["request"]["profile"] = json!("vllm-fixed-v1");
+        w["request"]["thinking_control"] =
+            json!({"kind":"vllm-enable-thinking-v1","enabled":enabled});
+        successful(&run(&temp, &server, name, &w));
+        let seen: Vec<_> = server.seen.try_iter().collect();
+        assert_eq!(seen.len(), 4);
+        for body in seen {
+            assert_eq!(
+                body["chat_template_kwargs"],
+                json!({"enable_thinking":enabled})
+            );
+        }
+        assert_eq!(
+            wave(&temp, name, 0)["attempts"][0]["timing"]["first_generated_channel"],
+            "reasoning"
+        );
+        successful(
+            &cli()
+                .arg("compare")
+                .arg(temp.path(name))
+                .arg(temp.path(name))
+                .arg("--json")
+                .output()
+                .unwrap(),
+        );
+    }
+    let compared = cli()
+        .arg("compare")
+        .arg(temp.path("off"))
+        .arg(temp.path("on"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(compared.status.code(), Some(1));
+}
+
+#[test]
+fn thinking_control_rejects_conflicts_profiles_and_open_extensions_before_dispatch() {
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    for (name, profile, legacy, control) in [
+        (
+            "agree",
+            "vllm-fixed-v1",
+            json!(false),
+            json!({"kind":"vllm-enable-thinking-v1","enabled":false}),
+        ),
+        (
+            "disagree",
+            "vllm-fixed-v1",
+            json!(true),
+            json!({"kind":"vllm-enable-thinking-v1","enabled":false}),
+        ),
+        (
+            "portable",
+            "portable-chat-v1",
+            Value::Null,
+            json!({"kind":"vllm-enable-thinking-v1","enabled":false}),
+        ),
+        (
+            "kind",
+            "vllm-fixed-v1",
+            Value::Null,
+            json!({"kind":"other","enabled":false}),
+        ),
+        (
+            "field",
+            "vllm-fixed-v1",
+            Value::Null,
+            json!({"kind":"vllm-enable-thinking-v1","enabled":false,"extra":true}),
+        ),
+        (
+            "missing",
+            "vllm-fixed-v1",
+            Value::Null,
+            json!({"kind":"vllm-enable-thinking-v1"}),
+        ),
+        (
+            "type",
+            "vllm-fixed-v1",
+            Value::Null,
+            json!({"kind":"vllm-enable-thinking-v1","enabled":"false"}),
+        ),
+    ] {
+        let mut w = workload(1, 0, 1);
+        w["request"]["profile"] = json!(profile);
+        w["request"]["thinking"] = legacy;
+        w["request"]["thinking_control"] = control;
+        assert_eq!(run(&temp, &server, name, &w).status.code(), Some(1));
+        assert!(!temp.path(name).exists());
+    }
+    assert_eq!(server.count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn absent_new_control_preserves_legacy_workload_hashes_request_bytes_and_loading() {
+    use sha2::{Digest, Sha256};
+
+    let temp = Temp::new();
+    let server = Server::new(normal);
+    // These serialized contracts predate thinking_control; receipt loading hashes
+    // the normalized workload and compares regenerated request strings exactly.
+    let normalized = r#"{"version":1,"name":"fixture-v1","request":{"profile":"vllm-fixed-v1","stream":true,"output":{"tokens":8,"mode":"cap"},"cache":"observe","temperature_milli":0,"top_p_milli":1000,"seed":42},"limits":{"total_ms":3000,"idle_ms":1000,"response_bytes":65536,"wave_buffer_bytes":33554432},"cases":[{"id":"one","messages":[{"role":"user","content":"Say cafe."}]}],"cells":[{"id":"cell","case":"one","concurrency":1,"warmup_trials":0,"trials":1}]}"#;
+    let request = r#"{"model":"fixture-model","messages":[{"role":"user","content":"Say cafe."}],"stream":true,"max_tokens":8,"temperature":0.0,"top_p":1.0,"seed":42,"stream_options":{"include_usage":true}}"#;
+    for (name, legacy) in [
+        ("omitted", None),
+        ("null", Some(Value::Null)),
+        ("false", Some(json!(false))),
+        ("true", Some(json!(true))),
+    ] {
+        let mut w = workload(1, 0, 1);
+        w["request"]["profile"] = json!("vllm-fixed-v1");
+        if let Some(legacy) = &legacy {
+            w["request"]["thinking"] = legacy.clone();
+        }
+        for null_control in [false, true] {
+            if null_control {
+                w["request"]["thinking_control"] = Value::Null;
+            }
+            let name = format!("{name}-{null_control}");
+            successful(&run(&temp, &server, &name, &w));
+            let mut normalized = normalized.to_owned();
+            let mut request = request.to_owned();
+            if let Some(enabled) = legacy.as_ref().and_then(Value::as_bool) {
+                normalized = normalized.replace(
+                    r#""seed":42"#,
+                    &format!(r#""seed":42,"thinking":{enabled}"#),
+                );
+                request = request.replace(
+                    r#""seed":42"#,
+                    &format!(r#""seed":42,"chat_template_kwargs":{{"thinking":{enabled}}}"#),
+                );
+            }
+            let plan = value(temp.path(&name).join("plan.json"));
+            assert_eq!(
+                plan["workload_sha256"],
+                Sha256::digest(normalized.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            let reservation = value(temp.path(&name).join("wave-000000/reservation.json"));
+            assert_eq!(reservation["requests"][0], request);
+            successful(
+                &cli()
+                    .arg("compare")
+                    .arg(temp.path(&name))
+                    .arg(temp.path(&name))
+                    .arg("--json")
+                    .output()
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
 fn fill_renders_distinct_lane_and_trial_salts_and_observe_plans_load() {
     let temp = Temp::new();
     let server = Server::new(normal);

@@ -14,8 +14,21 @@ Unknown workload fields and invalid controls are rejected before dispatch.
 nullable `temperature_milli`, `top_p_milli`, `seed`. Thousandths are encoded as
 decimal sampling values. Nullable `thinking` requires `vllm-fixed-v1` when declared
 and is sent as `chat_template_kwargs.thinking`; null leaves the provider default.
-No other generation fields are sent or inferred.
-Model-side thinking defaults are not overridden unless declared.
+Alternatively, nullable `thinking_control: {"kind":"vllm-enable-thinking-v1",
+"enabled":false}` declares `chat_template_kwargs.enable_thinking` under the same
+explicit profile; `enabled` accepts either boolean. Unknown kinds and nested
+fields are rejected. Both controls cannot be non-null, even when their booleans
+agree. Neither key is inferred from a model name or sent alongside the other.
+Absent or null controls are omitted from normalized workloads and leave provider
+defaults unchanged; legacy `thinking` request bytes remain unchanged.
+`portable-chat-v1` rejects either non-null control. No generic `extra_body` or
+other generation fields are sent or inferred.
+
+These controls record requested behavior, not evidence that a template honored
+it. Inspect reported reasoning tokens and observed generated/answer channels;
+an answer-first event does not prove reasoning was absent elsewhere. A successful
+response does not qualify a provider's template support. Thinking declarations
+do not change eligibility or impose an answer-only requirement.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
 
 Cases may declare `fill: {unit, repeat}`. The unit is nonempty and at most 64
