@@ -92,16 +92,21 @@ preferred verdict appears. An inconclusive control does not establish equality
 or repeatability. Replay it offline with
 `target/release/grill-perf compare before control --json`.
 
-| Result | Meaning |
-|---|---|
-| **IMPROVED** | The comparison model supports an observed throughput increase between these capture periods |
-| **REGRESSED** | It supports an observed decrease between these periods |
-| **INCONCLUSIVE** | No direction is supported, or the fixed budget left insufficient evidence; this does not establish equality |
-| **INVALID** | Response, identity or evidence checks failed; the report identifies why and retains the available evidence |
+| Display label | Existing JSON `result` code | Meaning |
+|---|---|---|
+| **MEASURED FASTER** | `IMPROVED` | The comparison model supports higher measured throughput between these capture periods |
+| **MEASURED SLOWER** | `REGRESSED` | It supports lower measured throughput between these periods |
+| **INCONCLUSIVE** | `INCONCLUSIVE` | No direction is established, or evidence is insufficient; this does not mean equivalent performance |
+| **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report explains why and retains the available evidence |
 
-Observed percentages are separate from the model-based interval. Sequential
-captures cannot isolate the serving change from time, load or cache effects.
-The result is not a causal certificate or a guarantee of detecting a 5% change.
+The CLI and new text reports use these presentation labels; stored JSON codes,
+exit statuses and comparison semantics are unchanged. Historical reports are not
+renamed or rewritten. The structured-C1 scope is shown directly below the headline.
+
+The observed percentage is separate from its model-based uncertainty range.
+Sequential captures cannot isolate the serving change from time, load or cache
+effects. A measured direction establishes neither causality nor practical
+significance, and there is no guaranteed precision or detection of a 5% change.
 
 The default is one short structured **C1** workload: eight acquisitions, each
 with one warmup and three measured requests, requiring actual reported output

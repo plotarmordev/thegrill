@@ -949,20 +949,16 @@ pub fn human(report: &Report) -> String {
         "Baseline ready; comparison not yet performed"
     } else {
         match report.result {
-            Outcome::Improved if report.declared_change == Some(Change::Unchanged) => {
-                "IMPROVED: observed increase BETWEEN UNCHANGED-DEPLOYMENT CAPTURE PERIODS"
+            Outcome::Improved => "MEASURED FASTER: higher throughput in these capture periods",
+            Outcome::Regressed => "MEASURED SLOWER: lower throughput in these capture periods",
+            Outcome::Inconclusive => {
+                "INCONCLUSIVE: no direction established; this does not mean equivalent performance"
             }
-            Outcome::Regressed if report.declared_change == Some(Change::Unchanged) => {
-                "REGRESSED: observed decrease BETWEEN UNCHANGED-DEPLOYMENT CAPTURE PERIODS"
-            }
-            Outcome::Improved => "IMPROVED: observed improvement BETWEEN THESE CAPTURE PERIODS",
-            Outcome::Regressed => "REGRESSED: observed regression BETWEEN THESE CAPTURE PERIODS",
-            Outcome::Inconclusive => "INCONCLUSIVE: no supported direction between capture periods",
             Outcome::Invalid => "INVALID: evidence or declarations cannot support this comparison",
         }
     };
     let mut text = format!(
-        "{label}\nComplete acquisitions: baseline {}/{ACQUISITIONS}; candidate {}/{ACQUISITIONS}\n",
+        "{label}\nScope: structured C1 (one concurrent request), exactly 400 output tokens per request.\nComplete acquisitions: baseline {}/{ACQUISITIONS}; candidate {}/{ACQUISITIONS}\n",
         report.baseline_complete_acquisitions, report.candidate_complete_acquisitions
     );
     if let Some(model) = &report.model {
@@ -1014,7 +1010,7 @@ pub fn human(report: &Report) -> String {
         ));
     }
     if let Some([lower, upper]) = report.model_based_interval_percent {
-        text.push_str(&format!("Model-based nominal 95% interval for capture-period change: [{lower:+.2}%, {upper:+.2}%]\n"));
+        text.push_str(&format!("Uncertainty range (model-based, nominal 95%) for the measured change: [{lower:+.2}%, {upper:+.2}%]\n"));
     }
     for reason in &report.reasons {
         text.push_str(reason);
@@ -1074,10 +1070,10 @@ pub fn human(report: &Report) -> String {
         text.push_str(&format!("Next: grill-perf check '{quoted_root}' --deployment serving-after.json --change settings --out after\nSelect the declaration field you changed; the other fields must match.\nFor an unchanged-deployment control: grill-perf check '{quoted_root}' --deployment '{quoted_root}/deployment.json' --change none --out control\n"));
     }
     if report.observed_change_percent.is_some() {
-        text.push_str("Limits: captures are sequential. Correlated or drifting acquisitions can make the model-based interval overconfident. Directional labels do not establish practical significance. No causal, equivalence or guaranteed-precision claim.\n");
+        text.push_str("Limits: a measured direction does not establish its cause or practical importance. These sequential measurements may be correlated or drift over time, making the uncertainty range too narrow. No guaranteed precision.\n");
     }
     text.push_str(&format!(
-        "Scope: structured C1, exactly 400 output tokens per request; serving identity is declared, not attested.\nReport: {}\n",
+        "Serving identity is declared, not attested.\nReport: {}\n",
         report.report_path.display()
     ));
     text

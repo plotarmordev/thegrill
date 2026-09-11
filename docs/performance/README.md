@@ -50,8 +50,9 @@ or reinterpreted. Offline replay uses
 `target/release/grill-perf compare before control --json`.
 
 The same workload, budgets, metrics, thresholds and exit semantics apply.
-`IMPROVED` or `REGRESSED` means an observed capture-period shift under an
-unchanged deployment, not evidence of a serving-change effect. Retain any directional
+The display labels `MEASURED FASTER` and `MEASURED SLOWER` (existing JSON codes
+`IMPROVED` and `REGRESSED`) describe a capture-period shift under an unchanged
+deployment, not evidence of a serving-change effect. Retain any directional
 control result and investigate chance variation, time drift, load, cache effects
 and dependence; do not replace it with repeated runs until a preferred verdict.
 An inconclusive control does not establish equality or repeatability.
@@ -91,15 +92,26 @@ a valid use of the reported model interval.
 
 ### Results and evidence
 
-| Result | Supported interpretation |
-|---|---|
-| `IMPROVED` | The model-based interval lies above zero: an observed increase between the captured periods |
-| `REGRESSED` | The interval lies below zero: an observed decrease between the periods |
-| `INCONCLUSIVE` | The interval spans zero, variation is not estimable at recorded resolution, or acquisition coverage is incomplete |
-| `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
+| Display label | Existing JSON `result` code | Supported interpretation |
+|---|---|---|
+| `MEASURED FASTER` | `IMPROVED` | The model-based uncertainty range lies above zero: higher measured throughput in these capture periods |
+| `MEASURED SLOWER` | `REGRESSED` | The interval lies below zero: lower measured throughput in these periods |
+| `INCONCLUSIVE` | `INCONCLUSIVE` | No direction is established, variation cannot be estimated, or coverage is incomplete; this does not establish equivalence |
+| `INVALID` | `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
 
-Reports separate the observed percentage from the interval, identify the declared
-change and artifact paths, and include verified request/token accounting. Missing
+This is a presentation mapping for the capture workflow, not a new verdict
+schema. JSON result codes, numeric observations, interval calculations, thresholds
+and exit statuses are unchanged. Existing stored `report.json` and `report.txt`
+files are never migrated or renamed. New text reports and human-readable
+`compare` output use the display labels, with structured C1 (one concurrent
+request) prominent immediately below the headline. Machine consumers should
+continue to use the JSON codes, not parse the display text.
+
+Reports keep the observed percentage separate from the uncertainty range and
+explain that correlated or drifting measurements can make that range too narrow.
+Measured direction does not establish its cause or practical importance.
+`INCONCLUSIVE` does not mean equivalent performance. Reports also identify the
+declared change, artifact paths and verified request/token accounting. Missing
 usage stays unknown. Failure reports contain the first failing request's status,
 reported usage, expected output count, errors and raw-evidence path.
 

@@ -194,6 +194,40 @@ fn compare(before: &Path, after: &Path) -> Output {
         .output()
         .unwrap()
 }
+fn display_label(code: &str) -> &str {
+    match code {
+        "IMPROVED" => "MEASURED FASTER",
+        "REGRESSED" => "MEASURED SLOWER",
+        "INCONCLUSIVE" => "INCONCLUSIVE",
+        "INVALID" => "INVALID",
+        _ => panic!("unexpected result code: {code}"),
+    }
+}
+
+fn assert_presentation(before: &Path, after: &Path, code: &str) {
+    let stored_json = fs::read(after.join("report.json")).unwrap();
+    let stored_text = fs::read(after.join("report.txt")).unwrap();
+    let machine = compare(before, after);
+    assert_eq!(decoded(&machine)["result"], code);
+    let output = command()
+        .arg("compare")
+        .arg(before)
+        .arg(after)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), machine.status.code());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap().split(':').next(),
+        Some(display_label(code))
+    );
+    assert!(lines.next().unwrap().starts_with("Scope: structured C1"));
+    assert_eq!(compare(before, after).stdout, machine.stdout);
+    assert_eq!(fs::read(after.join("report.json")).unwrap(), stored_json);
+    assert_eq!(fs::read(after.join("report.txt")).unwrap(), stored_text);
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -343,6 +377,18 @@ fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_
     let after = check(&temp, "before", &after_deployment, "after");
     let initial = decoded(&after);
     assert_ne!(initial["result"], "INVALID", "{initial}");
+    let written_text = fs::read_to_string(temp.path("after/report.txt")).unwrap();
+    assert_eq!(
+        written_text.lines().next().unwrap().split(':').next(),
+        Some(display_label(initial["result"].as_str().unwrap()))
+    );
+    assert!(
+        written_text
+            .lines()
+            .nth(1)
+            .unwrap()
+            .starts_with("Scope: structured C1")
+    );
     assert_eq!(initial["model"], "fixture");
     assert_eq!(initial["declared_change"], "settings");
     for side in ["baseline_accounting", "candidate_accounting"] {
@@ -402,6 +448,7 @@ fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_
         );
         let report = decoded(&compare(&temp.path("before"), &temp.path("after")));
         assert_eq!(report["result"], expected, "{report}");
+        assert_presentation(&temp.path("before"), &temp.path("after"), expected);
         let logs = durations.map(|us| (400_000.0 / us as f64).ln());
         let mean = logs.iter().sum::<f64>() / 8.0;
         let variance = logs.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / 7.0;
@@ -462,6 +509,7 @@ fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_
         decoded(&compare(&temp.path("before"), &temp.path("after")))["result"],
         "INVALID"
     );
+    assert_presentation(&temp.path("before"), &temp.path("after"), "INVALID");
     fs::write(temp.path("after/capture.json"), &good_capture).unwrap();
 
     fs::rename(
@@ -600,6 +648,7 @@ fn unchanged_control_dispatches_same_deployment_and_replays_period_shifts_offlin
         let report = decoded(&compare(&temp.path("before"), &temp.path("control")));
         assert_eq!(report["result"], expected, "{report}");
         assert_eq!(report["declared_change"], "none");
+        assert_presentation(&temp.path("before"), &temp.path("control"), expected);
     }
     let mut capture = read_json(&temp.path("control/capture.json"));
     capture["change"] = Value::Null;
