@@ -184,6 +184,7 @@ fn metrics_opt_out_has_no_calls_or_receipt_fields_and_loads_legacy_evidence() {
     }
     let mut plan = value(root.join("plan.json"));
     plan["version"] = json!(1);
+    plan.as_object_mut().unwrap().remove("metric_contract");
     let bytes = serde_json::to_vec_pretty(&plan).unwrap();
     fs::write(legacy.join("plan.json"), &bytes).unwrap();
     let plan_hash = digest(&bytes);
@@ -194,6 +195,11 @@ fn metrics_opt_out_has_no_calls_or_receipt_fields_and_loads_legacy_evidence() {
     let mut receipt = wave(&temp, "off", 0);
     receipt["plan_sha256"] = json!(plan_hash);
     receipt["reservation_sha256"] = json!(digest(&bytes));
+    for attempt in receipt["attempts"].as_array_mut().unwrap() {
+        let timing = attempt["timing"].as_object_mut().unwrap();
+        timing.remove("last_generated_text_us");
+        timing.remove("terminal_us");
+    }
     let bytes = serde_json::to_vec_pretty(&receipt).unwrap();
     fs::write(legacy.join("wave-000000/wave.json"), &bytes).unwrap();
     assert!(report(&legacy).get("baseline_metrics").is_none());

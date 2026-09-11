@@ -1,16 +1,117 @@
 # Serving-performance companion
 
 `grill-perf` measures requests to an already-running Chat Completions server.
-It does not start servers, download models, grade answers or require quality
-packs. Its `run`, `pause`, `resume` and offline `compare` workflows are separate from `grill`.
+It does not start servers, download models or grade answer quality. Performance
+capture and assessment are separate from `grill` quality evaluation.
+
+## Baseline, change, check
+
+The default path needs no policy file or statistical settings:
+
+```sh
+target/release/grill-perf baseline --endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --local-http --model your-model --deployment serving-before.json --out before
+# Make the serving change yourself and record the updated declaration.
+target/release/grill-perf check before --deployment serving-after.json --change settings --out after
+# Optional: verify and recompute the result offline, without rewriting reports.
+target/release/grill-perf compare before after --json
+```
+
+Use the four-field declaration shown in the [quick start](../../README.md#speed-benchmarks):
+`model_revision`, `runtime`, `hardware`, `settings`. All must be nonempty.
+Prefer meaningful revision IDs or configuration fingerprints; never put credentials
+in them. `--change` selects exactly one of these fields. The selected value must
+differ and the others must match. Multi-field migrations are outside this simple
+path. A settings fingerprint cannot prove only one internal knob changed.
+
+The candidate inherits the verified baseline's endpoint, model selector, fixed
+workload and authentication-environment **name**. Pass `--auth-env NAME` to
+`baseline` when needed; the credential value is never saved. The same collector
+binary and measurement contract are required. Declarations are not independently
+read from or attested by the server.
+
+### Default scope and budget
+
+The versioned `baseline-v1.json` workload selects the existing structured count
+prompt at C1. It requests streaming, thinking off through the legacy
+`chat_template_kwargs.thinking` field, temperature zero, top_p one and **exactly
+400** output tokens using vLLM controls. A backend rejecting those controls is
+an error, not an invitation to retry with weaker controls. Generated text and
+server completion usage can include reasoning; channels remain in the receipts.
+
+Each capture makes eight acquisitions with a fresh client per acquisition.
+Each acquisition has one warmup and three measured waves. The fixed ceiling is
+**32 requests / 12,800 output tokens / 300 seconds per capture**, including
+warmups and collection overhead. There are no probes or recovery requests.
+`--seconds 1..3600` changes only the whole-capture time allowance, not the sample
+count. The default requires more than **42.7 reported output tokens/s** including
+overhead to finish; a slow server can exhaust its budget without producing a
+directional conclusion. Choose an affordable allowance before collecting.
+
+Request limits are 60 seconds total and 30 seconds idle, bounded by the remaining
+capture allowance. An invalid response stops subsequent waves; admitted peers
+settle and their evidence is retained. Time exhaustion stops further dispatch,
+retains the active partial request and produces insufficient evidence rather
+than a fabricated complete sample. Filesystem publication and OS stalls can
+outlast a network deadline. No automatic retries, replacement acquisitions,
+continuations, or performance-conditioned early stopping occur in this path.
+Repeatedly invoking fresh comparisons until a favorable result appears is not
+a valid use of the reported model interval.
+
+### Results and evidence
+
+| Result | Supported interpretation |
+|---|---|
+| `IMPROVED` | The model-based interval lies above zero: an observed increase between the captured periods |
+| `REGRESSED` | The interval lies below zero: an observed decrease between the periods |
+| `INCONCLUSIVE` | The interval spans zero, variation is not estimable at recorded resolution, or acquisition coverage is incomplete |
+| `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
+
+Reports separate the observed percentage from the interval, identify the declared
+change and artifact paths, and include verified request/token accounting. Missing
+usage stays unknown. Failure reports contain the first failing request's status,
+reported usage, expected output count, errors and raw-evidence path.
+
+Each root contains immutable `capture.json`, exact workload/deployment bytes and
+eight indexed native acquisition directories, including empty unstarted slots.
+`report.json` and `report.txt` explain the outcome. Offline comparison verifies
+the manifests, native plans, raw responses, collector identities and chronology;
+it rejects copied acquisition identities and does not modify stored reports.
+Those checks establish internal consistency, not an execution attestation.
+The path printed by offline `compare` identifies the recorded report location;
+it does not promise that the file still exists or was updated. Its newly printed
+JSON is the recomputed result.
+
+The primary observation is the median aggregate throughput of an acquisition's
+three measured waves. Let `a` and `b` be the eight log observations from each
+capture. The estimate is `exp(mean(b)-mean(a))-1`; the nominal model interval uses
+standard error `sqrt(var(a)/8+var(b)/8)` and the conservative df7 two-sided
+critical value `2.364624251`. The variances are not pooled. Eight complete
+acquisitions on each side are required. At zero estimated standard error, the
+observed difference remains visible but interval/confidence are withheld.
+
+This model assumes stable, independent acquisition-level variation and an
+adequate log-scale mean model. Fresh clients do not establish independence.
+Positive autocorrelation can make the interval too narrow. Sequential captures
+cannot separate a serving change from time, cache or load effects. These are
+**capture-period conclusions**, not causal certificates, equivalence,
+noninferiority or guaranteed detection of a particular percentage change.
+Concurrent lanes/waves are never counted as independent statistical samples.
+
+`baseline` exits 0 when ready, 2 when incomplete and 1 when invalid; its
+`baseline_ready` field describes capture readiness, not a comparison verdict.
+For `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
+or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
+treating exit 2 as a particular verdict. The advanced raw-run/policy commands
+below retain their distinct semantics.
 
 ## Captured observed-envelope policy
 
 `run WORKLOAD --policy FILE ...` validates a bounded policy declaration before
 dispatch and saves its exact bytes as `policy.json` before publishing the plan.
 Every baseline, candidate and baseline repeat must capture the same policy.
-Omitting the option preserves the legacy plan, request and receipt encoding;
-an unbound run cannot acquire a policy retrospectively through `decide`.
+Omitting the option leaves a run unbound; it cannot acquire a policy
+retrospectively through `decide`. New runs use plan v3 independently of this option.
 `resume` reads the captured declaration, with no replacement-policy option.
 Policy-bearing plans require this reader; older readers may reject the new
 optional `policy_sha256` field.
@@ -114,8 +215,8 @@ default; a decision summary is not replay evidence.
 Only a successfully printed versioned decision envelope constitutes a decision.
 For `decide`, exits are `PASS` 0, `ERROR` 1, `INCONCLUSIVE` 2 and `REGRESSION` 3.
 Parsing or output failures can share exit values without producing a decision.
-Existing `compare` exit 0 remains an eligibility-only result, never `PASS`;
-other commands retain their exit semantics.
+Raw-run `compare` exit 0 remains an eligibility-only result, never `PASS`.
+Capture comparison uses the result vocabulary above, not this policy envelope.
 
 ## Build and use
 
@@ -297,10 +398,16 @@ verification rather than being repaired.
 - **Achieved completion throughput** uses complete provider-reported completion
   counts divided by that entire wave interval. It is not an answer-only token
   rate or a claim of steady-state server capacity.
-- **Per-stream decode rate** excludes prefill/TTFT and is defined to match the
-  sparkDash-comparable `(completion_tokens - 1) / (last - first)` rate. Settlement
-  stands in for last-token time and includes final `[DONE]`/usage frame parsing,
-  so this client-observed rate is slightly conservative.
+- **Settlement decode rate** (`decode_tokens_per_second`) keeps its original
+  `(completion_tokens - 1) / (settle - first generated text)` definition.
+  It includes terminal usage/`[DONE]` processing; old policies retain this meaning.
+- **Text-window decode rate** (`text_decode_tokens_per_second`) uses
+  `(completion_tokens - 1) / (last generated text - first generated text)`.
+  New v3 evidence retains the last-text timestamp; older evidence has no
+  invented value. Missing/coincident endpoints give null, not zero or infinity.
+  The arithmetic matches sparkDash only for identical usage and supplied
+  text-event timestamps. Native parser clocks, framing and aggregate definitions
+  are not thereby interchangeable.
 - **Per-stream prefill rate** is defined to match sparkDash `prompt_tokens / TTFT`,
   from dispatch to first generated text, including queueing and first-token
   generation. It is null when the provider reports nonzero cached prompt tokens;
@@ -338,12 +445,13 @@ verification rather than being repaired.
   binary fingerprint and transport controls. Model/endpoint deployments may
   differ; this is a descriptive deployment comparison, not causal attribution.
 
-Exit codes: `0` means a complete eligible run/comparison, `2` means retained but
+For raw-run commands, exit `0` means a complete eligible run/comparison; `2` means retained but
 ineligible/incomplete evidence, and `1` means CLI usage, admission, integrity or local I/O
 failure. No automatic retry, redirect, proxy, parameter fallback or winner
 selection occurs. SIGINT and SIGTERM stop further admission and settle active
-attempts. A response failure stops admission after its wave; metadata-only
-ineligibility is retained without a retry.
+attempts. In new v3 runs, a response or measurement-eligibility failure stops
+subsequent waves after the admitted peers settle. Legacy evidence retains its
+original interpretation; neither path retries failed work.
 
 ## Exact output and cache observations
 

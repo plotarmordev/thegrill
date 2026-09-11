@@ -5,6 +5,7 @@ pub const FILE_CAP: usize = 4 * 1024 * 1024;
 pub const FRAME_CAP: usize = 256 * 1024;
 pub const REQUEST_CAP: usize = 2 * 1024 * 1024;
 pub const MAX_ATTEMPTS: u64 = 10_000;
+pub const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -344,6 +345,8 @@ impl Deployment {
 #[serde(deny_unknown_fields)]
 pub struct Plan {
     pub version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metric_contract: Option<String>,
     pub kind: String,
     pub tool_version: String,
     pub collector_sha256: String,
@@ -391,6 +394,10 @@ pub struct Timing {
     pub first_generated_text_us: Option<u64>,
     pub first_generated_channel: Option<TextChannel>,
     pub first_answer_text_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_generated_text_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_us: Option<u64>,
     pub settle_us: u64,
     pub capture_parse_us: u64,
 }
@@ -399,6 +406,7 @@ impl Timing {
         if !stream
             && (self.first_generated_text_us.is_some()
                 || self.first_answer_text_us.is_some()
+                || self.last_generated_text_us.is_some()
                 || self.first_generated_channel.is_some())
         {
             return Err("nonstreaming evidence cannot contain first-text timings".into());
@@ -407,6 +415,8 @@ impl Timing {
             || (self.first_body_us.is_some() && self.headers_us.is_none())
             || (self.first_generated_text_us.is_some() && self.first_body_us.is_none())
             || (self.first_answer_text_us.is_some() && self.first_generated_text_us.is_none())
+            || (self.last_generated_text_us.is_some() && self.first_generated_text_us.is_none())
+            || (self.terminal_us.is_some() && self.first_body_us.is_none())
             || self.capture_parse_us > self.settle_us
         {
             return Err("inconsistent timing observation presence".into());
@@ -417,6 +427,8 @@ impl Timing {
             self.first_body_us,
             self.first_generated_text_us,
             self.first_answer_text_us,
+            self.last_generated_text_us,
+            self.terminal_us,
             Some(self.settle_us),
         ]
         .into_iter()

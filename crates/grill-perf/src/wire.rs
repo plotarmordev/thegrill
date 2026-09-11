@@ -402,6 +402,7 @@ impl Semantic {
     ) -> std::result::Result<Flow, (Status, &'static str)> {
         if stream && bytes == b"[DONE]" {
             return if self.finish.is_some() {
+                timing.terminal_us = Some(observed);
                 Ok(Flow::Stop)
             } else {
                 Err((Status::Malformed, "DONE before finish"))
@@ -479,6 +480,9 @@ impl Semantic {
                     _ => TextChannel::Reasoning,
                 });
             }
+            if stream && generated {
+                timing.last_generated_text_us = Some(observed);
+            }
             if stream && content && timing.first_answer_text_us.is_none() {
                 timing.first_answer_text_us = Some(observed);
             }
@@ -498,13 +502,19 @@ impl Semantic {
             if self.finish.is_none() {
                 return Err((Status::Malformed, "missing finish reason"));
             }
+            timing.terminal_us = Some(observed);
             return Ok(Flow::Stop);
         }
         Ok(Flow::Continue)
     }
 }
 
-pub fn verify_complete(attempt: &Attempt, body: &[u8], stream: bool) -> Result<()> {
+pub fn verify_complete(
+    attempt: &Attempt,
+    body: &[u8],
+    stream: bool,
+    arrival_contract: bool,
+) -> Result<()> {
     let mut semantic = Semantic::default();
     let mut timing = Timing::default();
     let end = if stream {
@@ -532,8 +542,67 @@ pub fn verify_complete(attempt: &Attempt, body: &[u8], stream: bool) -> Result<(
                 || timing.first_answer_text_us.is_some()
                     != attempt.timing.first_answer_text_us.is_some()))
         || timing.first_generated_channel != attempt.timing.first_generated_channel
+        || (arrival_contract
+            && (timing.last_generated_text_us.is_some()
+                != attempt.timing.last_generated_text_us.is_some()
+                || timing.terminal_us.is_some() != attempt.timing.terminal_us.is_some()))
     {
         return Err("response evidence does not support its completion facts".into());
+    }
+    Ok(())
+}
+
+pub fn verify_partial_arrivals(attempt: &Attempt, body: &[u8], stream: bool) -> Result<()> {
+    let observed = &attempt.timing;
+    if attempt.http_status != Some(200) {
+        return if attempt.usage == Usage::default()
+            && attempt.finish_reason.is_none()
+            && observed.first_generated_text_us.is_none()
+            && observed.terminal_us.is_none()
+            && attempt.terminal_offset.is_none()
+        {
+            Ok(())
+        } else {
+            Err("unsuccessful HTTP response cannot contain parsed completion facts".into())
+        };
+    }
+    if observed.first_generated_text_us.is_none()
+        && observed.terminal_us.is_none()
+        && (!stream || attempt.status == Status::Unsupported)
+        && attempt.usage == Usage::default()
+        && attempt.finish_reason.is_none()
+    {
+        return Ok(());
+    }
+    let mut semantic = Semantic::default();
+    let mut timing = Timing::default();
+    let end = if stream {
+        Parser::new(SseLimits {
+            line_bytes: FRAME_CAP,
+            event_bytes: FRAME_CAP,
+        })
+        .map_err(|_| "invalid framing limits")?
+        .feed(body, |event| semantic.event(event, true, 0, &mut timing))
+        .ok()
+        .flatten()
+    } else {
+        semantic
+            .event(body, false, 0, &mut timing)
+            .ok()
+            .and_then(|flow| matches!(flow, Flow::Stop).then_some(body.len()))
+    };
+    if timing.first_generated_text_us.is_some() != observed.first_generated_text_us.is_some()
+        || timing.first_answer_text_us.is_some() != observed.first_answer_text_us.is_some()
+        || timing.last_generated_text_us.is_some() != observed.last_generated_text_us.is_some()
+        || timing.terminal_us.is_some() != observed.terminal_us.is_some()
+        || timing.first_generated_channel != observed.first_generated_channel
+        || end != attempt.terminal_offset
+        || semantic.usage != attempt.usage
+        || semantic.finish != attempt.finish_reason
+    {
+        return Err(
+            "partial response does not support its semantic or arrival observations".into(),
+        );
     }
     Ok(())
 }
@@ -546,11 +615,13 @@ pub async fn collect(
     client: reqwest::Client,
     request: reqwest::Request,
     limits: Limits,
-    stream: bool,
+    settings: RequestSettings,
     lane: u32,
-    origin: Instant,
+    window: (Instant, Option<Instant>),
     mut cancel: watch::Receiver<bool>,
 ) -> Collected {
+    let (origin, deadline) = window;
+    let stream = settings.stream;
     let sent = Instant::now();
     let mut a = Attempt {
         lane,
@@ -579,9 +650,16 @@ pub async fn collect(
         tokio::time::Instant::from_std(sent) + Duration::from_millis(u64::from(limits.total_ms));
     let mut idle =
         tokio::time::Instant::from_std(sent) + Duration::from_millis(u64::from(limits.idle_ms));
-    if *cancel.borrow() {
+    let whole = deadline.map(tokio::time::Instant::from_std);
+    let total = whole.map_or(total, |whole| total.min(whole));
+    if *cancel.borrow() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         a.status = Status::Interrupted;
-        a.detail = "canceled before dispatch".into();
+        a.detail = if *cancel.borrow() {
+            "canceled before dispatch"
+        } else {
+            "whole-capture deadline before dispatch"
+        }
+        .into();
     } else {
         a.dispatched = true;
         let response = tokio::select! {
@@ -682,8 +760,14 @@ pub async fn collect(
                 body.extend_from_slice(&chunk[..retained]);
                 let mut done = false;
                 if parse && stream {
+                    let mut output_exceeded = false;
                     match parser.feed(&chunk[..retained], |event| {
-                        semantic.event(event, true, observed, &mut a.timing)
+                        let result = semantic.event(event, true, observed, &mut a.timing);
+                        output_exceeded |= semantic
+                            .usage
+                            .completion_tokens
+                            .is_some_and(|tokens| tokens > u64::from(settings.output.tokens));
+                        result
                     }) {
                         Ok(Some(consumed)) => {
                             a.status = Status::Complete;
@@ -703,6 +787,11 @@ pub async fn collect(
                             a.detail = "SSE framing or UTF-8 limit violated".into();
                             done = true;
                         }
+                    }
+                    if output_exceeded {
+                        a.status = Status::Unsupported;
+                        a.detail = "reported output exceeds declared cap".into();
+                        done = true;
                     }
                 }
                 a.timing.capture_parse_us += us(processing);
@@ -724,11 +813,34 @@ pub async fn collect(
                     break;
                 }
             }
+            if !parse
+                && matches!(
+                    a.status,
+                    Status::Interrupted | Status::TotalTimeout | Status::IdleTimeout
+                )
+            {
+                // A later budget/cancellation cannot erase an already observed invalid response.
+                if a.http_status != Some(200) {
+                    a.status = Status::HttpError;
+                    a.detail = "non-200 HTTP response".into();
+                } else {
+                    a.status = Status::Unsupported;
+                    a.detail = "unsupported response media type or encoding".into();
+                }
+            }
         }
     }
     if a.status == Status::Complete && !semantic.generated {
         a.status = Status::Unsupported;
         a.detail = "completed response contained no generated text".into();
+    }
+    if semantic
+        .usage
+        .completion_tokens
+        .is_some_and(|tokens| tokens > u64::from(settings.output.tokens))
+    {
+        a.status = Status::Unsupported;
+        a.detail = "reported output exceeds declared cap".into();
     }
     a.finish_reason = semantic.finish;
     a.usage = semantic.usage;
@@ -737,6 +849,23 @@ pub async fn collect(
         a.status = Status::TotalTimeout;
         a.detail = "total deadline before completion settlement".into();
     }
+    if whole.is_some_and(|whole| tokio::time::Instant::now() >= whole)
+        && matches!(
+            a.status,
+            Status::Complete | Status::TotalTimeout | Status::Interrupted
+        )
+    {
+        a.status = Status::Interrupted;
+        a.detail = "whole-capture deadline".into();
+    }
     a.response_bytes = body.len();
     Collected { attempt: a, body }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/measurement.rs"]
+mod measurement_fixtures;
+
+#[cfg(test)]
+#[path = "../tests/support/measurement_wire.rs"]
+mod measurement_tests;

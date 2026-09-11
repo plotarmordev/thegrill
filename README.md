@@ -38,55 +38,76 @@ Start your model server first. In the examples below, replace port `8000` and `y
 
 ## Speed benchmarks
 
-Use **`grill-perf`** to measure a serving setup.
+Use **`grill-perf`** to capture a baseline, make one serving change yourself,
+and check the result. It never starts or changes your server.
 
-**1. Test your first setup.** Two workloads follow [MiaAI-Lab's sparkDash](https://github.com/MiaAI-Lab/sparkDash) protocols, with credit: `sparkdash-decode-v1.json` (prose, code, structured and JSON cases; thinking off; exact output length) and `sparkdash-prefill-v1.json` (salted 4k to 32k prompts, prompt tokens per second to first token). Both need a vLLM-compatible server.
+Record the current serving identity in `serving-before.json`. Use real IDs or
+fingerprints for these four declarations, not secrets:
+
+```json
+{
+  "model_revision": "weights-r1",
+  "runtime": "server-build-r1",
+  "hardware": "device-layout-r1",
+  "settings": "configuration-r1"
+}
+```
+
+**1. Capture the baseline** against a running vLLM-compatible Chat Completions
+endpoint:
 
 ```sh
-target/release/grill-perf run crates/grill-perf/examples/sparkdash-decode-v1.json \
+target/release/grill-perf baseline \
   --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --out results/setup-a
+  --local-http --model your-model \
+  --deployment serving-before.json --out before
 ```
 
-The decode workload sends **72 requests**, the prefill workload **16**. For a server without vLLM controls, `quick.json` sends **28 requests** with a **1,024 token** cap and no thinking control.
+**2. Make your serving change.** Save the updated declaration as
+`serving-after.json`, changing the corresponding field and keeping the others.
 
-**2. Change the setup and test again.** For example, switch the quantization or context length. Repeat the command with `--out results/setup-b`. Use the same test file and tool build for both runs. To compare a repeat of setup A, record complete `--deployment` declarations on both A runs and retain the same declared model and endpoint. Matching declarations do not verify server restoration or run timing order.
-
-**3. Compare the saved results.** No server connection is needed for this step. Add `--reference results/setup-a-repeat` if you have the repeat.
+**3. Check it:**
 
 ```sh
-target/release/grill-perf compare results/setup-a results/setup-b --json
+target/release/grill-perf check before \
+  --deployment serving-after.json --change settings --out after
 ```
 
-| Result | What it tells you |
+`check` inherits the baseline's endpoint, model, workload and credential-environment
+name. Select `model_revision`, `runtime`, `hardware` or `settings` as the declared
+change. Unexplained mismatches are rejected before candidate requests.
+
+| Result | Meaning |
 |---|---|
-| **Time per group** | How long a group of requests took from first send to last finish |
-| **Combined tokens/sec** | Tokens produced per second across the whole group, as reported by the server |
-| **Decode tokens/sec** | Per-stream rate after the first token, defined to match sparkDash |
-| **Prefill tokens/sec** | Prompt tokens per second to the first token, defined to match sparkDash |
-| **Change** | The difference between the two saved runs, shown only when the runs are comparable and their ranges do not overlap. Three trials make this a coarse filter, not proof: a withheld change is not evidence of equality |
+| **IMPROVED** | The comparison model supports an observed throughput increase between these capture periods |
+| **REGRESSED** | It supports an observed decrease between these periods |
+| **INCONCLUSIVE** | No direction is supported, or the fixed budget left insufficient evidence; this does not establish equality |
+| **INVALID** | Response, identity or evidence checks failed; the report identifies why and retains the available evidence |
 
-<details>
-<summary><strong>How to avoid misleading speed comparisons</strong></summary>
+Observed percentages are separate from the model-based interval. Sequential
+captures cannot isolate the serving change from time, load or cache effects.
+The result is not a causal certificate or a guarantee of detecting a 5% change.
 
-- Token counts come from the server and may include thinking tokens. The sparkDash workloads declare thinking off through `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` in the receipts, because a template that ignores it is not detected. Use the same thinking settings for both runs.
-- A token cap does not force equal answer lengths. If one run produces shorter answers, the tool will not call it a matched speed improvement.
-- The quick test includes warmup and three measured trials per group size. The timings include client and network effects. They are not maximum server capacity.
-- Pausing and resuming changes the measurement session. Resumed performance runs do not qualify as uninterrupted timing comparisons.
+The default is one short structured **C1** workload: eight acquisitions, each
+with one warmup and three measured requests, requiring actual reported output
+of 400 tokens/request. Each capture allows **32 requests, 12,800 output tokens
+and 300 seconds**, including warmups. Slower servers can use an explicit larger
+`--seconds` allowance; completing the default needs more than 42.7 output tokens/s
+including overhead. There are no automatic retries or replacement samples.
 
-</details>
+Reports and raw evidence stay local in `before` and `after`. To recheck them
+offline without contacting the server:
 
-[Full speed benchmark guide](docs/performance/README.md)
+```sh
+target/release/grill-perf compare before after --json
+```
 
-For separately qualified DeepSeek and GLM studies, use the
-[shared recipe workflow](docs/performance/SHARED-RECIPES.md): externally pinned
-source installation, offline `bundle verify`, an explicit precollection policy,
-and independent baseline/candidate/repeat acquisitions. `decide` evaluates the
-captured observed-envelope policy; successful `compare` output is not PASS.
-The shared workflow does not establish live qualification or cross-recipe
-equivalence. Publish only a
-[manually reviewed report](docs/performance/SHARED-REPORT-TEMPLATE.md), not private
-run evidence.
+[Full performance guide and measurement limits](docs/performance/README.md).
+Advanced `run`, `pause`, `resume`, raw-run `compare`, and captured-policy `decide`
+remain separate workflows. The [shared recipes](docs/performance/SHARED-RECIPES.md)
+retain their [sparkDash](https://github.com/MiaAI-Lab/sparkDash) attribution and
+original observed-envelope semantics; they are not the new default assessment,
+and historical results are not reinterpreted.
 
 ## Quality evaluation (WIP)
 
