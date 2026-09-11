@@ -666,6 +666,11 @@ fn concurrent_waves_exclude_warmup_and_measure_answer_not_first_bytes() {
             t["first_generated_text_us"].as_u64().unwrap()
                 < t["first_answer_text_us"].as_u64().unwrap()
         );
+        assert_eq!(t["last_generated_text_us"], t["first_answer_text_us"]);
+        assert!(
+            t["terminal_us"].as_u64().unwrap() >= t["last_generated_text_us"].as_u64().unwrap()
+        );
+        assert!(t["settle_us"].as_u64().unwrap() >= t["terminal_us"].as_u64().unwrap());
     }
     let summed: u64 = w["attempts"]
         .as_array()
@@ -1784,7 +1789,14 @@ fn output_and_prefix_requirements_are_observed_not_assumed() {
                 .any(|v| v == expected)
         );
         assert!(result["achieved_completion_tokens_per_second"].is_null());
-        assert_eq!(result["completion_tokens"], tokens);
+        assert_eq!(result["attempts"][0]["usage"]["completion_tokens"], tokens);
+        if tokens > 8 {
+            assert_eq!(result["attempts"][0]["status"], "unsupported");
+            assert!(result["completion_tokens"].is_null());
+        } else {
+            assert_eq!(result["attempts"][0]["status"], "complete");
+            assert_eq!(result["completion_tokens"], tokens);
+        }
     }
 }
 
@@ -3081,6 +3093,8 @@ fn comparison_change_outside_pooled_reference_range_remains_present() {
             timing["first_body_us"] = json!(first);
             timing["first_generated_text_us"] = json!(first);
             timing["first_answer_text_us"] = json!(first);
+            timing["last_generated_text_us"] = json!(first);
+            timing["terminal_us"] = json!(elapsed);
             timing["settle_us"] = json!(elapsed);
             timing["capture_parse_us"] = json!(0);
             receipt["elapsed_us"] = json!(elapsed);
@@ -3674,6 +3688,7 @@ fn comparison_legacy_no_reference_load_preserves_evidence_bytes() {
     let plan_path = temp.path("legacy/plan.json");
     let mut plan = value(&plan_path);
     plan["version"] = json!(1);
+    plan.as_object_mut().unwrap().remove("metric_contract");
     let plan_bytes = serde_json::to_vec(&plan).unwrap();
     fs::write(&plan_path, &plan_bytes).unwrap();
     let plan_hash = Sha256::digest(&plan_bytes)
@@ -3694,6 +3709,11 @@ fn comparison_legacy_no_reference_load_preserves_evidence_bytes() {
             .map(|b| format!("{b:02x}"))
             .collect::<String>()
     );
+    for attempt in wave["attempts"].as_array_mut().unwrap() {
+        let timing = attempt["timing"].as_object_mut().unwrap();
+        timing.remove("last_generated_text_us");
+        timing.remove("terminal_us");
+    }
     fs::write(&wave_path, serde_json::to_vec(&wave).unwrap()).unwrap();
     fs::remove_dir_all(temp.path("legacy/session-000000")).unwrap();
     let paths = [
@@ -3788,6 +3808,10 @@ fn comparison_reference_lane_permutation_preserves_totals_but_is_ineligible() {
 }
 #[path = "support/bundle.rs"]
 mod bundle_tests;
+#[path = "support/measurement.rs"]
+mod measurement_fixtures;
+#[path = "support/measurement_cli.rs"]
+mod measurement_tests;
 #[path = "support/metrics.rs"]
 mod metrics_tests;
 #[path = "support/policy.rs"]

@@ -5,6 +5,7 @@ mod metrics;
 mod model;
 mod policy;
 mod run;
+mod study;
 mod wire;
 
 use clap::{Parser, Subcommand};
@@ -23,6 +24,10 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Record the fixed quick baseline with complete native evidence.
+    Baseline(study::BaselineOptions),
+    /// Compare a declared serving change using the verified baseline settings.
+    Check(study::CheckOptions),
     /// Collect bounded request waves; warmup is retained but excluded from measured results.
     Run(run::Options),
     /// Request cooperative pause after the active whole wave is published.
@@ -83,6 +88,14 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 }
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
+        Command::Baseline(options) => {
+            let report = study::baseline(&options)?;
+            show_study(&report, options.json)
+        }
+        Command::Check(options) => {
+            let report = study::check(&options)?;
+            show_study(&report, options.json)
+        }
         Command::Run(options) => show_summary(run::execute(&options)?, options.json)
             .map(|complete| if complete { 0 } else { 2 }),
         Command::Bundle {
@@ -129,6 +142,19 @@ fn execute(cli: Cli) -> model::Result<u8> {
             reference,
             json,
         } => {
+            if study::is_capture(&baseline)
+                || study::is_capture(&candidate)
+                || reference.as_deref().is_some_and(study::is_capture)
+                || (!baseline.join("plan.json").exists() && !candidate.join("plan.json").exists())
+            {
+                let mut report = study::compare(&baseline, &candidate);
+                if reference.is_some() {
+                    report.invalidate(
+                        "capture comparison does not accept a raw reference run".into(),
+                    );
+                }
+                return show_study(&report, json);
+            }
             let comparison = evidence::compare(&baseline, &candidate, reference.as_deref())?;
             if json {
                 print_json(&comparison)?;
@@ -204,6 +230,14 @@ fn execute(cli: Cli) -> model::Result<u8> {
             })
         }
     }
+}
+fn show_study(report: &study::Report, json: bool) -> model::Result<u8> {
+    if json {
+        print_json(report)?;
+    } else {
+        print!("{}", study::human(report));
+    }
+    Ok(report.exit())
 }
 fn show_summary(summary: run::Summary, json: bool) -> model::Result<bool> {
     let complete = summary.status == "completed";

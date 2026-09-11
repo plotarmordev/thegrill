@@ -1,12 +1,20 @@
 # Performance measurement contract
 
-Workloads and wave receipts remain v1. New execution plans are v2, adding mandatory
-execution-session provenance without changing request rendering or wave timing.
-Legacy v1 plans remain readable offline but cannot be paused or resumed.
+Workloads and wave receipts remain v1. New execution plans are v3, declaring
+`metric_contract: "generated-text-arrival-v2"` and retaining last generated-text
+and terminal observations. Execution-session provenance remains mandatory.
+Legacy v1/v2 plans stay readable with their original timing semantics and no
+invented timestamps. Legacy v1 plans cannot be paused or resumed.
+Cross-contract raw comparisons are rejected, not silently harmonized.
 
 Plans may additionally bind `policy.json` through optional `policy_sha256`.
 The field is omitted when unused; existing unbound plans retain their bytes.
 Policy-bearing plans require a reader that supports this declaration.
+
+The separate [baseline/check contract](README.md#baseline-change-check) wraps
+verified native runs in versioned capture manifests. Its capture-period
+assessment is not the captured observed-envelope policy below. Historical
+policies, gates and verdicts retain their meanings.
 
 ## Captured policy decisions
 
@@ -122,9 +130,12 @@ observation immediately before its request is executed. It records:
 | `first_generated_text_us` | Dispatch to arrival of the first complete SSE event containing nonempty answer or recognized reasoning text. |
 | `first_generated_channel` | Answer, reasoning, or both in the same event; not a guessed server token order. |
 | `first_answer_text_us` | Dispatch to the first complete SSE event with nonempty `delta.content`. |
+| `last_generated_text_us` | New-contract streaming observation: arrival of the last complete SSE event with nonempty answer or recognized reasoning text. Same-chunk events share an observation; this is not a GPU token timestamp. |
+| `terminal_us` | Arrival of the successful completion marker: SSE `[DONE]`, or complete nonstreaming JSON observation. It is distinct from a `finish_reason` event and from settlement. |
 | `settle_us` | Dispatch to completion or failure settlement, including collection/parse work. |
 | `capture_parse_us` | Accumulated elapsed intervals inside capture/parse sections; not process CPU time or server time. |
-| Derived per-stream decode tokens/s | For a complete streaming attempt with `completion_tokens = n >= 2`, `(n - 1) * 1_000_000 / (settle_us - first_generated_text_us)` when the first generated text time is present and settlement is later; otherwise null. Derived offline, not persisted in wave receipts. Settlement includes final `[DONE]`/usage frame parsing, making this slightly conservative relative to last-token timing. |
+| `decode_tokens_per_second` | For a complete stream with reported `n >= 2`, `(n - 1) * 1_000_000 / (settle_us - first_generated_text_us)` when settlement is later than first text; otherwise null. This original policy metric includes terminal delay/parsing. There is no promised bound on its difference from the text-window rate. |
+| `text_decode_tokens_per_second` | For a complete stream with reported `n >= 2`, `(n - 1) * 1_000_000 / (last_generated_text_us - first_generated_text_us)`, only for a positive observed text span. Null for legacy/missing/coincident observations; never estimated from SSE event counts. |
 | Derived per-stream prefill tokens/s | For a complete streaming attempt with `prompt_tokens = p >= 1`, `first_generated_text_us = t > 0`, and provider-reported cached prompt tokens absent or zero, `p * 1_000_000 / t`; otherwise null. Matches sparkDash prompt_tokens/TTFT, including queueing and first-token generation. Derived offline, not persisted in wave receipts. |
 
 Fragmented events become observable when their framing boundary arrives. Multiple
@@ -132,6 +143,17 @@ events in one received chunk share its arrival observation. Gateway buffering,
 coalescing and client scheduling remain in these observations. Nonstreaming
 responses have completion latency but no fabricated first-text observation.
 A per-stream decode rate from first generated text to settlement is derived offline; no GPU/token timestamps are produced.
+The text-window formula agrees with sparkDash's formula for identical reported
+usage and supplied text-event timestamps. This is not native parser/framing or
+aggregate-throughput equivalence; an undefined interval remains null here.
+The conventional `n - 1` numerator does not mean the first SSE event held exactly
+one token: an event may contain several. Neither event-window rate reconstructs
+individual model-token generation times.
+Deterministic shared traces cover split frames/UTF-8, coalesced events and delayed
+terminal data, with independent arithmetic checked at relative tolerance `1e-9`.
+Raw bodies support semantic/presence checks, not independent recovery of missing
+chunk timestamps. New observations are checked for order and consistency with
+the retained response; they are not execution attestations.
 
 Wave elapsed time is the span from the first collector dispatch to the last
 collector settlement. Dispatch spread is recorded. Only a fully eligible wave
@@ -167,10 +189,13 @@ establish reusable cache blocks. The reported-hit requirement is not relaxed.
 Contradictory reported reasoning counts greater than completion counts are
 ineligible; they are not repaired or silently included in a rate.
 
-All peers settle before the next wave. A response failure stops later admission;
-metadata-only ineligibility does not cause a retry. SIGINT/SIGTERM cancel active
-network waits, retain partial bytes, and prevent new waves. A hard kill can leave
-reserved-but-unsettled evidence; it cannot be turned into a successful sample.
+All admitted peers settle before the next wave. In new v3 runs, a response
+failure or measurement ineligibility stops later admission without retries.
+An observed irrevocable violation, such as over-cap usage, remains invalid even
+if the request later reaches a deadline. Missing final usage on a genuinely
+interrupted prefix remains incomplete, not an invented failure or zero count.
+SIGINT/SIGTERM cancel active waits, retain partial bytes and prevent new waves.
+A hard kill can leave reserved-but-unsettled evidence, never a successful sample.
 
 ## Evidence barrier and layout
 
@@ -211,6 +236,8 @@ An I/O failure stops admission and returns an error. Partial files and reservati
 remain; no fallback drops evidence in order to finish a benchmark. Offline loading
 rejects corrupt evidence, verifies request rendering and response hashes, replays
 complete response semantics/usage, and rederives wave rates and elapsed spans.
+New-contract partial responses also have retained usage and finish facts checked
+against their raw bytes; legacy partial-evidence interpretation is unchanged.
 Absent wave directories and reserved-but-unsettled waves remain distinguishable.
 
 Hashes bind retained bytes, not truthful execution. Plans record the executing

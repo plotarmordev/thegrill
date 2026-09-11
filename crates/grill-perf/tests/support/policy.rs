@@ -152,7 +152,8 @@ fn synthetic_times(root: &Path, times: &[(u64, u64)]) {
         let (first, settle) = times[index % times.len()];
         for attempt in wave["attempts"].as_array_mut().unwrap() {
             attempt["timing"] = json!({"dispatch_offset_us":0,"headers_us":0,"first_body_us":0,
-                "first_generated_text_us":first,"first_generated_channel":"answer",
+                "first_generated_text_us":first,"last_generated_text_us":first,
+                "terminal_us":settle,"first_generated_channel":"answer",
                 "first_answer_text_us":first,"settle_us":settle,"capture_parse_us":0});
         }
         wave["elapsed_us"] = json!(settle);
@@ -303,6 +304,7 @@ fn policy_partial_lane_and_warmup_coverage_preserves_other_regression() {
     // Prefill is undefined at a zero first-text interval, but latency is measured.
     wave["attempts"][0]["timing"]["first_generated_text_us"] = json!(0);
     wave["attempts"][0]["timing"]["first_answer_text_us"] = json!(0);
+    wave["attempts"][0]["timing"]["last_generated_text_us"] = json!(0);
     save(&path, &wave);
     let decision = report(&fixture.decide(Some("a2")), "REGRESSION", 3);
     reason(gate(&decision, METRICS[3]), "metric_unavailable");

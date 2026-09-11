@@ -2,6 +2,7 @@ use crate::{evidence, lifecycle, metrics, model::*, wire};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -11,8 +12,8 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 extern "C" fn latch(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
-fn install_latch() -> Result<()> {
-    // Tokio chains the existing signal handler; the latch also covers synchronous publication.
+static LATCH_INSTALLATION: LazyLock<Result<()>> = LazyLock::new(|| {
+    // Later acquisitions must not replace Tokio's process-wide chained handler.
     for signal in [libc::SIGINT, libc::SIGTERM] {
         if unsafe { libc::signal(signal, latch as *const () as libc::sighandler_t) }
             == libc::SIG_ERR
@@ -21,6 +22,9 @@ fn install_latch() -> Result<()> {
         }
     }
     Ok(())
+});
+fn install_latch() -> Result<()> {
+    LATCH_INSTALLATION.clone()
 }
 fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
@@ -74,6 +78,17 @@ pub struct Summary {
     pub claim: String,
 }
 pub fn execute(o: &Options) -> Result<Summary> {
+    execute_inner(o, None)
+}
+
+pub fn execute_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
+    if o.metrics_url.is_some() {
+        return Err("metrics diagnostics are unsupported in bounded capture; use the advanced unbounded run path".into());
+    }
+    execute_inner(o, Some(deadline))
+}
+
+fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
     let source = evidence::read(&o.workload, FILE_CAP)?;
     let workload: Workload =
         serde_json::from_slice(&source).map_err(|e| format!("invalid workload: {e}"))?;
@@ -127,7 +142,8 @@ pub fn execute(o: &Options) -> Result<Summary> {
         .map(|path| evidence::read(path, crate::policy::CAP))
         .transpose()?;
     let plan = Plan {
-        version: 2,
+        version: 3,
+        metric_contract: Some(METRIC_CONTRACT.into()),
         kind: "performance-run-v1".into(),
         tool_version: env!("CARGO_PKG_VERSION").into(),
         collector_sha256: evidence::binary_digest()?,
@@ -194,17 +210,17 @@ pub fn execute(o: &Options) -> Result<Summary> {
         &o.out,
         &plan,
         &plan_hash,
-        0,
-        0,
+        (0, 0),
         o.json,
         metrics::Budget::default(),
+        deadline,
     )
 }
 
 pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     let _owner = lifecycle::ownership(root)?;
     let mut loaded = evidence::load(root)?;
-    if loaded.plan.version != 2 {
+    if !matches!(loaded.plan.version, 2 | 3) {
         return Err("legacy runs cannot be resumed; no execution-session provenance".into());
     }
     if loaded.plan.collector_sha256 != evidence::binary_digest()?
@@ -228,10 +244,10 @@ pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
         root,
         &loaded.plan,
         &plan_hash,
-        history.count,
-        history.next_wave,
+        (history.count, history.next_wave),
         json,
         metrics_budget,
+        None,
     )
 }
 
@@ -239,11 +255,12 @@ fn collect(
     root: &std::path::Path,
     plan: &Plan,
     plan_hash: &str,
-    session: usize,
-    first_wave: usize,
+    cursor: (usize, usize),
     json: bool,
     mut metrics_budget: metrics::Budget,
+    deadline: Option<Instant>,
 ) -> Result<Summary> {
+    let (session, first_wave) = cursor;
     let url = wire::endpoint(&plan.endpoint, plan.local_http)?;
     let auth = wire::credential(plan.auth_env.as_deref())?;
     let session_dir = lifecycle::start(
@@ -289,12 +306,21 @@ fn collect(
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         for spec in &plan.waves[first_wave..] {
             if interrupted() { summary.status = "interrupted".into(); break; }
-            let admission = lifecycle::admission(&session_dir)?;
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
+            let admission = match deadline {
+                Some(deadline) => match lifecycle::admission_bounded(&session_dir, deadline)? {
+                    Some(admission) => admission,
+                    None => { summary.status = "budget-exhausted".into(); break; }
+                },
+                None => lifecycle::admission(&session_dir)?,
+            };
             if lifecycle::requested(&session_dir)? { summary.status = "paused".into(); break; }
             let preparation = Instant::now();
             let requests: Vec<_> = (0..spec.concurrency).map(|lane| wire::request_body(plan, spec, lane)).collect::<Result<_>>()?;
             let hashes = requests.iter().map(|r| evidence::digest(r.as_bytes())).collect();
             let reservation = Reservation { version: 1, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
+            if interrupted() { summary.status = "interrupted".into(); break; }
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
             let reservation_start = Instant::now();
             let dir = evidence::wave_dir(root, spec.index);
             evidence::fresh(&dir)?;
@@ -317,7 +343,7 @@ fn collect(
             let measured_origin_unix_ms = plan.metrics.as_ref().map(|_| metrics::unix_ms());
             let origin = Instant::now();
             for (lane, request) in prepared.into_iter().enumerate() {
-                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), plan.workload.request.stream, lane as u32, origin, cancellation.clone()));
+                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), plan.workload.request.clone(), lane as u32, (origin, deadline), cancellation.clone()));
             }
             let mut settled = Vec::with_capacity(spec.concurrency as usize);
             while !tasks.is_empty() {
@@ -327,7 +353,8 @@ fn collect(
                     _ = terminate.recv(), if !*cancellation.borrow() => { let _ = stop.send(true); },
                     result = tasks.join_next() => {
                         let Some(result) = result else { break; };
-                        settled.push(result.map_err(|_| "collector task failed; wave reservation retained but no success claimed")?);
+                        let collected = result.map_err(|_| "collector task failed; wave reservation retained but no success claimed")?;
+                        settled.push(collected);
                     }
                 }
             }
@@ -356,12 +383,19 @@ fn collect(
             let mut attempts = Vec::with_capacity(settled.len());
             for collected in settled {
                 let mut a = collected.attempt;
+                if plan.version < 3 {
+                    a.timing.last_generated_text_us = None;
+                    a.timing.terminal_us = None;
+                }
                 a.response_sha256 = evidence::digest(&collected.body);
                 a.eligibility_errors = eligibility(&a, &plan.workload.request, spec.phase);
                 evidence::write(&dir.join(format!("response-{:04}.bin", a.lane)), &collected.body)?;
                 attempts.push(a);
             }
-            let network_failed = attempts.iter().any(|a| a.status != Status::Complete);
+            let network_failed = attempts.iter().any(|a| {
+                !matches!(a.status, Status::Complete | Status::Interrupted)
+                    || a.http_status.is_some_and(|status| status != 200)
+            });
             let (eligible, tokens, rate) = evidence::throughput(&attempts, last - first);
             let wave = Wave { version: 1, plan_sha256: plan_hash.into(), reservation_sha256, spec: spec.clone(), attempts, elapsed_us: last - first, dispatch_spread_us: last_dispatch - first, preparation_us, reservation_publication_us, body_publication_us: wire::us(publication), completion_tokens: tokens, achieved_completion_tokens_per_second: rate, eligible, metrics };
             evidence::publish(&dir, "wave.json", &wave)?;
@@ -372,8 +406,15 @@ fn collect(
             if spec.phase == Phase::Measured { summary.measured_waves += 1; summary.eligible_measured_waves += usize::from(eligible); }
             if spec.phase == Phase::Warmup && !eligible { summary.ineligible_warmup_waves += 1; }
             if !json { eprintln!("{} trial {}: {}", spec.cell, spec.trial, if eligible { "eligible" } else { "ineligible; evidence retained" }); }
-            if interrupted() || *cancellation.borrow() { summary.status = "interrupted".into(); break; }
+            let budget_expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            let invalid_response = wave.attempts.iter().any(irrevocable_invalid);
+            if plan.version >= 3 && (invalid_response || (!eligible && wave.attempts.iter().all(|a| a.status == Status::Complete))) {
+                summary.status = "stopped-after-ineligible-response".into(); break;
+            }
             if network_failed { summary.status = "stopped-after-response-failure".into(); break; }
+            if interrupted() { summary.status = "interrupted".into(); break; }
+            if budget_expired { summary.status = "budget-exhausted".into(); break; }
+            if *cancellation.borrow() { summary.status = "interrupted".into(); break; }
         }
         Ok::<(), String>(())
     });
@@ -401,3 +442,24 @@ fn collect(
     }
     Ok(summary)
 }
+
+pub(crate) fn irrevocable_invalid(attempt: &Attempt) -> bool {
+    let terminal = attempt.terminal_offset.is_some() || attempt.status == Status::Complete;
+    attempt.eligibility_errors.iter().any(|error| {
+        if terminal {
+            error != "response_not_complete"
+        } else {
+            matches!(
+                error.as_str(),
+                "reported_output_exceeds_cap"
+                    | "provider_reported_prefix_cache_nonzero"
+                    | "inconsistent_provider_cache_usage"
+                    | "inconsistent_provider_reasoning_usage"
+            )
+        }
+    })
+}
+
+#[cfg(test)]
+#[path = "../tests/support/measurement_bounded.rs"]
+mod measurement_bounded_tests;

@@ -98,6 +98,10 @@ fn exists(path: &Path) -> Result<bool> {
     }
 }
 pub fn binary_digest() -> Result<String> {
+    static DIGEST: std::sync::LazyLock<Result<String>> = std::sync::LazyLock::new(hash_binary);
+    DIGEST.clone()
+}
+fn hash_binary() -> Result<String> {
     let mut file =
         File::open("/proc/self/exe").map_err(|e| format!("read collector binary: {e}"))?;
     let mut buf = [0u8; 65536];
@@ -155,6 +159,15 @@ pub(crate) fn prefill_sample(attempt: &Attempt) -> Option<(u64, u64)> {
 fn decode_rate(attempt: &Attempt) -> Option<f64> {
     decode_sample(attempt).map(|(n, d)| n as f64 * 1_000_000.0 / d as f64)
 }
+pub(crate) fn text_decode_rate(attempt: &Attempt) -> Option<f64> {
+    if attempt.status != Status::Complete {
+        return None;
+    }
+    let tokens = attempt.usage.completion_tokens?;
+    let first = attempt.timing.first_generated_text_us?;
+    let last = attempt.timing.last_generated_text_us?;
+    (tokens >= 2 && last > first).then(|| (tokens - 1) as f64 * 1_000_000.0 / (last - first) as f64)
+}
 fn prefill_rate(attempt: &Attempt) -> Option<f64> {
     prefill_sample(attempt).map(|(n, d)| n as f64 * 1_000_000.0 / d as f64)
 }
@@ -193,15 +206,21 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     directory(root)?;
     let plan_bytes = read(&root.join("plan.json"), 8 * 1024 * 1024)?;
     let plan: Plan = decode(&plan_bytes)?;
-    if !matches!(plan.version, 1 | 2) || plan.kind != "performance-run-v1" {
+    if !matches!(plan.version, 1..=3) || plan.kind != "performance-run-v1" {
         return Err("unsupported performance plan".into());
+    }
+    if match plan.version {
+        3 => plan.metric_contract.as_deref() != Some(METRIC_CONTRACT),
+        _ => plan.metric_contract.is_some(),
+    } {
+        return Err("metric contract does not match plan version".into());
     }
     plan.workload.validate()?;
     if let Some(deployment) = &plan.deployment {
         deployment.validate()?;
     }
     if let Some(config) = &plan.metrics {
-        if plan.version != 2 {
+        if plan.version < 2 {
             return Err("metrics require execution-session provenance".into());
         }
         config.validate(plan.waves.len(), plan.local_http)?;
@@ -386,9 +405,24 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                 if !a.dispatched || a.http_status != Some(200) {
                     return Err("complete response was not a successful dispatch".into());
                 }
-                crate::wire::verify_complete(a, &body, workload.request.stream)?;
+                crate::wire::verify_complete(a, &body, workload.request.stream, plan.version == 3)?;
             }
             a.timing.validate(workload.request.stream)?;
+            if plan.version == 3 {
+                if a.status != Status::Complete {
+                    crate::wire::verify_partial_arrivals(a, &body, workload.request.stream)?;
+                }
+                if a.timing.last_generated_text_us.is_some()
+                    != a.timing.first_generated_text_us.is_some()
+                    || a.timing.terminal_us.is_some() != a.terminal_offset.is_some()
+                {
+                    return Err("generated-text arrival observations are incomplete".into());
+                }
+            } else if a.timing.last_generated_text_us.is_some() || a.timing.terminal_us.is_some() {
+                return Err(
+                    "legacy evidence cannot declare generated-text arrival observations".into(),
+                );
+            }
             if a.http_status.is_some() != a.timing.headers_us.is_some()
                 || (a.response_bytes != 0) != a.timing.first_body_us.is_some()
                 || (a.status == Status::Complete
@@ -472,10 +506,12 @@ pub struct CellSummary {
     pub median_wave_latency_us: Option<f64>,
     pub median_achieved_completion_tokens_per_second: Option<f64>,
     pub median_decode_tokens_per_second: Option<f64>,
+    pub median_text_decode_tokens_per_second: Option<f64>,
     pub median_prefill_tokens_per_second: Option<f64>,
     pub wave_latency_us_range: Option<[f64; 2]>,
     pub achieved_completion_tokens_per_second_range: Option<[f64; 2]>,
     pub decode_tokens_per_second_range: Option<[f64; 2]>,
+    pub text_decode_tokens_per_second_range: Option<[f64; 2]>,
     pub prefill_tokens_per_second_range: Option<[f64; 2]>,
     pub first_answer_text_us: Vec<Option<u64>>,
     pub trial_states: Vec<&'static str>,
@@ -485,6 +521,7 @@ pub struct CellSummary {
     pub all_declared_warmups_complete: bool,
     pub lane_completion_tokens: Vec<Vec<Option<u64>>>,
     pub lane_decode_tokens_per_second: Vec<Vec<Option<f64>>>,
+    pub lane_text_decode_tokens_per_second: Vec<Vec<Option<f64>>>,
     pub lane_prompt_tokens: Vec<Vec<Option<u64>>>,
     pub lane_prefill_tokens_per_second: Vec<Vec<Option<f64>>>,
 }
@@ -580,6 +617,13 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                     None => vec![None; spec.concurrency as usize],
                 })
                 .collect();
+            let text_decode_rates: Vec<Vec<_>> = pairs
+                .iter()
+                .map(|(spec, wave)| match wave {
+                    Some(w) => w.attempts.iter().map(text_decode_rate).collect(),
+                    None => vec![None; spec.concurrency as usize],
+                })
+                .collect();
             let prefill_rates: Vec<Vec<_>> = pairs
                 .iter()
                 .map(|(spec, wave)| match wave {
@@ -599,6 +643,11 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
+            let text_decode_values = if complete {
+                text_decode_rates.iter().flatten().flatten().copied().collect()
+            } else {
+                Vec::new()
+            };
             CellSummary {
                 cell: cell.id.clone(),
                 planned_trials: cell.trials,
@@ -612,6 +661,9 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 median_achieved_completion_tokens_per_second: median(rate_values),
                 median_decode_tokens_per_second: median(decode_values),
                 lane_decode_tokens_per_second: decode_rates,
+                text_decode_tokens_per_second_range: range(&text_decode_values),
+                median_text_decode_tokens_per_second: median(text_decode_values),
+                lane_text_decode_tokens_per_second: text_decode_rates,
                 median_prefill_tokens_per_second: median(prefill_values),
                 lane_prefill_tokens_per_second: prefill_rates,
                 wave_latency_us: latencies,
@@ -806,6 +858,7 @@ fn complete_lane_observations(values: &[Vec<Option<f64>>]) -> bool {
 
 pub(crate) fn compatible(a: &Plan, b: &Plan) -> bool {
     a.workload_sha256 == b.workload_sha256
+        && a.metric_contract == b.metric_contract
         && a.tool_version == b.tool_version
         && a.collector_sha256 == b.collector_sha256
         && a.local_http == b.local_http
@@ -824,7 +877,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
     {
         if !compatible(&left.plan, &other.plan) {
             return Err(format!(
-                "{side}: incompatible workload, tool, transport or metrics controls; no matched comparison produced"
+                "{side}: incompatible workload, metric contract, tool, transport or metrics controls; no matched comparison produced"
             ));
         }
     }

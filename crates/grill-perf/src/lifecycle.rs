@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const SESSION_CAP: usize = 2048;
 
@@ -27,17 +28,42 @@ pub fn ownership(root: &Path) -> Result<File> {
 
 // A separate session-directory lock serializes pause publication with reservation.
 // It is released before network collection; control requests never fsync evidence.
-pub fn admission(session: &Path) -> Result<File> {
+fn admission_file(session: &Path) -> Result<File> {
     evidence::directory(session)?;
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(session)
-        .map_err(|e| format!("open wave admission: {e}"))?;
+        .map_err(|e| format!("open wave admission: {e}"))
+}
+
+pub fn admission(session: &Path) -> Result<File> {
+    let file = admission_file(session)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err("cannot acquire wave admission lock".into());
     }
     Ok(file)
+}
+
+pub fn admission_bounded(session: &Path, deadline: Instant) -> Result<Option<File>> {
+    let file = admission_file(session)?;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok((Instant::now() < deadline).then_some(file));
+        }
+        let error = std::io::Error::last_os_error();
+        match error.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => (),
+            _ => return Err(format!("cannot acquire wave admission lock: {error}")),
+        }
+        std::thread::sleep(
+            Duration::from_millis(2).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -225,7 +251,14 @@ pub fn history(
                     | "interrupted"
                     | "stopped-after-response-failure"
                     | "local-failure"
+                    | "budget-exhausted"
+                    | "stopped-after-ineligible-response"
             ) || (end.status.starts_with("completed") && end_wave != plan.waves.len())
+                || (plan.version < 3
+                    && matches!(
+                        end.status.as_str(),
+                        "budget-exhausted" | "stopped-after-ineligible-response"
+                    ))
             {
                 return Err("invalid session terminal status".into());
             }
@@ -278,7 +311,7 @@ pub fn pause(root: &Path) -> Result<()> {
     let plan: Plan =
         serde_json::from_slice(&evidence::read(&root.join("plan.json"), 8 * 1024 * 1024)?)
             .map_err(|e| format!("invalid plan: {e}"))?;
-    if plan.version != 2 {
+    if !matches!(plan.version, 2 | 3) {
         return Err("pause requires a lifecycle-enabled performance run".into());
     }
     let mut active = None;
@@ -318,4 +351,39 @@ pub fn requested(session: &Path) -> Result<bool> {
     }
     evidence::directory(&path)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_deadline_does_not_wait_for_a_held_lock() {
+        let path = std::env::temp_dir().join(format!(
+            "grill-perf-admission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        let held = admission(&path).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let other = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let result = admission_bounded(&other, Instant::now() + Duration::from_millis(5));
+            send.send(result.map(|file| file.is_none())).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(5));
+        drop(held);
+        waiter.join().unwrap();
+        assert!(result.unwrap().unwrap());
+        assert!(admission_bounded(&path, Instant::now()).unwrap().is_none());
+        let available = admission_bounded(&path, Instant::now() + Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        drop(available);
+        fs::remove_dir(path).unwrap();
+    }
 }
