@@ -523,6 +523,146 @@ fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_
 }
 
 #[test]
+fn unchanged_control_dispatches_same_deployment_and_replays_period_shifts_offline() {
+    let temp = Temp::new();
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let declaration = deployment(&temp, "same.json", "same");
+    let before = baseline(&temp, &server, &declaration, "before");
+    assert!(before.status.success());
+    assert!(decoded(&before)["declared_change"].is_null());
+    let baseline_manifest = fs::read(temp.path("before/capture.json")).unwrap();
+    assert!(read_json(&temp.path("before/capture.json"))["change"].is_null());
+    let output = command()
+        .arg("check")
+        .arg(temp.path("before"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--out"])
+        .arg(temp.path("control"))
+        .arg("--json")
+        .output()
+        .unwrap();
+    let initial = decoded(&output);
+    assert_ne!(initial["result"], "INVALID", "{initial}");
+    assert_eq!(initial["declared_change"], "none");
+    assert_eq!(initial["baseline_complete_acquisitions"], 8);
+    assert_eq!(initial["candidate_complete_acquisitions"], 8);
+    assert_eq!(initial["candidate_accounting"]["dispatched_requests"], 32);
+    assert_eq!(server.count.load(Ordering::SeqCst), 64);
+    assert_eq!(
+        fs::read(temp.path("control/deployment.json")).unwrap(),
+        fs::read(temp.path("before/deployment.json")).unwrap()
+    );
+    assert_eq!(
+        baseline_manifest,
+        fs::read(temp.path("before/capture.json")).unwrap()
+    );
+    assert_eq!(
+        read_json(&temp.path("control/capture.json"))["change"],
+        "none"
+    );
+    drop(server);
+
+    let recorded_report = fs::read(temp.path("control/report.json")).unwrap();
+    assert_eq!(
+        decoded(&compare(&temp.path("before"), &temp.path("control"))),
+        initial
+    );
+    assert_eq!(
+        recorded_report,
+        fs::read(temp.path("control/report.json")).unwrap()
+    );
+    retime(&temp.path("before"), [400_000; 8], None);
+    let baseline_hash = file_hash(&temp.path("before/capture.json"));
+    let baseline_finish =
+        read_json(&temp.path("before/capture.json"))["acquisitions"][7]["finished_unix_ms"]
+            .as_u64()
+            .unwrap();
+    for (durations, expected) in [
+        (
+            [
+                200_000, 210_000, 190_000, 205_000, 195_000, 202_000, 198_000, 200_000,
+            ],
+            "IMPROVED",
+        ),
+        (
+            [
+                800_000, 810_000, 790_000, 805_000, 795_000, 802_000, 798_000, 800_000,
+            ],
+            "REGRESSED",
+        ),
+    ] {
+        retime(
+            &temp.path("control"),
+            durations,
+            Some((&baseline_hash, baseline_finish)),
+        );
+        let report = decoded(&compare(&temp.path("before"), &temp.path("control")));
+        assert_eq!(report["result"], expected, "{report}");
+        assert_eq!(report["declared_change"], "none");
+    }
+    let mut capture = read_json(&temp.path("control/capture.json"));
+    capture["change"] = Value::Null;
+    write_json(&temp.path("control/capture.json"), &capture);
+    assert_eq!(
+        decoded(&compare(&temp.path("before"), &temp.path("control")))["result"],
+        "INVALID"
+    );
+}
+
+#[test]
+fn unchanged_control_rejects_each_changed_field_and_preserves_selected_change_rules() {
+    let temp = Temp::new();
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let declaration = deployment(&temp, "same.json", "same");
+    assert!(
+        baseline(&temp, &server, &declaration, "before")
+            .status
+            .success()
+    );
+    let original = read_json(&declaration);
+    let count = server.count.load(Ordering::SeqCst);
+    let rejected = |change: &str, name: &str| {
+        let output = command()
+            .arg("check")
+            .arg(temp.path("before"))
+            .arg("--deployment")
+            .arg(&declaration)
+            .args(["--change", change, "--out"])
+            .arg(temp.path(name))
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report = decoded(&output);
+        assert_eq!(report["result"], "INVALID", "{report}");
+        assert_eq!(report["declared_change"], change);
+        assert!(report["candidate_accounting"].is_null());
+        assert!(!temp.path(&format!("{name}/capture.json")).exists());
+        assert!(!temp.path(&format!("{name}/acquisition-00")).exists());
+        assert_eq!(server.count.load(Ordering::SeqCst), count);
+    };
+    for (field, other) in [
+        ("model_revision", "runtime"),
+        ("runtime", "hardware"),
+        ("hardware", "settings"),
+        ("settings", "model_revision"),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = json!("changed");
+        write_json(&declaration, &changed);
+        rejected("none", &format!("control-{field}"));
+
+        changed[other] = json!("undeclared-change");
+        write_json(&declaration, &changed);
+        rejected(field, &format!("undeclared-{field}"));
+
+        write_json(&declaration, &original);
+        rejected(field, &format!("missing-change-{field}"));
+    }
+}
+
+#[test]
 fn check_rejects_missing_baseline_and_mismatched_declarations_before_dispatch() {
     let temp = Temp::new();
     let response_kind = Arc::new(AtomicUsize::new(0));

@@ -9,6 +9,7 @@ const CRITICAL: f64 = 2.364624251;
 const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
 const ASSUMPTIONS: &str = "Model-based interval assumes stable, independent acquisition-level variation and an adequate log-scale mean model. Resetting a client does not prove independence. Positive autocorrelation can make the interval narrower than justified, increasing false directional conclusions. Sequential captures cannot remove time or carryover confounding; no causal attribution, equivalence, noninferiority, or guaranteed precision/power is established.";
 const SCOPE: &str = "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed.";
+const UNCHANGED_SCOPE: &str = "Unchanged-deployment control: any directional result is an observed capture-period shift requiring repeatability investigation, not evidence of a serving-change effect. An inconclusive result does not establish equality or repeatability.";
 
 #[derive(clap::Args)]
 pub struct BaselineOptions {
@@ -54,6 +55,9 @@ pub enum Change {
     Runtime,
     Hardware,
     Settings,
+    #[serde(rename = "none")]
+    #[value(name = "none")]
+    Unchanged,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -267,6 +271,11 @@ fn declared_change(before: &Deployment, after: &Deployment, selected: Change) ->
         (Change::Settings, &before.settings, &after.settings),
     ] {
         if (a != b) != (field == selected) {
+            if selected == Change::Unchanged {
+                return Err(format!(
+                    "declaration mismatch: --change none requires every deployment field to match; {field:?} differs"
+                ));
+            }
             return Err(format!(
                 "declaration mismatch: exactly the selected {selected:?} field must differ; {field:?} violates that rule"
             ));
@@ -691,7 +700,7 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
             report.result = Outcome::Invalid;
         }
         report.reasons.push(if report.baseline_ready {
-            "Baseline ready. Change serving state yourself, then run check with the changed deployment declaration; TheGrill does not change the server.".into()
+            "Baseline ready. Run check with --change none and the same deployment declaration for an unchanged control, or change serving state yourself and select the changed declaration field; TheGrill does not change the server.".into()
         } else {
             verified.manifest.stop_reason.unwrap_or_else(|| "Baseline incomplete; no directional comparison is available. Record a new baseline in a fresh directory.".into())
         });
@@ -725,6 +734,9 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
     report.baseline_path = Some(options.baseline.clone());
     report.candidate_path = Some(options.out.clone());
     report.declared_change = Some(options.change);
+    if options.change == Change::Unchanged {
+        report.result_scope = UNCHANGED_SCOPE;
+    }
     let operation = (|| {
         let before = load(&options.baseline)?;
         report.first_failure = before.first_failure.clone();
@@ -797,6 +809,9 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
         let after = load(candidate)?;
         report.model = Some(before.manifest.model.clone());
         report.declared_change = after.manifest.change;
+        if after.manifest.change == Some(Change::Unchanged) {
+            report.result_scope = UNCHANGED_SCOPE;
+        }
         report.baseline_accounting = Some(before.accounting.clone());
         report.candidate_accounting = Some(after.accounting.clone());
         report.baseline_complete_acquisitions = before.observations.len();
@@ -934,6 +949,12 @@ pub fn human(report: &Report) -> String {
         "Baseline ready; comparison not yet performed"
     } else {
         match report.result {
+            Outcome::Improved if report.declared_change == Some(Change::Unchanged) => {
+                "IMPROVED: observed increase BETWEEN UNCHANGED-DEPLOYMENT CAPTURE PERIODS"
+            }
+            Outcome::Regressed if report.declared_change == Some(Change::Unchanged) => {
+                "REGRESSED: observed decrease BETWEEN UNCHANGED-DEPLOYMENT CAPTURE PERIODS"
+            }
             Outcome::Improved => "IMPROVED: observed improvement BETWEEN THESE CAPTURE PERIODS",
             Outcome::Regressed => "REGRESSED: observed regression BETWEEN THESE CAPTURE PERIODS",
             Outcome::Inconclusive => "INCONCLUSIVE: no supported direction between capture periods",
@@ -980,7 +1001,12 @@ pub fn human(report: &Report) -> String {
         }
     }
     if let Some(change) = report.declared_change {
-        text.push_str(&format!("Selected declaration change: {change:?}\n"));
+        if change == Change::Unchanged {
+            text.push_str(UNCHANGED_SCOPE);
+            text.push('\n');
+        } else {
+            text.push_str(&format!("Selected declaration change: {change:?}\n"));
+        }
     }
     if let Some(observed) = report.observed_change_percent {
         text.push_str(&format!(
@@ -1045,10 +1071,10 @@ pub fn human(report: &Report) -> String {
         && let Some(root) = report.report_path.parent()
     {
         let quoted_root = root.to_string_lossy().replace('\'', "'\\''");
-        text.push_str(&format!("Next: grill-perf check '{quoted_root}' --deployment serving-after.json --change settings --out after\nSelect the declaration field you changed; the other fields must match.\n"));
+        text.push_str(&format!("Next: grill-perf check '{quoted_root}' --deployment serving-after.json --change settings --out after\nSelect the declaration field you changed; the other fields must match.\nFor an unchanged-deployment control: grill-perf check '{quoted_root}' --deployment '{quoted_root}/deployment.json' --change none --out control\n"));
     }
     if report.observed_change_percent.is_some() {
-        text.push_str("Limits: captures are sequential. Correlated or drifting acquisitions can make the model-based interval overconfident. No causal, equivalence or guaranteed-precision claim.\n");
+        text.push_str("Limits: captures are sequential. Correlated or drifting acquisitions can make the model-based interval overconfident. Directional labels do not establish practical significance. No causal, equivalence or guaranteed-precision claim.\n");
     }
     text.push_str(&format!(
         "Scope: structured C1, exactly 400 output tokens per request; serving identity is declared, not attested.\nReport: {}\n",

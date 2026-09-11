@@ -20,15 +20,46 @@ target/release/grill-perf compare before after --json
 Use the four-field declaration shown in the [quick start](../../README.md#speed-benchmarks):
 `model_revision`, `runtime`, `hardware`, `settings`. All must be nonempty.
 Prefer meaningful revision IDs or configuration fingerprints; never put credentials
-in them. `--change` selects exactly one of these fields. The selected value must
-differ and the others must match. Multi-field migrations are outside this simple
-path. A settings fingerprint cannot prove only one internal knob changed.
+in them. Selecting a declaration field with `--change` requires that value to
+differ and the others to match. `--change none` instead requires every field to
+match. Multi-field migrations are outside this simple path. A settings
+fingerprint cannot prove only one internal knob changed.
 
 The candidate inherits the verified baseline's endpoint, model selector, fixed
 workload and authentication-environment **name**. Pass `--auth-env NAME` to
 `baseline` when needed; the credential value is never saved. The same collector
 binary and measurement contract are required. Declarations are not independently
 read from or attested by the server.
+
+### Unchanged-deployment control
+
+Capture a baseline, leave the deployment unchanged, then check with the same
+declaration:
+
+```sh
+target/release/grill-perf baseline --endpoint http://127.0.0.1:8000/v1/chat/completions \
+  --local-http --model your-model --deployment serving-before.json --out before
+target/release/grill-perf check before --deployment serving-before.json --change none --out control
+```
+
+Any declaration mismatch is rejected before control requests. The capture's
+`change` and report's `declared_change` serialize as `"none"` for this control,
+distinct from a baseline's absent change (`null`). Older readers may reject
+the new explicit value; existing captures and historical results are not rewritten
+or reinterpreted. Offline replay uses
+`target/release/grill-perf compare before control --json`.
+
+The same workload, budgets, metrics, thresholds and exit semantics apply.
+`IMPROVED` or `REGRESSED` means an observed capture-period shift under an
+unchanged deployment, not evidence of a serving-change effect. Retain any directional
+control result and investigate chance variation, time drift, load, cache effects
+and dependence; do not replace it with repeated runs until a preferred verdict.
+An inconclusive control does not establish equality or repeatability.
+A directional control result can occur by chance even under the model assumptions;
+one such result does not itself prove an assumption or software failure.
+Directional labels describe sign, not practical significance: a small observed
+change is not automatically a useful upgrade.
+Matching declarations remain operator claims, not proof of unchanged server state.
 
 ### Default scope and budget
 

@@ -77,6 +77,21 @@ target/release/grill-perf check before \
 name. Select `model_revision`, `runtime`, `hardware` or `settings` as the declared
 change. Unexplained mismatches are rejected before candidate requests.
 
+**Unchanged-deployment control:** instead of making a serving change, keep the
+server and every declaration unchanged and run:
+
+```sh
+target/release/grill-perf check before \
+  --deployment serving-before.json --change none --out control
+```
+
+This requires every deployment field to match the baseline. Any directional
+control result is an observed capture-period shift requiring repeatability
+investigation, not evidence of a serving-change effect. Retain it; do not rerun until a
+preferred verdict appears. An inconclusive control does not establish equality
+or repeatability. Replay it offline with
+`target/release/grill-perf compare before control --json`.
+
 | Result | Meaning |
 |---|---|
 | **IMPROVED** | The comparison model supports an observed throughput increase between these capture periods |
