@@ -101,7 +101,7 @@ jobs:
           if not re.fullmatch(r'[0-9a-f]{40}', source) or subprocess.check_output(
                   ['git', 'rev-parse', 'HEAD'], text=True).strip() != source:
               raise SystemExit('Source must be the exact checked-out commit')
-          roots = {'.editorconfig', '.github', '.gitignore', 'AGENTS.md', 'CONTRIBUTING.md',
+          roots = {'.editorconfig', '.gitattributes', '.github', '.gitignore', 'AGENTS.md', 'CONTRIBUTING.md',
                    'Cargo.lock', 'Cargo.toml', 'LICENSE', 'NOTICE', 'README.md', 'SECURITY.md',
                    'assets', 'crates', 'docs', 'examples', 'licenses', 'src', 'tests', 'tools'}
           destination = Path(os.environ['RUNNER_TEMP']) / 'release-source'
