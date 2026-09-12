@@ -1,0 +1,243 @@
+name: Stage release
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full reviewed source commit SHA
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      source:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  stage:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      SOURCE: ${{ inputs.source || github.event.pull_request.head.sha || github.sha }}
+      REQUESTED_VERSION: ${{ inputs.version || '' }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.SOURCE }}
+          persist-credentials: false
+      - name: Bind staged version to the selected source
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path('crates/grill-perf/Cargo.toml').read_text())['package']['version']
+          if not re.fullmatch(r'0\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('Require an explicit pre-1.0 package version')
+          if os.environ['REQUESTED_VERSION'] and os.environ['REQUESTED_VERSION'] != version:
+              raise SystemExit('Requested release version disagrees with selected source')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'VERSION={version}\n')
+          PY
+      - name: Verify read-only approval endpoint access for same-repository PRs
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" \
+            --jq '"Approval endpoint reachable; actor role: " + .role_name + ". Staging does not authorize publication."'
+      - name: Install checksum-pinned native Gitleaks
+        run: |
+          set -euo pipefail
+          case "$(uname -m):$TARGET" in
+            x86_64:x86_64-unknown-linux-gnu)
+              ARCH=x64
+              SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            aarch64:aarch64-unknown-linux-gnu)
+              ARCH=arm64
+              SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
+            *) echo 'Native scanner architecture mismatch' >&2; exit 1 ;;
+          esac
+          mkdir "$RUNNER_TEMP/gitleaks"
+          ASSET="gitleaks_8.30.1_linux_$ARCH.tar.gz"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$ASSET" \
+            --output "$RUNNER_TEMP/gitleaks/$ASSET"
+          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/gitleaks/$ASSET" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          test "$("$RUNNER_TEMP/gitleaks/gitleaks" version)" = '8.30.1'
+          # Explicit defaults prevent source-local config, ignore files or comments from hiding findings.
+          printf '[extend]\nuseDefault = true\n' > "$RUNNER_TEMP/gitleaks/config.toml"
+      - name: Gate publishable source scope and secrets
+        run: |
+          set -euo pipefail
+          git archive --format=tar "$SOURCE" --output="$RUNNER_TEMP/release-source.tar"
+          python3 - <<'PY'
+          import os
+          import re
+          import runpy
+          import subprocess
+          import tarfile
+          from pathlib import Path, PurePosixPath
+          source = os.environ['SOURCE']
+          if not re.fullmatch(r'[0-9a-f]{40}', source) or subprocess.check_output(
+                  ['git', 'rev-parse', 'HEAD'], text=True).strip() != source:
+              raise SystemExit('Source must be the exact checked-out commit')
+          roots = {'.editorconfig', '.github', '.gitignore', 'AGENTS.md', 'CONTRIBUTING.md',
+                   'Cargo.lock', 'Cargo.toml', 'LICENSE', 'NOTICE', 'README.md', 'SECURITY.md',
+                   'assets', 'crates', 'docs', 'examples', 'licenses', 'src', 'tests', 'tools'}
+          destination = Path(os.environ['RUNNER_TEMP']) / 'release-source'
+          destination.mkdir()
+          with tarfile.open(destination.parent / 'release-source.tar') as archive:
+              for member in archive.getmembers():
+                  path = PurePosixPath(member.name)
+                  if (path.is_absolute() or not path.parts or path.parts[0] not in roots
+                          or any(part in {'.git', 'target', '..'} for part in path.parts)
+                          or not (member.isfile() or member.isdir())):
+                      raise SystemExit('Source snapshot contains an out-of-scope entry')
+              archive.extractall(destination, filter='data')
+          payload = runpy.run_path('tools/stage-release.py')['PAYLOAD']
+          for name in {*payload.values(), 'Cargo.toml', 'Cargo.lock',
+                       'crates/grill-perf/Cargo.toml', 'crates/grill-sse/Cargo.toml'}:
+              if not (destination / name).is_file():
+                  raise SystemExit('Source snapshot omitted a required package input')
+          PY
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir "$RUNNER_TEMP/release-source" \
+            --config "$RUNNER_TEMP/gitleaks/config.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks" --ignore-gitleaks-allow \
+            --max-archive-depth 5 --redact --no-banner
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - name: Existing checks using synthetic and loopback fixtures
+        run: |
+          set -euo pipefail
+          cargo +1.98.0 build --workspace --locked
+          cargo +1.98.0 fmt --all --check
+          cargo +1.98.0 test --workspace --locked -- --test-threads=1
+          cargo +1.98.0 clippy --workspace --locked --all-targets -- -D warnings
+      - name: Stage exact clean source
+        run: |
+          set -euo pipefail
+          python3 tools/stage-release.py --source "$SOURCE" --target "$TARGET" --out "$RUNNER_TEMP/staged"
+      - name: Verify installed archive in native clean runtime
+        run: |
+          set -euo pipefail
+          STEM="grill-perf-$VERSION-$TARGET"
+          python3 tools/smoke-installed.py \
+            --archive "$RUNNER_TEMP/staged/$STEM.tar.gz" \
+            --checksum "$RUNNER_TEMP/staged/$STEM.tar.gz.sha256" \
+            --receipt "$RUNNER_TEMP/staged/$STEM.receipt.json" \
+            --target "$TARGET" --version "$VERSION" --out "$RUNNER_TEMP/installed-private"
+          cp "$RUNNER_TEMP/installed-private/summary.json" "$RUNNER_TEMP/staged/$STEM.smoke.json"
+      - name: Gate public output scope and secrets before upload
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import runpy
+          import shutil
+          import subprocess
+          import tarfile
+          from pathlib import Path
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+          def digest(path):
+              with path.open('rb') as content:
+                  return hashlib.file_digest(content, 'sha256').hexdigest()
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          staged = temporary / 'staged'
+          stem = f"grill-perf-{os.environ['VERSION']}-{os.environ['TARGET']}"
+          names = {stem + suffix for suffix in ('.tar.gz', '.tar.gz.sha256', '.receipt.json', '.smoke.json')}
+          require({path.name for path in staged.iterdir()} == names
+                  and all(path.is_file() and not path.is_symlink() for path in staged.iterdir()),
+                  'Only the named archive and public sidecars may be staged')
+          receipt = json.loads((staged / (stem + '.receipt.json')).read_text())
+          summary = json.loads((staged / (stem + '.smoke.json')).read_text())
+          require(set(receipt) == {'schema', 'release_version', 'target', 'source_commit', 'source_tree',
+                  'cargo_lock_sha256', 'toolchain', 'build', 'runtime', 'archive', 'checksum', 'binary',
+                  'payload', 'files_sha256', 'publication_blockers', 'redistribution_notices', 'packaging'},
+                  'Unexpected build receipt fields')
+          require(set(summary) == {'schema_version', 'status', 'release_version', 'source_commit', 'target',
+                  'archive_sha256', 'binary_sha256', 'runtime', 'checks', 'scenarios', 'claim'}
+                  and set(summary['runtime']) == {'image', 'architecture', 'glibc',
+                  'rust_available', 'source_checkout_available', 'ca_bundle_source', 'ca_bundle_sha256'}
+                  and all(set(scenario) == {'id', 'baseline_result', 'control_result',
+                  'candidate_result', 'request_count'} for scenario in summary['scenarios']),
+                  'Only the public smoke summary schema may be uploaded')
+          require(summary['status'] == 'passed' and receipt['publication_blockers'] == [],
+                  'Qualification or redistribution gate is unresolved')
+          for key, expected in [('source_commit', os.environ['SOURCE']),
+                                ('release_version', os.environ['VERSION']), ('target', os.environ['TARGET'])]:
+              require(receipt[key] == summary[key] == expected, 'Public artifact identity mismatch')
+          archive_path = staged / (stem + '.tar.gz')
+          archive_hash = digest(archive_path)
+          require(archive_hash == receipt['archive']['sha256'] == summary['archive_sha256']
+                  and (staged / (stem + '.tar.gz.sha256')).read_text() == f'{archive_hash}  {archive_path.name}\n',
+                  'Archive checksum mismatch')
+          payload = runpy.run_path('tools/stage-release.py')['PAYLOAD']
+          expected = {*payload, 'bin/grill-perf'}
+          require(set(receipt['payload']) == set(receipt['files_sha256']) == expected,
+                  'Receipt payload is outside the packaging allowlist')
+          scan = temporary / 'release-output-scan'
+          scan.mkdir()
+          with tarfile.open(archive_path) as archive:
+              members = archive.getmembers()
+              require(len(members) == len(expected)
+                      and {member.name for member in members} == {f'{stem}/{name}' for name in expected}
+                      and all(member.isfile() for member in members),
+                      'Archive contains extra, duplicate or non-ordinary payload entries')
+              archive.extractall(scan, filter='data')
+          for name in expected:
+              actual = digest(scan / stem / name)
+              require(actual == receipt['files_sha256'][name] == receipt['payload'][name]['sha256'],
+                      'Extracted payload digest mismatch')
+              if name in payload:
+                  require(actual == digest(temporary / 'release-source' / payload[name]),
+                          'Packaged asset differs from scanned reviewed source')
+          require(digest(scan / stem / 'bin/grill-perf') == receipt['binary']['sha256']
+                  == summary['binary_sha256'], 'Public binary identity mismatch')
+          for name in names - {archive_path.name}:
+              shutil.copyfile(staged / name, scan / name)
+          # Binary files can be skipped by text scanners; scan their printable strings too.
+          with (scan / 'binary-strings.txt').open('wb') as printable:
+              subprocess.run(['strings', '--all', '--bytes=8', str(scan / stem / 'bin/grill-perf')],
+                             stdout=printable, check=True)
+          PY
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir "$RUNNER_TEMP/release-output-scan" \
+            --config "$RUNNER_TEMP/gitleaks/config.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks" --ignore-gitleaks-allow \
+            --max-archive-depth 5 --redact --no-banner
+      - name: Upload only public-safe installation artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staged-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/staged/grill-perf-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+            ${{ runner.temp }}/staged/grill-perf-${{ env.VERSION }}-${{ matrix.target }}.tar.gz.sha256
+            ${{ runner.temp }}/staged/grill-perf-${{ env.VERSION }}-${{ matrix.target }}.receipt.json
+            ${{ runner.temp }}/staged/grill-perf-${{ env.VERSION }}-${{ matrix.target }}.smoke.json

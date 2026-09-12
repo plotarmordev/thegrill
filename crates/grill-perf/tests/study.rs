@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 #[path = "support/conversation.rs"]
 mod conversation;
+#[path = "support/first_run.rs"]
+mod first_run;
 #[path = "support/selection.rs"]
 mod selection;
 

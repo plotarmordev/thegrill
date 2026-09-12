@@ -1,0 +1,209 @@
+name: Publish reviewed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Full reviewed commit SHA; must equal the selected workflow ref
+        required: true
+        type: string
+      version:
+        description: Reviewed package version without v prefix
+        required: true
+        type: string
+      confirmation:
+        description: 'Type exactly: publish vVERSION from FULL_SHA'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: immutable-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require explicit maintainer approval of this exact workflow source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source }}
+          VERSION: ${{ inputs.version }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          source, version = os.environ['SOURCE'], os.environ['VERSION']
+          if not re.fullmatch(r'[0-9a-f]{40}', source) or not re.fullmatch(r'0\.[0-9]+\.[0-9]+', version):
+              raise SystemExit('Require a full source SHA and pre-1.0 package version')
+          if source != os.environ['GITHUB_SHA'] or source != os.environ['WORKFLOW_SHA']:
+              raise SystemExit('Dispatch the workflow ref at the exact reviewed source commit')
+          if os.environ['CONFIRMATION'] != f'publish v{version} from {source}':
+              raise SystemExit('Explicit publication confirmation does not match')
+          for actor in {os.environ['GITHUB_ACTOR'], os.environ['GITHUB_TRIGGERING_ACTOR']}:
+              url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/collaborators/{actor}/permission"
+              request = urllib.request.Request(url, headers={'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                                                           'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request) as response:
+                  permission = json.load(response)
+              if permission.get('role_name') not in ('admin', 'maintain'):
+                  raise SystemExit('Publication requires repository admin or maintain role')
+          PY
+  stage:
+    needs: authorize
+    uses: ./.github/workflows/stage-release.yml
+    with:
+      source: ${{ inputs.source }}
+      version: ${{ inputs.version }}
+    permissions:
+      contents: read
+  publish:
+    needs: [authorize, stage]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: staged-x86_64-unknown-linux-gnu
+          path: staged/x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: staged-aarch64-unknown-linux-gnu
+          path: staged/aarch64-unknown-linux-gnu
+      - name: Verify identities and publish without replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          source, version = os.environ['SOURCE'], os.environ['VERSION']
+          repository = os.environ['GITHUB_REPOSITORY']
+          api_root = f'https://api.github.com/repos/{repository}'
+          headers = {'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                     'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+                     'Content-Type': 'application/json'}
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          def api(path, data=None, absent=False):
+              request = urllib.request.Request(api_root + path, headers=headers,
+                                               data=None if data is None else json.dumps(data).encode())
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      result = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if absent and error.code == 404:
+                      return
+                  raise
+              require(not absent, 'Existing immutable tag or release: refusing publication')
+              return result
+
+          def validate_assets():
+              assets = []
+              for target in ('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu'):
+                  stem = f'grill-perf-{version}-{target}'
+                  directory = Path('staged') / target
+                  names = [f'{stem}{suffix}' for suffix in ('.tar.gz', '.tar.gz.sha256', '.receipt.json', '.smoke.json')]
+                  require({p.name for p in directory.iterdir()} == set(names), 'Unexpected staged artifact files')
+                  require(all((directory / name).is_file() and not (directory / name).is_symlink() for name in names),
+                          'Staged assets must be ordinary files')
+                  archive, checksum, receipt_path, smoke_path = [directory / name for name in names]
+                  receipt, smoke = json.loads(receipt_path.read_text()), json.loads(smoke_path.read_text())
+                  archive_hash = digest(archive)
+                  require(checksum.read_text() == f'{archive_hash}  {archive.name}\n', 'Checksum mismatch')
+                  require(receipt['schema'] == 'grill-perf-build-receipt-v1', 'Unsupported build receipt')
+                  require(receipt['release_version'] == version and receipt['source_commit'] == source
+                          and receipt['target'] == target and receipt['archive']['sha256'] == archive_hash
+                          and receipt['archive']['file'] == archive.name
+                          and receipt['checksum']['sha256'] == digest(checksum), 'Build receipt identity mismatch')
+                  require(receipt.get('publication_blockers') == [], 'Unresolved build receipt publication blockers')
+                  require(smoke['schema_version'] == 1 and smoke['status'] == 'passed'
+                          and smoke['release_version'] == version and smoke['source_commit'] == source
+                          and smoke['target'] == target and smoke['archive_sha256'] == archive_hash
+                          and smoke['binary_sha256'] == receipt['binary']['sha256'], 'Installed smoke identity mismatch')
+                  runtime = smoke['runtime']
+                  require(runtime['image'] == 'ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254'
+                          and runtime['architecture'] == target.split('-')[0] and runtime['glibc'] == 'glibc 2.39'
+                          and runtime['rust_available'] is False and runtime['source_checkout_available'] is False
+                          and runtime.get('ca_bundle_source') == 'read-only native system trust store'
+                          and isinstance(runtime.get('ca_bundle_sha256'), str)
+                          and re.fullmatch(r'[0-9a-f]{64}', runtime['ca_bundle_sha256']),
+                          'Installed smoke runtime mismatch')
+                  assets.extend(directory / name for name in names)
+              return assets
+
+          def publish(assets):
+              tag = f'v{version}'
+              api(f'/git/ref/tags/{tag}', absent=True)
+              api(f'/releases/tags/{tag}', absent=True)
+              # Ref creation is atomic: a concurrent publisher must fail rather than replace it.
+              api('/git/refs', {'ref': f'refs/tags/{tag}', 'sha': source})
+              release = api('/releases', {
+                  'tag_name': tag, 'target_commitish': source, 'name': f'grill-perf {version}',
+                  'draft': True, 'prerelease': True,
+                  'body': f'Reviewed source: `{source}`.\n\nRelease notes: '
+                          f'https://github.com/{repository}/blob/{source}/docs/performance/RELEASE-NOTES.md\n\n'
+                          'Archives and installed fixture summaries do not qualify a live model backend.'})
+              require(type(release['id']) is int and release['draft'] is True
+                      and release['tag_name'] == tag and release['target_commitish'] == source
+                      and not release['assets'], 'Unexpected new draft identity or assets')
+              upload_root = f"https://uploads.github.com/repos/{repository}/releases/{release['id']}/assets"
+              uploaded_assets = {}
+              for asset in assets:
+                  url = upload_root + '?' + urllib.parse.urlencode({'name': asset.name})
+                  upload_headers = {**headers, 'Content-Type': 'application/octet-stream'}
+                  request = urllib.request.Request(url, data=asset.read_bytes(), headers=upload_headers, method='POST')
+                  with urllib.request.urlopen(request) as response:
+                      uploaded = json.load(response)
+                  require(uploaded['name'] == asset.name and uploaded['size'] == asset.stat().st_size
+                          and uploaded.get('digest') == f'sha256:{digest(asset)}'
+                          and uploaded['state'] == 'uploaded',
+                          'Uploaded asset identity mismatch; leave draft for investigation')
+                  uploaded_assets[asset.name] = {key: uploaded[key] for key in ('id', 'name', 'size', 'digest', 'state')}
+              current = api(f"/releases/{release['id']}")
+              require(current['id'] == release['id'] and current['draft'] is True
+                      and current['tag_name'] == tag and current['target_commitish'] == source,
+                      'Draft identity changed; leave draft for investigation')
+              require(len(current['assets']) == len(uploaded_assets)
+                      and all({key: asset.get(key) for key in ('id', 'name', 'size', 'digest', 'state')}
+                              == uploaded_assets.get(asset['name']) for asset in current['assets'])
+                      and {asset['name'] for asset in current['assets']} == set(uploaded_assets),
+                      'Draft asset identity mismatch; leave draft for investigation')
+              ref = api(f'/git/ref/tags/{tag}')
+              require(ref['ref'] == f'refs/tags/{tag}' and ref['object']['type'] == 'commit'
+                      and ref['object']['sha'] == source, 'Tag changed; leave draft for investigation')
+              request = urllib.request.Request(api_root + f"/releases/{release['id']}", headers=headers,
+                                               data=json.dumps({'draft': False, 'make_latest': 'false'}).encode(), method='PATCH')
+              with urllib.request.urlopen(request) as response:
+                  published = json.load(response)
+              require(published['draft'] is False, 'Publication did not complete; inspect immutable state')
+              print(published['html_url'])
+
+          if __name__ == '__main__':
+              publish(validate_assets())
+          PY

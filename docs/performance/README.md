@@ -6,18 +6,13 @@ capture and assessment are separate from `grill` quality evaluation.
 
 ## Baseline, change, check
 
-The default path needs no policy file or statistical settings:
+Start with **[Install and first capture](INSTALL.md)** for the authoritative
+staged-archive/source-fallback workflow, declarations, optional unchanged control,
+candidate check, offline replay and actionable failures. There are no published
+releases yet. The default path needs no policy file or statistical settings.
+This guide is the detailed measurement and evidence reference.
 
-```sh
-target/release/grill-perf baseline --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --deployment serving-before.json --out before
-# Make the serving change yourself and record the updated declaration.
-target/release/grill-perf check before --deployment serving-after.json --change settings --out after
-# Optional: verify and recompute the result offline, without rewriting reports.
-target/release/grill-perf compare before after --json
-```
-
-Use the four-field declaration shown in the [quick start](../../README.md#speed-benchmarks):
+Use the existing declaration from [the first-run guide](INSTALL.md#supply-the-unavoidable-facts-once):
 `model_revision`, `runtime`, `hardware`, `settings`. All must be nonempty.
 Prefer meaningful revision IDs or configuration fingerprints; never put credentials
 in them. Selecting a declaration field with `--change` requires that value to
@@ -33,21 +28,15 @@ read from or attested by the server.
 
 ### Unchanged-deployment control
 
-Capture a baseline, leave the deployment unchanged, then check with the same
-declaration:
-
-```sh
-target/release/grill-perf baseline --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --deployment serving-before.json --out before
-target/release/grill-perf check before --deployment serving-before.json --change none --out control
-```
+Use the [optional control in the first-run workflow](INSTALL.md#baseline-optional-control-change-check):
+leave the deployment unchanged and check with the same declaration and
+`--change none`.
 
 Any declaration mismatch is rejected before control requests. The capture's
 `change` and report's `declared_change` serialize as `"none"` for this control,
 distinct from a baseline's absent change (`null`). Older readers may reject
 the new explicit value; existing captures and historical results are not rewritten
-or reinterpreted. Offline replay uses
-`target/release/grill-perf compare before control --json`.
+or reinterpreted. Offline replay uses the same `compare` command as a candidate.
 
 The same workload, budgets, metrics, thresholds and exit semantics apply.
 The display labels `MEASURED FASTER` and `MEASURED SLOWER` (existing JSON codes
@@ -96,6 +85,7 @@ a valid use of the reported model interval.
 |---|---|---|
 | `MEASURED FASTER` | `IMPROVED` | The model-based uncertainty range lies above zero: higher measured throughput in these capture periods |
 | `MEASURED SLOWER` | `REGRESSED` | The interval lies below zero: lower measured throughput in these periods |
+| `COMPLETE - DESCRIPTIVE ONLY` | `DESCRIPTIVE` | Explicit selection completed successfully; no default-C1 direction, equivalence or no-regression verdict |
 | `INCONCLUSIVE` | `INCONCLUSIVE` | No direction is established, variation cannot be estimated, or coverage is incomplete; this does not establish equivalence |
 | `INVALID` | `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
 
@@ -103,8 +93,8 @@ This is a presentation mapping for the capture workflow, not a new verdict
 schema. JSON result codes, numeric observations, interval calculations, thresholds
 and exit statuses are unchanged. Existing stored `report.json` and `report.txt`
 files are never migrated or renamed. New text reports and human-readable
-`compare` output use the display labels, with structured C1 (one concurrent
-request) prominent immediately below the headline. Machine consumers should
+`compare` output use the display labels, with default structured C1 or the
+explicit selected scope immediately below the headline. Machine consumers should
 continue to use the JSON codes, not parse the display text.
 
 Reports keep the observed percentage separate from the uncertainty range and
@@ -145,15 +135,15 @@ Concurrent lanes/waves are never counted as independent statistical samples.
 `baseline_ready` field describes capture readiness, not a comparison verdict.
 For default C1 `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
 or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
-treating exit 2 as a particular verdict. The advanced raw-run/policy commands
-below retain their distinct semantics.
+treating exit 2 as a particular verdict. Complete explicit selected comparisons
+instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate.
+The advanced raw-run/policy commands below retain their distinct semantics.
 
 ## Explicit selected captures
 
 Recipes use the same baseline/check lifecycle with one additional baseline
-option: `--selection MANIFEST`. See the [canonical neutral recipe](RECIPES.md)
-for declaration construction, an unchanged control, offline replay and a
-reviewed public-safe PR report. `check` has no reselection option: it verifies
+option: `--selection MANIFEST`. See [packaged workload paths](INSTALL.md#optional-selections-and-failures)
+and [recipe data and PR reporting](RECIPES.md). `check` has no reselection option: it verifies
 and inherits the baseline's retained manifest and workload, endpoint, model
 selector and credential-environment name, even outside the checkout.
 

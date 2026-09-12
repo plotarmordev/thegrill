@@ -171,7 +171,9 @@ pub fn credential(name: Option<&str>) -> Result<Option<HeaderValue>> {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err("invalid credential environment-variable name".into());
     }
-    let value = std::env::var(name).map_err(|_| "credential variable is unavailable")?;
+    let value = std::env::var(name).map_err(|_| {
+        format!("credential variable {name} is unavailable; set that named variable in this process environment before capture")
+    })?;
     if value.is_empty() || value.len() > 8192 || !value.bytes().all(|b| b.is_ascii_graphic()) {
         return Err("credential must be nonempty visible ASCII within 8192 bytes".into());
     }
@@ -190,7 +192,7 @@ pub fn client(local: bool, pool: usize) -> Result<reqwest::Client> {
         .referer(false)
         .pool_max_idle_per_host(pool)
         .build()
-        .map_err(|_| "could not construct HTTP client".into())
+        .map_err(|_| "could not construct HTTP client; verify runtime prerequisites, including a readable system CA certificate store".into())
 }
 pub fn request(
     client: &reqwest::Client,

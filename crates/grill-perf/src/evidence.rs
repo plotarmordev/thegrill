@@ -45,15 +45,26 @@ pub fn directory(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn fresh(path: &Path) -> Result<()> {
-    directory(
-        path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    )?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    directory(parent).map_err(|e| {
+        format!("{e}; create the output parent or choose an existing nonsymlink directory")
+    })?;
     fs::DirBuilder::new()
         .mode(0o700)
         .create(path)
-        .map_err(|e| format!("create fresh directory {}: {e}", path.display()))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "create fresh directory {}: {e}; choose a new output directory; existing evidence is never overwritten",
+                    path.display()
+                )
+            } else {
+                format!("create fresh directory {}: {e}", path.display())
+            }
+        })
 }
 pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new()
