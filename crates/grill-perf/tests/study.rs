@@ -229,7 +229,6 @@ fn assert_presentation(before: &Path, after: &Path, code: &str) {
         lines.next().unwrap().split(':').next(),
         Some(display_label(code))
     );
-    assert!(lines.next().unwrap().starts_with("Scope: structured C1"));
     assert_eq!(compare(before, after).stdout, machine.stdout);
     assert_eq!(fs::read(after.join("report.json")).unwrap(), stored_json);
     assert_eq!(fs::read(after.join("report.txt")).unwrap(), stored_text);
@@ -396,6 +395,9 @@ fn complete_workflow_replays_without_mutation_and_assesses_acquisition_not_wave_
             .unwrap()
             .starts_with("Scope: structured C1")
     );
+    let scope = initial["scope"].as_str().unwrap();
+    assert!(scope.contains("structured C1/exact400"), "{scope}");
+    assert!(!scope.contains("unavailable"), "{scope}");
     assert_eq!(initial["model"], "fixture");
     assert_eq!(initial["declared_change"], "settings");
     for side in ["baseline_accounting", "candidate_accounting"] {
