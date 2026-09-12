@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "concurrency-enable-thinking-v1",
+  "workload": "concurrency-enable-thinking-v1.json",
+  "source_sha256": "1b88509fecb46654d71ff04052d891bbe2a6b8c344c36530cf56c6b85160f276",
+  "workload_sha256": "3a6b63c1af01a0f3e0b800d9cb4c3b987fb1dcbc3afb945a559da02831795a84",
+  "scope": "Prospective fixed C1/C2/C4 structured ladder with explicit enable_thinking control; capacity unknown. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}

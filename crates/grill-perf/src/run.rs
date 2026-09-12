@@ -93,6 +93,9 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
     let workload: Workload =
         serde_json::from_slice(&source).map_err(|e| format!("invalid workload: {e}"))?;
     workload.validate()?;
+    if workload.version == 2 && o.policy.is_some() {
+        return Err("conversation steps have descriptive per-step semantics, not an advanced policy contract".into());
+    }
     if o.model.is_empty() || o.model.len() > 4096 || o.model.chars().any(char::is_control) {
         return Err("model must be a nonempty selector within 4096 bytes".into());
     }
@@ -134,7 +137,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
             .map_err(|_| "cannot obtain cache-salt entropy")?;
         Some(evidence::digest(&random))
     };
-    let cache_mechanism = (workload.request.profile == Profile::VllmFixedV1)
+    let cache_mechanism = (workload.request.profile != Profile::PortableChatV1)
         .then(|| "declared-vllm-prefix-cache".into());
     let policy_bytes = o
         .policy
@@ -164,6 +167,15 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
         metrics,
         policy_sha256: policy_bytes.as_deref().map(evidence::digest),
     };
+    if plan.workload.version == 2 {
+        for (case, spec) in plan.workload.cases.iter().zip(&plan.waves) {
+            if case.step.as_ref().is_some_and(|step| step.parent.is_none()) {
+                let mut root = spec.clone();
+                root.index = 0;
+                crate::sequence::State::default().request(&plan, &root, 0)?;
+            }
+        }
+    }
     if let Some(bytes) = &policy_bytes {
         crate::policy::parse(bytes, &plan).map_err(|e| e.as_str().to_owned())?;
     }
@@ -220,6 +232,9 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
 pub fn resume(root: &std::path::Path, json: bool) -> Result<Summary> {
     let _owner = lifecycle::ownership(root)?;
     let mut loaded = evidence::load(root)?;
+    if loaded.plan.workload.version == 2 {
+        return Err("bounded conversation sequences cannot resume; retain the partial sequence and start a new explicitly budgeted capture".into());
+    }
     if !matches!(loaded.plan.version, 2 | 3) {
         return Err("legacy runs cannot be resumed; no execution-session provenance".into());
     }
@@ -304,6 +319,7 @@ fn collect(
         let metrics_client = plan.metrics.as_ref().map(|_| wire::client(plan.local_http, 1)).transpose()?;
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|_| "cannot subscribe to interrupt signal")?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
+        let mut sequence = crate::sequence::State::default();
         for spec in &plan.waves[first_wave..] {
             if interrupted() { summary.status = "interrupted".into(); break; }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
@@ -316,7 +332,7 @@ fn collect(
             };
             if lifecycle::requested(&session_dir)? { summary.status = "paused".into(); break; }
             let preparation = Instant::now();
-            let requests: Vec<_> = (0..spec.concurrency).map(|lane| wire::request_body(plan, spec, lane)).collect::<Result<_>>()?;
+            let requests: Vec<_> = (0..spec.concurrency).map(|lane| sequence.request(plan, spec, lane)).collect::<Result<_>>()?;
             let hashes = requests.iter().map(|r| evidence::digest(r.as_bytes())).collect();
             let reservation = Reservation { version: 1, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
             if interrupted() { summary.status = "interrupted".into(); break; }
@@ -330,7 +346,8 @@ fn collect(
             drop(reserved);
             drop(admission);
             let reservation_publication_us = wire::us(reservation_start);
-            let prepared: Vec<_> = reservation.requests.into_iter().map(|body| wire::request(&client, &url, auth.as_ref(), body, plan.workload.request.stream)).collect::<Result<_>>()?;
+            let settings = crate::sequence::settings(&plan.workload, spec);
+            let prepared: Vec<_> = reservation.requests.into_iter().map(|body| wire::request(&client, &url, auth.as_ref(), body, settings.stream)).collect::<Result<_>>()?;
             let telemetry_start = plan.metrics.as_ref().map(|_| Instant::now());
             let before = match (&plan.metrics, &metrics_client) {
                 (Some(config), Some(client)) => Some(metrics::scrape(client, config, &mut metrics_budget, &dir, "before").await?),
@@ -343,7 +360,7 @@ fn collect(
             let measured_origin_unix_ms = plan.metrics.as_ref().map(|_| metrics::unix_ms());
             let origin = Instant::now();
             for (lane, request) in prepared.into_iter().enumerate() {
-                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), plan.workload.request.clone(), lane as u32, (origin, deadline), cancellation.clone()));
+                tasks.spawn(wire::collect(client.clone(), request, plan.workload.limits.clone(), settings.clone(), lane as u32, (origin, deadline), cancellation.clone()));
             }
             let mut settled = Vec::with_capacity(spec.concurrency as usize);
             while !tasks.is_empty() {
@@ -388,7 +405,8 @@ fn collect(
                     a.timing.terminal_us = None;
                 }
                 a.response_sha256 = evidence::digest(&collected.body);
-                a.eligibility_errors = eligibility(&a, &plan.workload.request, spec.phase);
+                a.sequence = sequence.observe(plan, spec, &a, &collected.body)?;
+                a.eligibility_errors = eligibility(&a, &settings, spec.phase);
                 evidence::write(&dir.join(format!("response-{:04}.bin", a.lane)), &collected.body)?;
                 attempts.push(a);
             }
@@ -406,6 +424,9 @@ fn collect(
             if spec.phase == Phase::Measured { summary.measured_waves += 1; summary.eligible_measured_waves += usize::from(eligible); }
             if spec.phase == Phase::Warmup && !eligible { summary.ineligible_warmup_waves += 1; }
             if !json { eprintln!("{} trial {}: {}", spec.cell, spec.trial, if eligible { "eligible" } else { "ineligible; evidence retained" }); }
+            if wave.attempts.iter().any(|a| a.status == Status::Complete && a.sequence.as_ref().is_some_and(|check| !crate::sequence::passed(check))) {
+                summary.status = "stopped-after-sequence-check".into(); break;
+            }
             let budget_expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
             let invalid_response = wave.attempts.iter().any(irrevocable_invalid);
             if plan.version >= 3 && (invalid_response || (!eligible && wave.attempts.iter().all(|a| a.status == Status::Complete))) {

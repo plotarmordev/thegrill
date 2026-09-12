@@ -143,10 +143,129 @@ Concurrent lanes/waves are never counted as independent statistical samples.
 
 `baseline` exits 0 when ready, 2 when incomplete and 1 when invalid; its
 `baseline_ready` field describes capture readiness, not a comparison verdict.
-For `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
+For default C1 `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
 or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
 treating exit 2 as a particular verdict. The advanced raw-run/policy commands
 below retain their distinct semantics.
+
+## Explicit selected captures
+
+Recipes use the same baseline/check lifecycle with one additional baseline
+option: `--selection MANIFEST`. See the [canonical neutral recipe](RECIPES.md)
+for declaration construction, an unchanged control, offline replay and a
+reviewed public-safe PR report. `check` has no reselection option: it verifies
+and inherits the baseline's retained manifest and workload, endpoint, model
+selector and credential-environment name, even outside the checkout.
+
+Selection manifests use a separate closed schema, not the frozen four-entry
+`bundle verify` manifest. Every field is required:
+
+| Field | Contract |
+|---|---|
+| `version` | integer `1` |
+| `id` | nonempty ASCII letters/digits/hyphen/underscore, at most 64 bytes |
+| `workload` | one leaf filename beside the manifest; no traversal or symlinks |
+| `source_sha256` | lowercase SHA-256 of exact workload bytes |
+| `workload_sha256` | lowercase SHA-256 of compact typed Workload serialization |
+| `scope` | nonblank control-free text, at most 256 bytes |
+| `operation_scope` | closed enum `normal`, `stress`, or `unknown` |
+
+The manifest is bounded to 64 KiB and the workload to the existing native
+admission limits. There is no provider registry, model-name mapping or field
+stripping. Any natively validated bounded workload may be selected, including
+the separately versioned [conversation profile](CONVERSATIONS.md). Unsupported schema/controls,
+missing deployment declarations, unsafe paths and pin drift fail before
+requests. Offline validation detects declared incompatibilities, not whether a
+backend actually implements a control. Backend rejection is retained without
+retry or weaker fallback.
+
+Selected captures use `performance-capture-v2`; `selection_sha256` binds the
+exact retained `selection.json`, which pins raw and normalized workload digests.
+Native acquisitions retain their own source, workload and collector identities.
+Any manifest byte change, scope change, control change, workload membership
+change or collector mismatch prevents comparison. Membership changes are
+prospective: approve a new selection and acquire a new baseline rather than
+removing an inconvenient cell after collection. The built-in default has no
+selection manifest and continues to write capture v1 with its original
+structured-C1 inference. Explicitly selecting even that C1 workload is a
+different descriptive identity and never enables the default inference.
+
+For v2, report fields `baseline_capture_sha256`/`candidate_capture_sha256` and
+the candidate's `baseline_sha256` bind the capture **and** its timing receipt:
+SHA-256 of `grill-perf-selected-capture-v2` followed by a NUL byte, the lowercase
+raw `capture.json` SHA-256 hex, then the exact `capture-timing.json` bytes.
+`CaptureTiming.capture_sha256` itself remains the raw capture-file digest.
+Timing changes break an existing candidate link; impossible elapsed observations
+below retained native timing bounds are rejected. Default v1 identity remains the
+raw capture-file digest.
+
+### Small concurrency ladder
+
+The new [concurrency selection](../../crates/grill-perf/examples/concurrency-selection-v1.json)
+pins C1/C2/C4 cells. Each cell has one warmup and three measured waves per
+acquisition; eight acquisitions allow **56 warmup + 168 measured = 224 requests**
+and **14,336 requested output tokens**. Output is exactly 64 tokens, with
+temperature zero, top_p one, seed zero and the legacy thinking-off control.
+The [enable-thinking variant](../../crates/grill-perf/examples/concurrency-enable-thinking-selection-v1.json)
+changes only the workload name and explicit thinking-control spelling; it is
+not an interchangeable workload identity.
+
+Both freeze the prompt `Count from 1 to 32. Output only the numbers, separated
+by spaces. No other text.` in every lane. No suffixes or model-dependent
+prompts are introduced. Native seed scheduling remains base seed plus trial
+times 64 plus lane. All warmups precede measured cells in declared cell/trial
+order; each admitted wave settles before publication and the next wave.
+`cache: observe` allows prefix sharing and does not establish cold state.
+The declared operation scope is **unknown capacity**, not a normal-operation
+guarantee. A deliberate stress selection must say `stress`; neither declaration
+establishes an SLO or safe production concurrency.
+
+Preflight prints controls, cell membership, warmups/trials/concurrency, total
+request/output allowances and native time/buffer limits before collection.
+With `--json`, preflight goes to stderr and the result remains JSON on stdout.
+The default whole-capture allowance is still 300 seconds; the exact ladder
+requires more than 47.8 output tokens/s including overhead to finish within it.
+Select an affordable `--seconds` allowance prospectively; no automatic
+capacity search, retries or replacement samples occur.
+
+One deadline starts before setup and governs all native acquisitions.
+`capture-timing.json` records elapsed time through publication of `capture.json`,
+including setup, validation, native collection and publication. An observed
+overrun makes the selected capture incomplete even if every native acquisition
+completed. Its final timing receipt and report publication are outside that
+observation boundary; filesystem and OS stalls have no hard completion
+guarantee. These observations are not a universal overhead correction.
+
+See [the finite offline C1 calibration](CALIBRATION.md) for measured simulation
+coverage and its assumptions. It does not qualify concurrency or history inference.
+
+### Selected reports
+
+Selected reports use comparison v2 and retain `selected.manifest`, its digest,
+controls, limits, ordered cells, baseline/candidate timing receipts and native
+per-acquisition summaries. Each acquisition retains all native cell summaries
+and ordered waves with complete per-lane status, usage, timing and errors,
+including failed/partial lanes and sequence metadata. Missing waves remain null;
+unstarted acquisition slots remain in `capture.json`, not replacement samples.
+
+Read each cell separately: planned/observed/eligible trial counts, first generated
+and first answer text, terminal/settlement latency, dispatch spread, whole-wave
+makespan, aggregate achieved throughput, per-stream settlement decode and
+text-window decode rates. These retain the [native boundaries](#interpret-the-result);
+decode-only rates are not whole-wave throughput. Undefined metrics remain null.
+Sparse trial counts do not support production p95/p99 claims. Concurrent lanes
+share a wave and are not independent acquisitions; cells are never pooled.
+
+Complete, valid selected comparisons emit `DESCRIPTIVE` (exit 0) and the terminal
+banner **COMPLETE - DESCRIPTIVE ONLY**, not `INCONCLUSIVE` or a performance PASS.
+`baseline` exits 0 when ready and labels selected observations descriptive-only.
+Invalid evidence remains `INVALID`/exit 1; incomplete captures remain
+`INCONCLUSIVE`/exit 2. This completion result belongs to selected comparison v2,
+not historical C1 inference or the advanced policy engine. No pooled percentage,
+C1 model interval, stronger directional
+label, equivalence or noninferiority claim is produced. Sequence correctness
+and strict-format checks remain distinct from native performance eligibility.
+Raw evidence, endpoints and declarations are private by default.
 
 ## Captured observed-envelope policy
 

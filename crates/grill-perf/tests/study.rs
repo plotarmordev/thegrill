@@ -12,6 +12,11 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "support/conversation.rs"]
+mod conversation;
+#[path = "support/selection.rs"]
+mod selection;
+
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 struct Temp(PathBuf);
 impl Temp {

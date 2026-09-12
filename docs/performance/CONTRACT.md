@@ -1,6 +1,6 @@
 # Performance measurement contract
 
-Workloads and wave receipts remain v1. New execution plans are v3, declaring
+Existing workloads and wave receipts retain v1 meaning. Execution plans are v3, declaring
 `metric_contract: "generated-text-arrival-v2"` and retaining last generated-text
 and terminal observations. Execution-session provenance remains mandatory.
 Legacy v1/v2 plans stay readable with their original timing semantics and no
@@ -15,6 +15,19 @@ The separate [baseline/check contract](README.md#baseline-change-check) wraps
 verified native runs in versioned capture manifests. Its capture-period
 assessment is not the captured observed-envelope policy below. Historical
 policies, gates and verdicts retain their meanings.
+
+Explicit [selected captures](README.md#explicit-selected-captures) use capture v2,
+pin their workload/control selection and include the final timing receipt in
+comparison identity. They do not inherit structured-C1 inference.
+[Conversation workload v2](CONVERSATIONS.md) adds bounded ordered case steps and
+the sole `vllm-conversation-v2` profile (streamed factual steps, nonstream tool
+steps); wave receipts remain v1 with an
+optional `Attempt.sequence` check omitted for ordinary workloads. Its stable
+history salts and actual parent-output replay do not reinterpret v1 filled prompts.
+Semantic/strict checks are separate from performance eligibility; either failed
+admission requirement stops the sequence. Native per-cell observations from a
+valid prefix remain descriptive, not qualification of a failed whole sequence.
+Conversation workloads do not accept captured policies or continuation.
 
 ## Captured policy decisions
 
@@ -36,6 +49,9 @@ schema, exact checked rational arithmetic, complete-coverage requirements,
 reference-spread gate, outcome precedence and command-specific exits.
 
 ## Workload admission
+
+This section describes unchanged workload v1 admission. Workload v2 adds the
+explicit conversation restrictions linked above rather than weakening v1 profiles.
 
 The workload has `version`, `name`, `request`, `limits`, `cases` and `cells`.
 See the complete [portable example](../../crates/grill-perf/examples/quick.json).
@@ -169,8 +185,11 @@ This is achieved fixed-wave throughput, not maximum or steady-state capacity.
 Only HTTP 200 with the declared JSON/SSE content type and identity encoding is
 parsed. Records must be objects, choices must contain at most one choice and
 only index zero is supported. Text/refusal/tool/audio ambiguity is not repaired.
-This initial performance profile is text-only; tools and refusals are retained
-as unsupported results rather than graded or silently ignored.
+The original `portable-chat-v1`/`vllm-fixed-v1` response profiles remain text-only;
+tools and refusals are retained as unsupported results, not silently ignored.
+Only explicit conversation profiles permit the bounded full nonstreaming
+tool-call object described in their contract. No streamed tool-delta
+assembly or arbitrary tool execution is supported.
 
 A streaming response needs a supported `stop`/`length` finish followed by a framed
 `[DONE]`. EOF does not finish an unclosed event. Usage-only events after finish are
@@ -455,10 +474,17 @@ metric-specific absence or overlap alone does not change cell eligibility.
 Run the real CLI fixture regressions and strict package checks:
 
 ```sh
-cargo test -p grill-perf --locked
+cargo test -p grill-perf --locked -- --test-threads=1
 cargo clippy -p grill-perf --locked --all-targets -- -D warnings
 cargo fmt --all --check
 ```
+
+CI likewise serializes the test harness (`cargo test --workspace --locked --
+--test-threads=1`). These socket fixtures assert short timeout and timing
+relationships; running unrelated fixtures simultaneously can exhaust deadlines
+or overlap ranges through host contention. Request lanes inside a fixture remain
+concurrent, so overlap, peer settlement and publication barriers are still
+exercised. This changes neither collector limits nor benchmark scheduling.
 
 The explicit release-mode overhead experiment is:
 

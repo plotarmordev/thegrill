@@ -1,5 +1,18 @@
 # Shared recipe workflow
 
+For recipe-facing baseline/change/check integration, use the
+[canonical model-agnostic recipe](RECIPES.md). Its explicit selection manifest
+is separate from the historical bundle described below; no existing bundle
+entry, workload byte or advanced-policy result is reinterpreted.
+
+The small selected concurrency examples preserve the recipe control distinction:
+`concurrency-selection-v1.json` requests `chat_template_kwargs.thinking: false`;
+`concurrency-enable-thinking-selection-v1.json` requests
+`chat_template_kwargs.enable_thinking: false`. Select according to an explicitly
+qualified template, never from the model name. A neutral third recipe uses the
+same path without adding a mapping. These are descriptive selected captures,
+not the original sparkDash workload or its observed-envelope decision policy.
+
 The checked-in [recipe manifest](../../crates/grill-perf/examples/recipes-v1.json)
 selects the frozen sparkDash decode/prefill workloads for DeepSeek and materialized
 GLM variants. The GLM variants change only the workload name and the explicit

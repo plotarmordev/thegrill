@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "concurrency-v1",
+  "workload": "concurrency-v1.json",
+  "source_sha256": "e0077330e5ccf9d3fc1168963fc5022c8045c8ce33b2cce5e4f5908bf0c440e9",
+  "workload_sha256": "9e725e5adf271bd10215975c004f274c2923a80ddad7ef9bd8dce1765c72a112",
+  "scope": "Prospective fixed C1/C2/C4 structured ladder; capacity unknown, not a normal-operation or tail-SLO qualification. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}

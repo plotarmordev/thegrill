@@ -253,12 +253,14 @@ pub fn history(
                     | "local-failure"
                     | "budget-exhausted"
                     | "stopped-after-ineligible-response"
+                    | "stopped-after-sequence-check"
             ) || (end.status.starts_with("completed") && end_wave != plan.waves.len())
                 || (plan.version < 3
                     && matches!(
                         end.status.as_str(),
                         "budget-exhausted" | "stopped-after-ineligible-response"
                     ))
+                || (end.status == "stopped-after-sequence-check" && plan.workload.version != 2)
             {
                 return Err("invalid session terminal status".into());
             }

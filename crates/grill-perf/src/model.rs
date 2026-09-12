@@ -25,6 +25,7 @@ pub enum Role {
 pub enum Profile {
     PortableChatV1,
     VllmFixedV1,
+    VllmConversationV2,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -82,6 +83,8 @@ pub struct Case {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fill: Option<Fill>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<crate::sequence::Step>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -116,12 +119,13 @@ pub(crate) fn identifier(s: &str) -> bool {
 }
 impl Workload {
     pub fn salted(&self) -> bool {
-        self.cases.iter().any(|case| case.fill.is_some())
+        self.version == 2 || self.cases.iter().any(|case| case.fill.is_some())
     }
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1 || !identifier(&self.name) {
-            return Err("expected workload version 1 and a short ASCII name".into());
+        if !matches!(self.version, 1 | 2) || !identifier(&self.name) {
+            return Err("expected workload version 1 or 2 and a short ASCII name".into());
         }
+        crate::sequence::validate(self)?;
         if self.cases.is_empty()
             || self.cases.len() > 128
             || self.cells.is_empty()
@@ -463,7 +467,7 @@ pub enum Status {
     Interrupted,
     TransportError,
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Attempt {
     pub lane: u32,
@@ -479,6 +483,8 @@ pub struct Attempt {
     pub terminal_offset: Option<usize>,
     pub surplus_observed_bytes: usize,
     pub eligibility_errors: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<crate::sequence::Check>,
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

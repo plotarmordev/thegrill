@@ -5,6 +5,8 @@ mod metrics;
 mod model;
 mod policy;
 mod run;
+mod selection;
+mod sequence;
 mod study;
 mod wire;
 
@@ -24,7 +26,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Record the fixed quick baseline with complete native evidence.
+    /// Record the default or explicitly selected bounded workload with native evidence.
     Baseline(study::BaselineOptions),
     /// Compare a declared serving change using the verified baseline settings.
     Check(study::CheckOptions),
@@ -64,6 +66,8 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum BundleCommand {
+    /// Validate one workload and print its typed pins and per-run budgets offline.
+    Inspect { workload: PathBuf },
     Verify {
         manifest: PathBuf,
         #[arg(long)]
@@ -107,6 +111,25 @@ fn execute(cli: Cli) -> model::Result<u8> {
             } else {
                 bundle::show(&verification);
             }
+            Ok(0)
+        }
+        Command::Bundle {
+            command: BundleCommand::Inspect { workload },
+        } => {
+            let source = evidence::read(&workload, model::FILE_CAP)?;
+            let admitted = selection::workload(&source)?;
+            let (warmup, measured, tokens) = selection::budgets(&admitted, 1)?;
+            print_json(&serde_json::json!({
+                "claim":"offline-declared-workload-not-backend-qualification",
+                "source_sha256":evidence::digest(&source),
+                "workload_sha256":evidence::digest(&serde_json::to_vec(&admitted).map_err(|e| e.to_string())?),
+                "name":admitted.name,
+                "request":admitted.request,
+                "warmup_requests":warmup,
+                "measured_requests":measured,
+                "total_output_token_ceiling":tokens,
+                "limits":admitted.limits
+            }))?;
             Ok(0)
         }
         Command::Pause { run } => {

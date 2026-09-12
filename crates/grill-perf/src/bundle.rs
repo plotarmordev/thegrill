@@ -91,13 +91,13 @@ pub struct Verification {
     entries: Vec<VerifiedEntry>,
     recipes: Recipes,
 }
-fn sha256(value: &str) -> bool {
+pub(crate) fn sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
-fn root(manifest: &Path) -> Result<PathBuf> {
+pub(crate) fn root(manifest: &Path) -> Result<PathBuf> {
     let parent = manifest
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
