@@ -1,4 +1,4 @@
-use crate::{evidence, model::*, run, wire};
+use crate::{evidence, model::*, run, selection, wire};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,6 +10,9 @@ const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
 const ASSUMPTIONS: &str = "Model-based interval assumes stable, independent acquisition-level variation and an adequate log-scale mean model. Resetting a client does not prove independence. Positive autocorrelation can make the interval narrower than justified, increasing false directional conclusions. Sequential captures cannot remove time or carryover confounding; no causal attribution, equivalence, noninferiority, or guaranteed precision/power is established.";
 const SCOPE: &str = "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed.";
 const UNCHANGED_SCOPE: &str = "Unchanged-deployment control: any directional result is an observed capture-period shift requiring repeatability investigation, not evidence of a serving-change effect. An inconclusive result does not establish equality or repeatability.";
+const SELECTED_SCOPE: &str = "Explicit selected workload: descriptive per-cell/acquisition observations only. No pooled improvement, C1 inference, capacity, tail-SLO, equivalence or causal claim; concurrent lanes are correlated, not independent acquisitions.";
+const OVERHEAD_STOP: &str =
+    "whole-capture time allowance exhausted during setup or publication overhead";
 
 #[derive(clap::Args)]
 pub struct BaselineOptions {
@@ -25,6 +28,9 @@ pub struct BaselineOptions {
     pub local_http: bool,
     #[arg(long)]
     pub auth_env: Option<String>,
+    /// Pin an explicit bounded workload and descriptive scope; check inherits it.
+    #[arg(long)]
+    pub selection: Option<PathBuf>,
     /// Whole-capture ceiling, including warmups; per-request limits remain fixed.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub seconds: u64,
@@ -101,6 +107,8 @@ struct Capture {
     status: CaptureStatus,
     stop_reason: Option<String>,
     acquisitions: Vec<Acquisition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selection_sha256: Option<String>,
 }
 
 struct Verified {
@@ -110,6 +118,8 @@ struct Verified {
     observations: Vec<f64>,
     accounting: Accounting,
     first_failure: Option<Failure>,
+    selected: Option<SelectedReport>,
+    complete_acquisitions: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -122,7 +132,7 @@ pub struct Accounting {
     pub request_ceiling: usize,
     pub output_token_ceiling: usize,
     pub allowance_seconds: u64,
-    pub minimum_full_capture_tokens_per_second: f64,
+    pub minimum_full_capture_tokens_per_second: Option<f64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -147,7 +157,38 @@ pub enum Outcome {
     Improved,
     Regressed,
     Inconclusive,
+    Descriptive,
     Invalid,
+}
+
+#[derive(Serialize)]
+pub struct AcquisitionReport {
+    pub acquisition: usize,
+    pub status: String,
+    pub cells: Vec<evidence::CellSummary>,
+    pub waves: Vec<Option<Wave>>,
+    pub summary: run::Summary,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureTiming {
+    pub version: u32,
+    pub capture_sha256: String,
+    pub elapsed_through_capture_publication_us: u64,
+}
+
+#[derive(Serialize)]
+pub struct SelectedReport {
+    pub manifest: selection::Manifest,
+    pub manifest_sha256: String,
+    pub request: RequestSettings,
+    pub limits: Limits,
+    pub cells: Vec<Cell>,
+    pub baseline_acquisitions: Vec<AcquisitionReport>,
+    pub candidate_acquisitions: Vec<AcquisitionReport>,
+    pub baseline_timing: CaptureTiming,
+    pub candidate_timing: Option<CaptureTiming>,
 }
 
 #[derive(Serialize)]
@@ -182,6 +223,8 @@ pub struct Report {
     pub first_failure: Option<Failure>,
     pub assumptions: &'static str,
     pub scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<SelectedReport>,
 }
 
 impl Report {
@@ -217,6 +260,7 @@ impl Report {
             first_failure: None,
             assumptions: ASSUMPTIONS,
             scope: SCOPE,
+            selected: None,
         }
     }
 
@@ -234,7 +278,7 @@ impl Report {
     pub fn exit(&self) -> u8 {
         match self.result {
             Outcome::Invalid => 1,
-            Outcome::Improved => 0,
+            Outcome::Improved | Outcome::Descriptive => 0,
             Outcome::Inconclusive if self.baseline_ready => 0,
             Outcome::Regressed | Outcome::Inconclusive => 2,
         }
@@ -288,7 +332,7 @@ fn directory(index: usize) -> String {
     format!("acquisition-{index:02}")
 }
 
-fn inspect(loaded: &evidence::Loaded) -> Result<(CaptureStatus, Option<f64>)> {
+fn inspect(loaded: &evidence::Loaded, selected: bool) -> Result<(CaptureStatus, Option<f64>)> {
     if loaded.history.count != 1 || loaded.history.open {
         return Err("acquisition must have exactly one settled native execution session; no continuation or missing receipts".into());
     }
@@ -299,6 +343,15 @@ fn inspect(loaded: &evidence::Loaded) -> Result<(CaptureStatus, Option<f64>)> {
         .ok_or("missing acquisition outcome")?;
     let mut interrupted = false;
     for wave in loaded.waves.iter().flatten() {
+        if wave.attempts.iter().any(|attempt| {
+            attempt.status == Status::Complete
+                && attempt
+                    .sequence
+                    .as_ref()
+                    .is_some_and(|check| !crate::sequence::passed(check))
+        }) {
+            return Ok((CaptureStatus::Invalid, None));
+        }
         if !wave.eligible {
             for attempt in &wave.attempts {
                 if run::irrevocable_invalid(attempt) {
@@ -318,6 +371,9 @@ fn inspect(loaded: &evidence::Loaded) -> Result<(CaptureStatus, Option<f64>)> {
         }
     }
     if status == "completed" && !interrupted {
+        if selected {
+            return Ok((CaptureStatus::Complete, None));
+        }
         let summaries = evidence::summarize(loaded);
         let median = summaries
             .first()
@@ -333,17 +389,31 @@ fn inspect(loaded: &evidence::Loaded) -> Result<(CaptureStatus, Option<f64>)> {
     }
 }
 
+fn selected_identity(capture_sha256: &str, timing: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"grill-perf-selected-capture-v2\0");
+    hash.update(capture_sha256.as_bytes());
+    hash.update(timing);
+    evidence::hex(&hash.finalize())
+}
+
 fn load(root: &Path) -> Result<Verified> {
     evidence::directory(root)?;
     let bytes = evidence::read(&root.join("capture.json"), FILE_CAP)?;
-    let manifest: Capture =
+    let capture_sha256 = evidence::digest(&bytes);
+    let mut identity = capture_sha256.clone();
+    let mut manifest: Capture =
         serde_json::from_slice(&bytes).map_err(|e| format!("invalid capture manifest: {e}"))?;
-    if manifest.version != 1
-        || manifest.kind != "performance-capture-v1"
-        || manifest.metric_contract != METRIC_CONTRACT
+    if !matches!(
+        (
+            manifest.version,
+            manifest.kind.as_str(),
+            manifest.selection_sha256.is_some()
+        ),
+        (1, "performance-capture-v1", false) | (2, "performance-capture-v2", true)
+    ) || manifest.metric_contract != METRIC_CONTRACT
         || manifest.acquisitions.len() != ACQUISITIONS
-        || manifest.request_ceiling != ACQUISITIONS * 4
-        || manifest.output_token_ceiling != ACQUISITIONS * 4 * 400
         || !(1..=3600).contains(&manifest.seconds)
         || manifest.baseline_sha256.is_some() != manifest.change.is_some()
         || manifest.collector_sha256.len() != 64
@@ -355,8 +425,44 @@ fn load(root: &Path) -> Result<Verified> {
         return Err("unsupported or incompatible capture contract".into());
     }
     let workload = evidence::read(&root.join("workload.json"), FILE_CAP)?;
-    if workload != WORKLOAD || evidence::digest(&workload) != manifest.workload_sha256 {
-        return Err("capture workload differs from the fixed baseline workload or its hash".into());
+    if evidence::digest(&workload) != manifest.workload_sha256 {
+        return Err("capture workload source hash mismatch".into());
+    }
+    let mut selected = if let Some(hash) = &manifest.selection_sha256 {
+        let bytes = evidence::read(&root.join("selection.json"), selection::CAP)?;
+        if evidence::digest(&bytes) != *hash {
+            return Err("capture selection manifest hash mismatch".into());
+        }
+        let selection = selection::parse(&bytes, &workload)?;
+        let workload = selection::workload(&workload)?;
+        let timing_bytes = evidence::read(&root.join("capture-timing.json"), FILE_CAP)?;
+        let timing: CaptureTiming = serde_json::from_slice(&timing_bytes)
+            .map_err(|e| format!("invalid capture timing receipt: {e}"))?;
+        if timing.version != 1 || timing.capture_sha256 != capture_sha256 {
+            return Err("capture timing receipt does not bind this capture".into());
+        }
+        identity = selected_identity(&capture_sha256, &timing_bytes);
+        Some(SelectedReport {
+            manifest: selection,
+            manifest_sha256: hash.clone(),
+            request: workload.request,
+            limits: workload.limits,
+            cells: workload.cells,
+            baseline_acquisitions: Vec::new(),
+            candidate_acquisitions: Vec::new(),
+            baseline_timing: timing,
+            candidate_timing: None,
+        })
+    } else {
+        if workload != WORKLOAD {
+            return Err("capture workload differs from the fixed baseline workload".into());
+        }
+        None
+    };
+    let admitted_workload = selection::workload(&workload)?;
+    let (warmup, measured, tokens) = selection::budgets(&admitted_workload, ACQUISITIONS)?;
+    if manifest.request_ceiling != warmup + measured || manifest.output_token_ceiling != tokens {
+        return Err("capture ceilings differ from the pinned workload schedule".into());
     }
     let deployment_bytes = evidence::read(&root.join("deployment.json"), 32 * 1024)?;
     if evidence::digest(&deployment_bytes) != manifest.deployment_sha256 {
@@ -366,6 +472,7 @@ fn load(root: &Path) -> Result<Verified> {
     wire::endpoint(&manifest.endpoint, manifest.local_http)?;
     let mut observations = Vec::with_capacity(ACQUISITIONS);
     let mut first_failure = None;
+    let mut complete_acquisitions = 0;
     let mut stopped = false;
     let mut observed_status = CaptureStatus::Complete;
     let mut identities = std::collections::HashSet::new();
@@ -380,8 +487,9 @@ fn load(root: &Path) -> Result<Verified> {
         request_ceiling: manifest.request_ceiling,
         output_token_ceiling: manifest.output_token_ceiling,
         allowance_seconds: manifest.seconds,
-        minimum_full_capture_tokens_per_second: manifest.output_token_ceiling as f64
-            / manifest.seconds as f64,
+        minimum_full_capture_tokens_per_second: (admitted_workload.request.output.mode
+            == OutputMode::Exact)
+            .then_some(manifest.output_token_ceiling as f64 / manifest.seconds as f64),
     };
     for (index, acquisition) in manifest.acquisitions.iter().enumerate() {
         if acquisition.directory != directory(index) {
@@ -424,6 +532,7 @@ fn load(root: &Path) -> Result<Verified> {
             || plan.metric_contract.as_deref() != Some(METRIC_CONTRACT)
             || plan.collector_sha256 != manifest.collector_sha256
             || plan.source_sha256 != manifest.workload_sha256
+            || plan.workload != admitted_workload
             || plan.deployment.as_ref() != Some(&deployment)
             || plan.endpoint != manifest.endpoint
             || plan.model != manifest.model
@@ -475,7 +584,12 @@ fn load(root: &Path) -> Result<Verified> {
                 wave.attempts
                     .iter()
                     .find(|attempt| {
-                        attempt.status != Status::Complete || !attempt.eligibility_errors.is_empty()
+                        attempt.status != Status::Complete
+                            || !attempt.eligibility_errors.is_empty()
+                            || attempt
+                                .sequence
+                                .as_ref()
+                                .is_some_and(|check| !crate::sequence::passed(check))
                     })
                     .map(|attempt| Failure {
                         acquisition: index,
@@ -513,7 +627,8 @@ fn load(root: &Path) -> Result<Verified> {
                 }
             }
         }
-        let (status, median) = inspect(&loaded)?;
+        let (status, median) = inspect(&loaded, selected.is_some())?;
+        complete_acquisitions += usize::from(status == CaptureStatus::Complete);
         if median != acquisition.median_achieved_completion_tokens_per_second {
             return Err("acquisition median differs from verified native evidence".into());
         }
@@ -524,12 +639,61 @@ fn load(root: &Path) -> Result<Verified> {
             observed_status = status;
             stopped = true;
         }
+        if let Some(selected) = &mut selected {
+            selected.baseline_acquisitions.push(AcquisitionReport {
+                acquisition: index,
+                status: loaded.history.last_status.clone().unwrap_or_default(),
+                cells: evidence::summarize(&loaded),
+                summary: serde_json::from_slice(&evidence::read(&path.join("run.json"), FILE_CAP)?)
+                    .map_err(|e| format!("invalid native summary: {e}"))?,
+                waves: loaded.waves,
+            });
+        }
     }
     // A local publication/preparation error may occur before any native receipt exists.
     if manifest.status != observed_status
         && !(manifest.status == CaptureStatus::Invalid && manifest.stop_reason.is_some())
+        && !(manifest.version == 2
+            && manifest.status == CaptureStatus::Incomplete
+            && manifest.stop_reason.as_deref() == Some(OVERHEAD_STOP))
     {
         return Err("capture completion claim contradicts acquisition coverage".into());
+    }
+    if let Some(selected) = &selected {
+        let lower = selected
+            .baseline_acquisitions
+            .iter()
+            .try_fold(0u64, |total, acquisition| {
+                let wave_time = acquisition
+                    .waves
+                    .iter()
+                    .flatten()
+                    .try_fold(0u64, |sum, wave| sum.checked_add(wave.elapsed_us))?;
+                total
+                    .checked_add(wave_time)?
+                    .checked_add(acquisition.summary.wave_preparation_us)?
+                    .checked_add(acquisition.summary.wave_publication_us)
+            })
+            .ok_or("capture native elapsed accounting overflows")?;
+        if selected
+            .baseline_timing
+            .elapsed_through_capture_publication_us
+            < lower
+        {
+            return Err(
+                "capture elapsed observation is below retained native timing bounds".into(),
+            );
+        }
+    }
+    if selected.as_ref().is_some_and(|selected| {
+        selected
+            .baseline_timing
+            .elapsed_through_capture_publication_us
+            >= manifest.seconds * 1_000_000
+    }) && manifest.status == CaptureStatus::Complete
+    {
+        manifest.status = CaptureStatus::Incomplete;
+        manifest.stop_reason = Some(OVERHEAD_STOP.into());
     }
     for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
         let name = entry.map_err(|e| e.to_string())?.file_name();
@@ -544,11 +708,13 @@ fn load(root: &Path) -> Result<Verified> {
         .then_some(accounting.known_reported_completion_tokens);
     Ok(Verified {
         manifest,
-        sha256: evidence::digest(&bytes),
+        sha256: identity,
         deployment,
         observations,
         accounting,
         first_failure,
+        selected,
+        complete_acquisitions,
     })
 }
 
@@ -559,8 +725,19 @@ fn unix_ms() -> Result<u64> {
     u64::try_from(duration.as_millis()).map_err(|_| "system clock exceeds timestamp range".into())
 }
 
-fn collect(root: &Path, mut manifest: Capture, deployment: &[u8], deadline: Instant) -> Result<()> {
-    evidence::write(&root.join("workload.json"), WORKLOAD)?;
+fn collect(
+    root: &Path,
+    mut manifest: Capture,
+    deployment: &[u8],
+    workload: &[u8],
+    selection: Option<&[u8]>,
+    deadline: Instant,
+) -> Result<()> {
+    let started = deadline - Duration::from_secs(manifest.seconds);
+    evidence::write(&root.join("workload.json"), workload)?;
+    if let Some(bytes) = selection {
+        evidence::write(&root.join("selection.json"), bytes)?;
+    }
     evidence::write(&root.join("deployment.json"), deployment)?;
     for index in 0..ACQUISITIONS {
         if Instant::now() >= deadline {
@@ -585,7 +762,7 @@ fn collect(root: &Path, mut manifest: Capture, deployment: &[u8], deadline: Inst
         let finished_unix_ms = unix_ms()?;
         match evidence::load(&options.out) {
             Ok(loaded) => {
-                let (status, median) = match inspect(&loaded) {
+                let (status, median) = match inspect(&loaded, manifest.selection_sha256.is_some()) {
                     Ok(observation) => observation,
                     Err(error) => {
                         manifest.stop_reason = Some(error);
@@ -626,7 +803,39 @@ fn collect(root: &Path, mut manifest: Capture, deployment: &[u8], deadline: Inst
             evidence::fresh(&path)?;
         }
     }
-    evidence::publish(root, "capture.json", &manifest)
+    finalize_capture(root, manifest, || started.elapsed())
+}
+
+fn finalize_capture(
+    root: &Path,
+    mut manifest: Capture,
+    mut elapsed: impl FnMut() -> Duration,
+) -> Result<()> {
+    if manifest.selection_sha256.is_some()
+        && manifest.status == CaptureStatus::Complete
+        && elapsed() >= Duration::from_secs(manifest.seconds)
+    {
+        manifest.status = CaptureStatus::Incomplete;
+        manifest.stop_reason = Some(OVERHEAD_STOP.into());
+    }
+    evidence::publish(root, "capture.json", &manifest)?;
+    if manifest.selection_sha256.is_some() {
+        let elapsed =
+            u64::try_from(elapsed().as_micros()).map_err(|_| "capture elapsed time overflows")?;
+        evidence::publish(
+            root,
+            "capture-timing.json",
+            &CaptureTiming {
+                version: 1,
+                capture_sha256: evidence::digest(&evidence::read(
+                    &root.join("capture.json"),
+                    FILE_CAP,
+                )?),
+                elapsed_through_capture_publication_us: elapsed,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn manifest(
@@ -634,29 +843,39 @@ fn manifest(
     deployment: &[u8],
     collector_sha256: String,
     link: Option<(String, Change)>,
+    source: &[u8],
+    selected: Option<&[u8]>,
 ) -> Result<Capture> {
     let (baseline_sha256, change) = match link {
         Some((hash, change)) => (Some(hash), Some(change)),
         None => (None, None),
     };
+    let workload = selection::workload(source)?;
+    let (warmup, measured, tokens) = selection::budgets(&workload, ACQUISITIONS)?;
     Ok(Capture {
-        version: 1,
-        kind: "performance-capture-v1".into(),
+        version: if selected.is_some() { 2 } else { 1 },
+        kind: if selected.is_some() {
+            "performance-capture-v2"
+        } else {
+            "performance-capture-v1"
+        }
+        .into(),
         metric_contract: METRIC_CONTRACT.into(),
         collector_sha256,
-        workload_sha256: evidence::digest(WORKLOAD),
+        workload_sha256: evidence::digest(source),
         deployment_sha256: evidence::digest(deployment),
         endpoint: wire::endpoint(&options.endpoint, options.local_http)?.to_string(),
         model: options.model.clone(),
         auth_env: options.auth_env.clone(),
         local_http: options.local_http,
         seconds: options.seconds,
-        request_ceiling: ACQUISITIONS * 4,
-        output_token_ceiling: ACQUISITIONS * 4 * 400,
+        request_ceiling: warmup + measured,
+        output_token_ceiling: tokens,
         baseline_sha256,
         change,
         status: CaptureStatus::Complete,
         stop_reason: None,
+        selection_sha256: selected.map(evidence::digest),
         acquisitions: (0..ACQUISITIONS)
             .map(|index| Acquisition {
                 directory: directory(index),
@@ -669,6 +888,79 @@ fn manifest(
             })
             .collect(),
     })
+}
+
+fn preflight(
+    options: &BaselineOptions,
+    workload: &Workload,
+    selected: Option<&selection::Manifest>,
+) -> Result<()> {
+    wire::endpoint(&options.endpoint, options.local_http)?;
+    wire::credential(options.auth_env.as_deref())?;
+    if options.model.is_empty()
+        || options.model.len() > 4096
+        || options.model.chars().any(char::is_control)
+    {
+        return Err("model must be a nonempty selector within 4096 bytes".into());
+    }
+    let (warmup, measured, tokens) = selection::budgets(workload, ACQUISITIONS)?;
+    let scope = selected.map_or(SCOPE, |s| s.scope.as_str());
+    let controls = serde_json::to_string(&workload.request).map_err(|e| e.to_string())?;
+    let mut text = format!(
+        "Preflight: workload {}; selection {}; scope: {}\nControls: {}\n",
+        workload.name,
+        selected.map_or("builtin-default", |s| s.id.as_str()),
+        scope,
+        controls
+    );
+    if let Some(selected) = selected {
+        text.push_str(&format!(
+            "Operation scope: {:?}; source {}; normalized workload {}\n",
+            selected.operation_scope, selected.source_sha256, selected.workload_sha256
+        ));
+    }
+    for cell in &workload.cells {
+        text.push_str(&format!("Cell {}: case {}; concurrency {}; warmup waves {}; measured trials {} per acquisition\n",
+            cell.id, cell.case, cell.concurrency, cell.warmup_trials, cell.trials));
+        if workload.version == 2 {
+            let spec = WaveSpec {
+                index: 0,
+                phase: Phase::Measured,
+                cell: cell.id.clone(),
+                case: cell.case.clone(),
+                trial: 0,
+                concurrency: cell.concurrency,
+            };
+            let effective = crate::sequence::settings(workload, &spec);
+            text.push_str(&format!(
+                "  Effective step controls: stream {}; cache {:?}; first-output timing {}\n",
+                effective.stream,
+                effective.cache,
+                if effective.stream {
+                    "observed from generated-text SSE arrival"
+                } else {
+                    "unavailable (nonstreaming)"
+                }
+            ));
+        }
+    }
+    text.push_str(&format!("{ACQUISITIONS} acquisitions: {warmup} warmup + {measured} measured = {} requests; {tokens} requested output tokens ceiling; {}s whole-capture allowance including setup, verification and publication. Request total {}ms / idle {}ms; response {} bytes / wave buffer {} bytes.\n",
+        warmup + measured, options.seconds, workload.limits.total_ms, workload.limits.idle_ms,
+        workload.limits.response_bytes, workload.limits.wave_buffer_bytes));
+    text.push_str("Order: all warmups before measured cells, declared cell/trial order; admitted lanes settle before publication and the next wave. No retries or replacement acquisitions. Deadline checks stop admission, not guarantee completion; filesystem/OS stalls can outlast the allowance. Backend control support remains operator-qualified, not detected offline.\n");
+    eprint!("{text}");
+    Ok(())
+}
+
+fn selected_report(report: &mut Report, selected: Option<SelectedReport>) {
+    if selected.is_some() {
+        report.version = 2;
+        report.kind = "performance-capture-comparison-v2";
+        report.scope = SELECTED_SCOPE;
+        report.assumptions = SELECTED_SCOPE;
+        report.result_scope = SELECTED_SCOPE;
+        report.selected = selected;
+    }
 }
 
 fn publish_report(root: &Path, report: &Report) -> Result<()> {
@@ -686,16 +978,46 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
     let operation = (|| {
         let deployment = evidence::read(&options.deployment, 32 * 1024)?;
         declaration(&deployment)?;
-        let capture = manifest(options, &deployment, evidence::binary_digest()?, None)?;
-        collect(&options.out, capture, &deployment, deadline)?;
+        let selected = options
+            .selection
+            .as_deref()
+            .map(selection::load)
+            .transpose()?;
+        let source = selected.as_ref().map_or(WORKLOAD, |s| s.source.as_slice());
+        let selection_bytes = selected.as_ref().map(|s| s.bytes.as_slice());
+        let default_workload;
+        let workload = if let Some(selected) = &selected {
+            &selected.workload
+        } else {
+            default_workload = selection::workload(source)?;
+            &default_workload
+        };
+        preflight(options, workload, selected.as_ref().map(|s| &s.manifest))?;
+        let capture = manifest(
+            options,
+            &deployment,
+            evidence::binary_digest()?,
+            None,
+            source,
+            selection_bytes,
+        )?;
+        collect(
+            &options.out,
+            capture,
+            &deployment,
+            source,
+            selection_bytes,
+            deadline,
+        )?;
         let verified = load(&options.out)?;
         report.first_failure = verified.first_failure;
         report.stop_reason = verified.manifest.stop_reason.clone();
         report.baseline_accounting = Some(verified.accounting);
-        report.baseline_complete_acquisitions = verified.observations.len();
+        report.baseline_complete_acquisitions = verified.complete_acquisitions;
         report.baseline_acquisition_medians = verified.observations;
         report.baseline_capture_sha256 = Some(verified.sha256);
         report.baseline_ready = verified.manifest.status == CaptureStatus::Complete;
+        selected_report(&mut report, verified.selected);
         if verified.manifest.status == CaptureStatus::Invalid {
             report.result = Outcome::Invalid;
         }
@@ -743,9 +1065,10 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
         report.stop_reason = before.manifest.stop_reason.clone();
         report.model = Some(before.manifest.model.clone());
         report.baseline_accounting = Some(before.accounting.clone());
-        report.baseline_complete_acquisitions = before.observations.len();
+        report.baseline_complete_acquisitions = before.complete_acquisitions;
         report.baseline_acquisition_medians = before.observations;
         report.baseline_capture_sha256 = Some(before.sha256.clone());
+        selected_report(&mut report, before.selected);
         if before.manifest.baseline_sha256.is_some() {
             return Err("check requires an original baseline capture, not a previous check".into());
         }
@@ -774,14 +1097,57 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             out: options.out.clone(),
             seconds: options.seconds,
             json: options.json,
+            selection: None,
         };
+        let source = evidence::read(&options.baseline.join("workload.json"), FILE_CAP)?;
+        let selection_bytes = before
+            .manifest
+            .selection_sha256
+            .as_ref()
+            .map(|_| evidence::read(&options.baseline.join("selection.json"), selection::CAP))
+            .transpose()?;
+        if evidence::digest(&source) != before.manifest.workload_sha256
+            || selection_bytes.as_deref().map(evidence::digest) != before.manifest.selection_sha256
+        {
+            return Err("baseline selection or workload changed during preflight".into());
+        }
+        let capture_bytes = evidence::read(&options.baseline.join("capture.json"), FILE_CAP)?;
+        let current_identity = if before.manifest.version == 2 {
+            selected_identity(
+                &evidence::digest(&capture_bytes),
+                &evidence::read(&options.baseline.join("capture-timing.json"), FILE_CAP)?,
+            )
+        } else {
+            evidence::digest(&capture_bytes)
+        };
+        if current_identity != before.sha256 {
+            return Err("baseline capture or timing identity changed during preflight".into());
+        }
+        let selected = selection_bytes
+            .as_deref()
+            .map(|bytes| selection::parse(bytes, &source))
+            .transpose()?;
+        preflight(
+            &inherited,
+            &selection::workload(&source)?,
+            selected.as_ref(),
+        )?;
         let capture = manifest(
             &inherited,
             &deployment,
             collector_sha256,
             Some((before.sha256, options.change)),
+            &source,
+            selection_bytes.as_deref(),
         )?;
-        collect(&options.out, capture, &deployment, deadline)?;
+        collect(
+            &options.out,
+            capture,
+            &deployment,
+            &source,
+            selection_bytes.as_deref(),
+            deadline,
+        )?;
         report = compare(&options.baseline, &options.out);
         Ok::<(), String>(())
     })();
@@ -814,8 +1180,8 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
         }
         report.baseline_accounting = Some(before.accounting.clone());
         report.candidate_accounting = Some(after.accounting.clone());
-        report.baseline_complete_acquisitions = before.observations.len();
-        report.candidate_complete_acquisitions = after.observations.len();
+        report.baseline_complete_acquisitions = before.complete_acquisitions;
+        report.candidate_complete_acquisitions = after.complete_acquisitions;
         report.baseline_acquisition_medians = before.observations.clone();
         report.candidate_acquisition_medians = after.observations.clone();
         report.baseline_capture_sha256 = Some(before.sha256.clone());
@@ -829,6 +1195,12 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
             .stop_reason
             .clone()
             .or_else(|| before.manifest.stop_reason.clone());
+        let mut selected = before.selected;
+        if let (Some(selected), Some(candidate)) = (&mut selected, after.selected) {
+            selected.candidate_acquisitions = candidate.baseline_acquisitions;
+            selected.candidate_timing = Some(candidate.baseline_timing);
+        }
+        selected_report(&mut report, selected);
         if before.manifest.baseline_sha256.is_some()
             || after.manifest.baseline_sha256.as_deref() != Some(before.sha256.as_str())
             || before.manifest.endpoint != after.manifest.endpoint
@@ -838,6 +1210,8 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
             || before.manifest.workload_sha256 != after.manifest.workload_sha256
             || before.manifest.metric_contract != after.manifest.metric_contract
             || before.manifest.collector_sha256 != after.manifest.collector_sha256
+            || before.manifest.version != after.manifest.version
+            || before.manifest.selection_sha256 != after.manifest.selection_sha256
         {
             return Err(
                 "captures are incompatible or candidate does not reference this immutable baseline"
@@ -879,6 +1253,11 @@ pub fn compare(baseline: &Path, candidate: &Path) -> Report {
             || after.manifest.status != CaptureStatus::Complete
         {
             report.reasons.push("Incomplete acquisition coverage: no model-based interval or directional conclusion. All acquisitions must complete without replacement.".into());
+            return Ok(());
+        }
+        if report.selected.is_some() {
+            report.result = Outcome::Descriptive;
+            report.reasons.push("Explicit selection is descriptive only: retain every cell and acquisition; no pooled percentage, confidence interval or directional label is supported.".into());
             return Ok(());
         }
         assess(&mut report, &before.observations, &after.observations)?;
@@ -945,10 +1324,15 @@ fn assess(report: &mut Report, before: &[f64], after: &[f64]) -> Result<()> {
 }
 
 pub fn human(report: &Report) -> String {
-    let label = if report.baseline_ready {
+    let label = if report.baseline_ready && report.selected.is_some() {
+        "BASELINE READY - DESCRIPTIVE ONLY: observations collected; comparison not yet performed"
+    } else if report.baseline_ready {
         "Baseline ready; comparison not yet performed"
     } else {
         match report.result {
+            Outcome::Descriptive => {
+                "COMPLETE - DESCRIPTIVE ONLY: comparison completed successfully; no performance verdict"
+            }
             Outcome::Improved => "MEASURED FASTER: higher throughput in these capture periods",
             Outcome::Regressed => "MEASURED SLOWER: lower throughput in these capture periods",
             Outcome::Inconclusive => {
@@ -957,10 +1341,69 @@ pub fn human(report: &Report) -> String {
             Outcome::Invalid => "INVALID: evidence or declarations cannot support this comparison",
         }
     };
+    let scope = report.selected.as_ref().map_or(
+        "structured C1 (one concurrent request), exactly 400 output tokens per request.",
+        |selected| selected.manifest.scope.as_str(),
+    );
     let mut text = format!(
-        "{label}\nScope: structured C1 (one concurrent request), exactly 400 output tokens per request.\nComplete acquisitions: baseline {}/{ACQUISITIONS}; candidate {}/{ACQUISITIONS}\n",
+        "{label}\nScope: {scope}\nComplete acquisitions: baseline {}/{ACQUISITIONS}; candidate {}/{ACQUISITIONS}\n",
         report.baseline_complete_acquisitions, report.candidate_complete_acquisitions
     );
+    if let Some(selected) = &report.selected {
+        text.push_str(&format!(
+            "Selection {}: {}; operation scope {:?} (operator declaration)\n{}\n",
+            selected.manifest.id,
+            selected.manifest_sha256,
+            selected.manifest.operation_scope,
+            SELECTED_SCOPE
+        ));
+        text.push_str(&format!("Elapsed through capture publication: baseline {}us; candidate {:?}us. Includes setup and publication, excludes this timing receipt and reports; OS/filesystem stalls have no hard wall-clock guarantee.\n",
+            selected.baseline_timing.elapsed_through_capture_publication_us,
+            selected.candidate_timing.as_ref().map(|t| t.elapsed_through_capture_publication_us)));
+        for cell in &selected.cells {
+            text.push_str(&format!(
+                "Cell {}: concurrency {}; warmup {}; measured trials {} per acquisition\n",
+                cell.id, cell.concurrency, cell.warmup_trials, cell.trials
+            ));
+        }
+        for (side, acquisitions) in [
+            ("Baseline", &selected.baseline_acquisitions),
+            ("Candidate", &selected.candidate_acquisitions),
+        ] {
+            for acquisition in acquisitions {
+                text.push_str(&format!("{side} acquisition {}: {}; preparation {}us, reservation publication {}us (included in preparation), wave publication {}us\n",
+                    acquisition.acquisition, acquisition.status, acquisition.summary.wave_preparation_us,
+                    acquisition.summary.reservation_publication_us, acquisition.summary.wave_publication_us));
+                for cell in &acquisition.cells {
+                    text.push_str(&format!("  {}: {}/{} observed trials, {} eligible; makespan median {:?}us; aggregate achieved {:?} tokens/s; per-stream settlement decode {:?}, text-window decode {:?} tokens/s\n",
+                        cell.cell, cell.observed_trials, cell.planned_trials, cell.eligible_trials,
+                        cell.median_wave_latency_us, cell.median_achieved_completion_tokens_per_second,
+                        cell.median_decode_tokens_per_second, cell.median_text_decode_tokens_per_second));
+                    if let Some(check) = &cell.sequence_check {
+                        text.push_str(&format!("    history {}; parent {:?}; semantic correct {}; strict match {:?}; canonical formatting {:?}; detail {:?}\n",
+                            check.history, check.parent, check.correct, check.strict_match, check.canonical_match, check.error));
+                    }
+                }
+                for wave in acquisition.waves.iter().flatten() {
+                    for lane in wave.attempts.iter().filter(|lane| {
+                        lane.status != Status::Complete
+                            || !lane.eligibility_errors.is_empty()
+                            || lane
+                                .sequence
+                                .as_ref()
+                                .is_some_and(|check| !crate::sequence::passed(check))
+                    }) {
+                        text.push_str(&format!("  {} {:?} trial {}: performance eligible {}; makespan {}us; dispatch spread {}us\n",
+                            wave.spec.cell, wave.spec.phase, wave.spec.trial, wave.eligible, wave.elapsed_us, wave.dispatch_spread_us));
+                        text.push_str(&format!("    lane {}: {:?}; dispatched {}; first generated {:?}us; first answer {:?}us; terminal {:?}us; settlement {}us; errors {:?}\n",
+                            lane.lane, lane.status, lane.dispatched, lane.timing.first_generated_text_us,
+                            lane.timing.first_answer_text_us, lane.timing.terminal_us, lane.timing.settle_us, lane.eligibility_errors));
+                    }
+                }
+            }
+        }
+        text.push_str("Complete per-wave/per-lane timings, dispatch spreads, cached token counts and raw evidence references are retained in report.json and native receipts; null means unavailable.\n");
+    }
     if let Some(model) = &report.model {
         text.push_str(&format!("Model: {model}\n"));
     }
@@ -991,9 +1434,15 @@ pub fn human(report: &Report) -> String {
                     a.known_reported_completion_tokens, a.missing_completion_usage_requests
                 )),
             }
-            text.push_str(&format!("  Ceiling: {} requests / {} output tokens; allowance {}s. Full completion needs >{:.1} reported output tokens/s including overhead; use --seconds for a larger allowance.\n",
-                a.request_ceiling, a.output_token_ceiling, a.allowance_seconds,
-                a.minimum_full_capture_tokens_per_second));
+            text.push_str(&format!(
+                "  Ceiling: {} requests / {} output tokens; allowance {}s.",
+                a.request_ceiling, a.output_token_ceiling, a.allowance_seconds
+            ));
+            if let Some(rate) = a.minimum_full_capture_tokens_per_second {
+                text.push_str(&format!(" Full completion needs >{rate:.1} reported output tokens/s including overhead; use --seconds for a larger allowance.\n"));
+            } else {
+                text.push_str(" Output is a cap, not a required amount; no minimum completion rate inferred.\n");
+            }
         }
     }
     if let Some(change) = report.declared_change {
@@ -1027,15 +1476,33 @@ pub fn human(report: &Report) -> String {
             .completion_tokens
             .is_some_and(|n| n > u64::from(failure.expected_completion_tokens))
             || (failure.status == Status::Complete
+                && report
+                    .selected
+                    .as_ref()
+                    .is_none_or(|s| s.request.output.mode == OutputMode::Exact)
                 && failure
                     .usage
                     .completion_tokens
                     .is_some_and(|n| n != u64::from(failure.expected_completion_tokens)))
         {
+            let requirement = if report
+                .selected
+                .as_ref()
+                .is_none_or(|s| s.request.output.mode == OutputMode::Exact)
+            {
+                format!(
+                    "exactly {} were required",
+                    failure.expected_completion_tokens
+                )
+            } else {
+                format!(
+                    "the declared cap was {}",
+                    failure.expected_completion_tokens
+                )
+            };
             text.push_str(&format!(
-                "Stopped: the server reported {} output tokens; exactly {} were required.\n",
-                failure.usage.completion_tokens.unwrap(),
-                failure.expected_completion_tokens
+                "Stopped: the server reported {} output tokens; {requirement}.\n",
+                failure.usage.completion_tokens.unwrap()
             ));
         } else if failure.status == Status::HttpError {
             match failure.http_status {
@@ -1044,6 +1511,8 @@ pub fn human(report: &Report) -> String {
                 }
                 None => text.push_str("Stopped: HTTP failure without a retained status code.\n"),
             }
+        } else if failure.acquisition_status == "stopped-after-sequence-check" {
+            text.push_str("Stopped: a declared sequence semantic or strict check failed; performance timings remain separate observations, not a performance regression verdict.\n");
         } else if failure.acquisition_status == "budget-exhausted" {
             text.push_str("Stopped: the measurement budget expired. The unfinished request is retained; no further requests were sent.\n");
         } else if failure.status == Status::Complete && failure.usage.completion_tokens.is_none() {
@@ -1078,3 +1547,11 @@ pub fn human(report: &Report) -> String {
     ));
     text
 }
+
+#[cfg(test)]
+#[path = "../tests/support/calibration.rs"]
+mod calibration;
+
+#[cfg(test)]
+#[path = "../tests/support/finalization.rs"]
+mod finalization;

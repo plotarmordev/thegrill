@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "conversation-v1",
+  "workload": "conversation-v1.json",
+  "source_sha256": "5c384c86e50719e3b53ec71a7252ca4013b271e9501bc103275e82613be5e928",
+  "workload_sha256": "88c6eb0e1083a6ee28c3bed16e82e66dacee11e03ae2659a52d39d8790625eb6",
+  "scope": "Bounded nonstreaming history reuse, alternating histories, edit/restore and fixed lookup_fact continuity; semantic and per-step performance observations only, no quality score or inferred backend qualification.",
+  "operation_scope": "unknown"
+}

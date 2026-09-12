@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "conversation-v2",
+  "workload": "conversation-v2.json",
+  "source_sha256": "7b1abfea036aa9619d61f52aa3eb413ad05072319941c0fa9fba58892648547d",
+  "workload_sha256": "4e0733e3880bc5ee283eba1ee9ff4d7cd6cd7e03cb199af72f37be9356bb18cf",
+  "scope": "Bounded factual streaming, fixed nonstreaming tool continuity, alternating histories and observed return/recovery; per-step descriptive evidence, not real-backend eviction or capacity qualification.",
+  "operation_scope": "unknown"
+}

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "concurrency-enable-thinking-v1",
+  "request": {
+    "profile": "vllm-fixed-v1",
+    "stream": true,
+    "output": { "tokens": 64, "mode": "exact" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": 0,
+    "thinking_control": { "kind": "vllm-enable-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 60000,
+    "idle_ms": 30000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "structured",
+      "messages": [
+        { "role": "user", "content": "Count from 1 to 32. Output only the numbers, separated by spaces. No other text." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "structured-1", "case": "structured", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "structured-2", "case": "structured", "concurrency": 2, "warmup_trials": 1, "trials": 3 },
+    { "id": "structured-4", "case": "structured", "concurrency": 4, "warmup_trials": 1, "trials": 3 }
+  ]
+}

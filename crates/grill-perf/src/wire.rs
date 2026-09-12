@@ -41,7 +41,7 @@ struct Body<'a> {
     cache_salt: Option<String>,
 }
 pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
-    let r = &plan.workload.request;
+    let r = crate::sequence::settings(&plan.workload, wave);
     let case = plan
         .workload
         .cases
@@ -386,11 +386,13 @@ fn present(raw: Option<&RawValue>) -> bool {
 }
 #[derive(Default)]
 struct Semantic {
+    allow_tools: bool,
     id: Option<String>,
     finish: Option<String>,
     usage: Usage,
     content: bool,
     generated: bool,
+    answer: Option<String>,
 }
 impl Semantic {
     fn event(
@@ -455,12 +457,22 @@ impl Semantic {
             choice.message
         };
         if let Some(Object(delta)) = delta {
-            if present(delta.tool_calls)
+            let tools = present(delta.tool_calls);
+            if (tools && !self.allow_tools)
                 || present(delta.function_call)
                 || present(delta.audio)
                 || present(delta.refusal)
             {
                 return Err((Status::Unsupported, "non-text answer or refusal"));
+            }
+            if tools && self.allow_tools {
+                if stream || self.finish.is_some() {
+                    return Err((
+                        Status::Unsupported,
+                        "tool profile requires one nonstreaming message",
+                    ));
+                }
+                self.generated = true;
             }
             let content = delta.content.as_ref().is_some_and(|s| !s.is_empty());
             let reasoning = delta.reasoning.as_ref().is_some_and(|s| !s.is_empty())
@@ -486,11 +498,22 @@ impl Semantic {
             if stream && content && timing.first_answer_text_us.is_none() {
                 timing.first_answer_text_us = Some(observed);
             }
+            if let (Some(answer), Some(content)) = (&mut self.answer, delta.content.as_ref()) {
+                if answer.len() + content.len() > 64 * 1024 {
+                    return Err((
+                        Status::ResponseLimit,
+                        "sequence answer exceeds response bound",
+                    ));
+                }
+                answer.push_str(content);
+            }
             self.content |= content;
             self.generated |= generated;
         }
         if let Some(reason) = choice.finish_reason {
-            if !matches!(reason.as_ref(), "stop" | "length") {
+            if !matches!(reason.as_ref(), "stop" | "length")
+                && !(self.allow_tools && !stream && reason == "tool_calls")
+            {
                 return Err((Status::Unsupported, "unsupported finish reason"));
             }
             if self.finish.is_some() {
@@ -514,8 +537,44 @@ pub fn verify_complete(
     body: &[u8],
     stream: bool,
     arrival_contract: bool,
+    profile: Profile,
 ) -> Result<()> {
-    let mut semantic = Semantic::default();
+    complete_semantic(attempt, body, stream, arrival_contract, profile, false).map(|_| ())
+}
+
+pub(crate) fn sequence_answer(
+    attempt: &Attempt,
+    body: &[u8],
+    arrival_contract: bool,
+) -> Result<String> {
+    complete_semantic(
+        attempt,
+        body,
+        true,
+        arrival_contract,
+        Profile::VllmConversationV2,
+        true,
+    )?
+    .answer
+    .ok_or_else(|| "sequence response lacks answer text".into())
+}
+
+fn complete_semantic(
+    attempt: &Attempt,
+    body: &[u8],
+    stream: bool,
+    arrival_contract: bool,
+    profile: Profile,
+    retain_answer: bool,
+) -> Result<Semantic> {
+    let mut semantic = Semantic {
+        allow_tools: matches!(
+            profile,
+            Profile::VllmConversationV1 | Profile::VllmConversationV2
+        ),
+        answer: retain_answer.then(String::new),
+        ..Semantic::default()
+    };
     let mut timing = Timing::default();
     let end = if stream {
         Parser::new(SseLimits {
@@ -549,10 +608,15 @@ pub fn verify_complete(
     {
         return Err("response evidence does not support its completion facts".into());
     }
-    Ok(())
+    Ok(semantic)
 }
 
-pub fn verify_partial_arrivals(attempt: &Attempt, body: &[u8], stream: bool) -> Result<()> {
+pub fn verify_partial_arrivals(
+    attempt: &Attempt,
+    body: &[u8],
+    stream: bool,
+    profile: Profile,
+) -> Result<()> {
     let observed = &attempt.timing;
     if attempt.http_status != Some(200) {
         return if attempt.usage == Usage::default()
@@ -574,7 +638,13 @@ pub fn verify_partial_arrivals(attempt: &Attempt, body: &[u8], stream: bool) -> 
     {
         return Ok(());
     }
-    let mut semantic = Semantic::default();
+    let mut semantic = Semantic {
+        allow_tools: matches!(
+            profile,
+            Profile::VllmConversationV1 | Profile::VllmConversationV2
+        ),
+        ..Semantic::default()
+    };
     let mut timing = Timing::default();
     let end = if stream {
         Parser::new(SseLimits {
@@ -643,9 +713,16 @@ pub async fn collect(
         terminal_offset: None,
         surplus_observed_bytes: 0,
         eligibility_errors: Vec::new(),
+        sequence: None,
     };
     let mut body = Vec::new();
-    let mut semantic = Semantic::default();
+    let mut semantic = Semantic {
+        allow_tools: matches!(
+            settings.profile,
+            Profile::VllmConversationV1 | Profile::VllmConversationV2
+        ),
+        ..Semantic::default()
+    };
     let total =
         tokio::time::Instant::from_std(sent) + Duration::from_millis(u64::from(limits.total_ms));
     let mut idle =

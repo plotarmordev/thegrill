@@ -225,7 +225,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         }
         config.validate(plan.waves.len(), plan.local_http)?;
     }
-    let expected_mechanism = (plan.workload.request.profile == Profile::VllmFixedV1)
+    let expected_mechanism = (plan.workload.request.profile != Profile::PortableChatV1)
         .then_some("declared-vllm-prefix-cache");
     if plan.cache_mechanism.as_deref() != expected_mechanism
         || plan.cache_evidence_source
@@ -295,6 +295,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     let mut states = Vec::with_capacity(plan.waves.len());
     let mut metrics_budget = crate::metrics::Budget::default();
     let mut metrics_waves = Vec::new();
+    let mut sequence = crate::sequence::State::default();
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
@@ -324,7 +325,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         {
             if body.len() > REQUEST_CAP
                 || digest(body.as_bytes()) != *hash
-                || *body != crate::wire::request_body(&plan, spec, lane as u32)?
+                || *body != sequence.request(&plan, spec, lane as u32)?
             {
                 return Err("request evidence does not match declared controls".into());
             }
@@ -386,11 +387,12 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             (None, None) => (),
             _ => return Err("missing or undeclared metrics companion evidence".into()),
         }
+        let settings = crate::sequence::settings(&workload, spec);
         for (lane, a) in wave.attempts.iter().enumerate() {
             if a.lane as usize != lane
                 || a.response_bytes > workload.limits.response_bytes
                 || a.terminal_offset.is_some_and(|n| n > a.response_bytes)
-                || a.eligibility_errors != eligibility(a, &workload.request, spec.phase)
+                || a.eligibility_errors != eligibility(a, &settings, spec.phase)
             {
                 return Err("invalid attempt facts".into());
             }
@@ -401,16 +403,32 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
             if body.len() != a.response_bytes || digest(&body) != a.response_sha256 {
                 return Err("response evidence hash mismatch".into());
             }
+            if sequence.observe(&plan, spec, a, &body)? != a.sequence {
+                return Err(
+                    "sequence check or lineage differs from retained response evidence".into(),
+                );
+            }
             if a.status == Status::Complete {
                 if !a.dispatched || a.http_status != Some(200) {
                     return Err("complete response was not a successful dispatch".into());
                 }
-                crate::wire::verify_complete(a, &body, workload.request.stream, plan.version == 3)?;
+                crate::wire::verify_complete(
+                    a,
+                    &body,
+                    settings.stream,
+                    plan.version == 3,
+                    settings.profile,
+                )?;
             }
-            a.timing.validate(workload.request.stream)?;
+            a.timing.validate(settings.stream)?;
             if plan.version == 3 {
                 if a.status != Status::Complete {
-                    crate::wire::verify_partial_arrivals(a, &body, workload.request.stream)?;
+                    crate::wire::verify_partial_arrivals(
+                        a,
+                        &body,
+                        settings.stream,
+                        settings.profile,
+                    )?;
                 }
                 if a.timing.last_generated_text_us.is_some()
                     != a.timing.first_generated_text_us.is_some()
@@ -524,6 +542,8 @@ pub struct CellSummary {
     pub lane_text_decode_tokens_per_second: Vec<Vec<Option<f64>>>,
     pub lane_prompt_tokens: Vec<Vec<Option<u64>>>,
     pub lane_prefill_tokens_per_second: Vec<Vec<Option<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_check: Option<crate::sequence::Check>,
 }
 fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
@@ -649,6 +669,7 @@ pub fn summarize(run: &Loaded) -> Vec<CellSummary> {
                 Vec::new()
             };
             CellSummary {
+                sequence_check: pairs.first().and_then(|(_, wave)| wave.as_ref()).and_then(|wave| wave.attempts.first()).and_then(|a| a.sequence.clone()),
                 cell: cell.id.clone(),
                 planned_trials: cell.trials,
                 observed_trials: observed,
@@ -906,6 +927,11 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                 .map(|s| format!("baseline: {s}"))
                 .chain(b.issues.iter().map(|s| format!("candidate: {s}")))
                 .collect();
+            let semantics_qualified = [Some(a), Some(b), a2].into_iter().flatten()
+                .all(|cell| cell.sequence_check.as_ref().is_none_or(crate::sequence::passed));
+            if !semantics_qualified {
+                reasons.push("declared sequence correctness or strict-output check failed; timing observations retained separately".into());
+            }
             if !same {
                 reasons.push("paired trial/lane completion counts missing or unequal".into());
             }
@@ -932,6 +958,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                     })
             });
             let eligible = same
+                && semantics_qualified
                 && a.median_wave_latency_us.is_some()
                 && b.median_wave_latency_us.is_some()
                 && reference_qualified;
@@ -956,7 +983,7 @@ pub fn compare(a: &Path, b: &Path, reference: Option<&Path>) -> Result<Compariso
                         withheld.push(format!("{name}: reference metric range unavailable"));
                         return None;
                     }
-                    let value = value.filter(|_| same && reference_qualified)?;
+                    let value = value.filter(|_| same && reference_qualified && semantics_qualified)?;
                     let (a, b) = a.zip(b)?;
                     let a = match a2 {
                         Some(a2) => [a[0].min(a2[0]), a[1].max(a2[1])],

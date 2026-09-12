@@ -1,0 +1,412 @@
+{
+  "version": 2,
+  "name": "conversation-v2",
+  "request": {
+    "profile": "vllm-conversation-v2",
+    "stream": true,
+    "output": {
+      "tokens": 128,
+      "mode": "cap"
+    },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": 0,
+    "thinking_control": {
+      "kind": "vllm-enable-thinking-v1",
+      "enabled": false
+    }
+  },
+  "limits": {
+    "total_ms": 10000,
+    "idle_ms": 10000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 4194304
+  },
+  "cases": [
+    {
+      "id": "prime-alpha",
+      "messages": [
+        {
+          "role": "system",
+          "content": "History alpha. Retain the declared fact. Return only a JSON object with key fact when asked. Context: {fill}"
+        },
+        {
+          "role": "user",
+          "content": "SET fact=copper. What is the fact?"
+        }
+      ],
+      "fill": {
+        "unit": "Neutral retained context block. ",
+        "repeat": 256
+      },
+      "step": {
+        "history": "alpha",
+        "parent": null,
+        "cache": "reported-prefix-zero",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "copper"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "reuse-alpha",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "prime-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "copper"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "prime-beta",
+      "messages": [
+        {
+          "role": "system",
+          "content": "History beta. Retain the declared fact. Return only a JSON object with key fact when asked. Context: {fill}"
+        },
+        {
+          "role": "user",
+          "content": "SET fact=amber. What is the fact?"
+        }
+      ],
+      "fill": {
+        "unit": "Neutral retained context block. ",
+        "repeat": 256
+      },
+      "step": {
+        "history": "beta",
+        "parent": null,
+        "cache": "reported-prefix-zero",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "amber"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "alternate-alpha",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "reuse-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "copper"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "edit-alpha",
+      "messages": [
+        {
+          "role": "user",
+          "content": "SET fact=indigo. What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "reuse-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "indigo"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "restore-alpha",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "reuse-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "copper"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "alternate-beta",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "beta",
+        "parent": "prime-beta",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "amber"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "tool-alpha",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call lookup_fact with key harbor."
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "restore-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "tool",
+          "key": "harbor",
+          "result": "sapphire"
+        }
+      }
+    },
+    {
+      "id": "tool-followup",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Return the local tool fixture value as the fact."
+        }
+      ],
+      "step": {
+        "history": "alpha",
+        "parent": "tool-alpha",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "sapphire"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "short-prime",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Return the declared fact as a JSON object with key fact."
+        },
+        {
+          "role": "user",
+          "content": "SET fact=jade. What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "short",
+        "parent": null,
+        "cache": "reported-prefix-zero",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "jade"
+          },
+          "strict": "{\"fact\":\"jade\"}"
+        }
+      }
+    },
+    {
+      "id": "short-reuse",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "short",
+        "parent": "short-prime",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "jade"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "return-beta",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "beta",
+        "parent": "alternate-beta",
+        "cache": "observe",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "amber"
+          },
+          "strict": null
+        }
+      }
+    },
+    {
+      "id": "recover-beta",
+      "messages": [
+        {
+          "role": "user",
+          "content": "What is the fact?"
+        }
+      ],
+      "step": {
+        "history": "beta",
+        "parent": "return-beta",
+        "cache": "reported-prefix-hit",
+        "expect": {
+          "kind": "json",
+          "value": {
+            "fact": "amber"
+          },
+          "strict": null
+        }
+      }
+    }
+  ],
+  "cells": [
+    {
+      "id": "prime-alpha",
+      "case": "prime-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "reuse-alpha",
+      "case": "reuse-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "prime-beta",
+      "case": "prime-beta",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "alternate-alpha",
+      "case": "alternate-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "edit-alpha",
+      "case": "edit-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "restore-alpha",
+      "case": "restore-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "alternate-beta",
+      "case": "alternate-beta",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "tool-alpha",
+      "case": "tool-alpha",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "tool-followup",
+      "case": "tool-followup",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "short-prime",
+      "case": "short-prime",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "short-reuse",
+      "case": "short-reuse",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "return-beta",
+      "case": "return-beta",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    },
+    {
+      "id": "recover-beta",
+      "case": "recover-beta",
+      "concurrency": 1,
+      "warmup_trials": 0,
+      "trials": 1
+    }
+  ]
+}
