@@ -17,110 +17,53 @@ Both tools run on your machine and connect to a server you already run. No proje
 
 ## Get started
 
-You need **Linux, Rust/Cargo 1.98, a C/C++ toolchain, and CMake**.
+For serving-speed checks, follow **[Install and first capture](docs/performance/INSTALL.md)**:
+verify a pinned artifact before unpacking, supply the actual server inputs once,
+capture a baseline, optionally capture an unchanged control, change serving state
+yourself, check, and replay the report offline.
 
-```sh
-git clone https://github.com/plotarmordev/thegrill.git
-cd thegrill
-cargo build --workspace --release --locked
-mkdir -p results
-```
-
-Start your model server first. In the examples below, replace port `8000` and `your-model` with your server's settings. The Grill does not start or change your server.
-
-<details>
-<summary><strong>Using a remote server or an API key?</strong></summary>
-
-- For a remote server, use its HTTPS URL or a separately managed local forward. `--local-http` permits HTTP only on literal loopback addresses such as `127.0.0.1`.
-- If a key is needed, set `MODEL_API_KEY` in your environment and add `--auth-env MODEL_API_KEY` to the run command. Do not put the key in a workload file.
-
-</details>
+**There are no published releases yet.** The guide works with a reviewed staged
+archive and includes a source fallback; it does not assume a public download.
+The performance archive contains `bin/grill-perf` and adjacent pinned files under
+`workloads/`. Installed use needs Linux, not Rust or a source checkout.
 
 ## Speed benchmarks
 
-Use **`grill-perf`** to capture a baseline, make one serving change yourself,
-and check the result. It never starts or changes your server.
+Use **`grill-perf`** against a server you already run. The
+[authoritative first-run workflow](docs/performance/INSTALL.md#baseline-optional-control-change-check)
+needs no statistical policy file. `check` inherits the verified baseline's
+endpoint, model selector, workload and credential-environment name; deployment
+identities remain explicit operator declarations, not attested server facts.
 
-Record the current serving identity in `serving-before.json`. Use real IDs or
-fingerprints for these four declarations, not secrets:
-
-```json
-{
-  "model_revision": "weights-r1",
-  "runtime": "server-build-r1",
-  "hardware": "device-layout-r1",
-  "settings": "configuration-r1"
-}
-```
-
-**1. Capture the baseline** against a running vLLM-compatible Chat Completions
-endpoint:
-
-```sh
-target/release/grill-perf baseline \
-  --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model \
-  --deployment serving-before.json --out before
-```
-
-**2. Make your serving change.** Save the updated declaration as
-`serving-after.json`, changing the corresponding field and keeping the others.
-
-**3. Check it:**
-
-```sh
-target/release/grill-perf check before \
-  --deployment serving-after.json --change settings --out after
-```
-
-`check` inherits the baseline's endpoint, model, workload and credential-environment
-name. Select `model_revision`, `runtime`, `hardware` or `settings` as the declared
-change. Unexplained mismatches are rejected before candidate requests.
-
-**Unchanged-deployment control:** instead of making a serving change, keep the
-server and every declaration unchanged and run:
-
-```sh
-target/release/grill-perf check before \
-  --deployment serving-before.json --change none --out control
-```
-
-This requires every deployment field to match the baseline. Any directional
-control result is an observed capture-period shift requiring repeatability
-investigation, not evidence of a serving-change effect. Retain it; do not rerun until a
-preferred verdict appears. An inconclusive control does not establish equality
-or repeatability. Replay it offline with
-`target/release/grill-perf compare before control --json`.
+The default is the short structured **C1** comparison. For explicitly selected,
+descriptive-only concurrent or conversation observations, use the same CLI with
+[packaged selection paths](docs/performance/INSTALL.md#optional-selections-and-failures).
+[Recipe embedding](docs/performance/RECIPES.md) supplies data, not a model-specific
+wrapper or registry.
 
 | Display label | Existing JSON `result` code | Meaning |
 |---|---|---|
 | **MEASURED FASTER** | `IMPROVED` | The comparison model supports higher measured throughput between these capture periods |
 | **MEASURED SLOWER** | `REGRESSED` | It supports lower measured throughput between these periods |
+| **COMPLETE - DESCRIPTIVE ONLY** | `DESCRIPTIVE` | An explicitly selected comparison completed successfully; no faster/slower, equivalence or no-regression verdict |
 | **INCONCLUSIVE** | `INCONCLUSIVE` | No direction is established, or evidence is insufficient; this does not mean equivalent performance |
 | **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report explains why and retains the available evidence |
 
-The CLI and new text reports use these presentation labels; stored JSON codes,
-exit statuses and comparison semantics are unchanged. Historical reports are not
-renamed or rewritten. The structured-C1 scope is shown directly below the headline.
+Baseline readiness is not a comparison verdict. Exit success is not a universal
+no-regression certificate: read the result and its displayed scope. Historical
+reports, stored result codes and comparison meanings are not reinterpreted.
 
 The observed percentage is separate from its model-based uncertainty range.
 Sequential captures cannot isolate the serving change from time, load or cache
 effects. A measured direction establishes neither causality nor practical
 significance, and there is no guaranteed precision or detection of a 5% change.
 
-The default is one short structured **C1** workload: eight acquisitions, each
-with one warmup and three measured requests, requiring actual reported output
-of 400 tokens/request. Each capture allows **32 requests, 12,800 output tokens
-and 300 seconds**, including warmups. Slower servers can use an explicit larger
-`--seconds` allowance; completing the default needs more than 42.7 output tokens/s
-including overhead. There are no automatic retries or replacement samples.
-
-Reports and raw evidence stay local in `before` and `after`. To recheck them
-offline without contacting the server:
-
-```sh
-target/release/grill-perf compare before after --json
-```
+The [scope and budget reference](docs/performance/README.md#default-scope-and-budget)
+defines the default workload. Preflight prints scope and the complete allowance
+before traffic. For slower servers, choose a finite `--seconds` allowance
+prospectively; exhaustion is not automatically server failure. There are no
+automatic retries or replacement samples. Reports and raw evidence stay local;
+`compare` verifies saved captures without network calls.
 
 [Full performance guide and measurement limits](docs/performance/README.md).
 Advanced `run`, `pause`, `resume`, raw-run `compare`, and captured-policy `decide`
@@ -134,6 +77,21 @@ and historical results are not reinterpreted.
 Use **`grill`** to collect model answers and check them against task rules.
 
 **This part is a work in progress.** The included questions are synthetic examples, not a validated intelligence test. It currently supports text answers, not agents or code execution.
+
+Build this separate source-only CLI on Linux with Rust/Cargo 1.98, a C/C++
+toolchain and CMake; it is not shipped in the performance archive:
+
+```sh
+git clone https://github.com/plotarmordev/thegrill.git
+cd thegrill
+cargo build -p grill --release --locked
+mkdir -p results
+```
+
+Start your server separately. Replace the endpoint and model selector below.
+For remote use, select HTTPS; local HTTP requires a literal loopback address.
+If authentication is required, supply the credential independently in your
+environment and add `--auth-env NAME` to `run`, never the key itself.
 
 ```sh
 target/release/grill run examples/synthetic-pack.json \

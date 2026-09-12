@@ -5,166 +5,98 @@ Recipe code supplies explicit inputs and delegates collection, evidence and
 arithmetic to TheGrill. It does not detect models, change serving state, create
 forwards, flush caches, retry controls or upload results.
 
-## Pin source, binary and workload separately
+## Use the installed workflow, not a wrapper
 
-Use a reviewed immutable source revision containing the selected-capture CLI.
-The historical source pin in [SHARED-RECIPES.md](SHARED-RECIPES.md) qualifies its
-older bundle workflow, not this extension. Obtain the new revision externally;
-this guide does not invent a published revision or claim a live qualification.
-Retain the checkout and invoke the built executable by absolute path:
+Follow **[Install and first capture](INSTALL.md)** for the authoritative pinned
+artifact/source fallback, declaration construction, baseline, optional unchanged
+control, separate operator change, candidate check and offline report commands.
+There are no published releases yet; a reviewed staged artifact works outside a
+checkout. The archive's executable is `$GRILL_HOME/bin/grill-perf`, exposed in
+the examples as the absolute `GRILL_PERF` path.
 
-```sh
-: "${SOURCE:?absolute checkout path required}"
-: "${SOURCE_GIT_SHA:?reviewed immutable source revision required}"
-: "${GRILL_PERF:?absolute path to the chosen executable required}"
-test "$(git -C "$SOURCE" rev-parse HEAD)" = "$SOURCE_GIT_SHA"
-sha256sum "$GRILL_PERF" "$SOURCE/Cargo.lock"
-"$GRILL_PERF" --version
-```
+A recipe supplies known values to that workflow; it does not generate its own
+benchmark code, statistical policy or compatibility retry loop.
 
-Record the actual build command/profile, toolchain, native OS/architecture and
-intentional build flags. Do not dump the environment. The Git source revision,
-invoked executable SHA-256, workload `source_sha256` and normalized
-`workload_sha256` are distinct identities. Deployment declarations are a further
-operator claim, not something the collector authenticates from the server.
+| Input | Recipe/operator responsibility | What `check` inherits |
+|---|---|---|
+| Endpoint and model selector | Explicit full resource URL and actual server selector; no model detection | Verified baseline endpoint, selector and loopback permission |
+| Request controls and membership | Qualify backend support; choose default C1 or an explicit pinned selection before baseline | Exact retained workload and selection, not a recipe lookup |
+| Authentication | Supply credential independently; pass only its environment-variable name to baseline, or omit for unauthenticated use | Variable name only; the value must remain available in the process environment |
+| Deployment | Reuse actual `model_revision`, `runtime`, `hardware`, `settings` facts; obtain missing facts from the operator | Baseline declaration for comparison; pass an explicit candidate declaration with only the selected field changed, or the same declaration for `--change none` |
+| Output and allowance | Choose a fresh private output outside the baseline with an existing nonsymlink parent; approve finite traffic prospectively | No output path or custom `--seconds` allowance is inherited |
 
-The new small selected workload is separate from the frozen four-entry bundle:
+The first-run declaration example uses actual recipe variables, not fictional
+identities. Its candidate example updates just the declared field, retaining
+only facts confirmed unchanged. Do not copy stale facts to hide a multi-field
+migration. Declarations are operator claims, not execution attestation.
 
-```sh
-SELECTION="$SOURCE/crates/grill-perf/examples/concurrency-selection-v1.json"
-```
+## Choose explicit packaged workloads
 
-This requests the legacy `chat_template_kwargs.thinking: false` control. For a
-template explicitly qualified for `enable_thinking` instead, choose the separate
-selection **before baseline**:
+Add `--selection "$SELECTION"` to the existing baseline command when a recipe
+needs descriptive selected scope. Choose the relevant path, not all alternatives:
 
-```sh
-SELECTION="$SOURCE/crates/grill-perf/examples/concurrency-enable-thinking-selection-v1.json"
-```
+| Selection path | Explicit capability |
+|---|---|
+| `$GRILL_HOME/workloads/concurrency-selection-v1.json` | C1/C2/C4 ladder, legacy `chat_template_kwargs.thinking: false` |
+| `$GRILL_HOME/workloads/concurrency-enable-thinking-selection-v1.json` | Separate ladder identity with `chat_template_kwargs.enable_thinking: false` |
+| `$GRILL_HOME/workloads/conversation-selection-v2.json` | [Bounded conversation profile](CONVERSATIONS.md), including its independently required tool/cache/usage controls |
 
-Do not infer this choice from a model name. The two selections differ in identity
-and cannot be compared as equivalent workloads. DeepSeek/GLM recipes may retain
-their historical explicitly different controls; a neutral third recipe supplies
-its own model selector and chooses an independently qualified control using
-exactly these commands, without adding a model-name branch.
+Do not infer controls from a model name. The thinking variants cannot be paired
+as equivalent workloads, and rejection never triggers a switch between them.
+A third ordinary configuration supplies its own endpoint, selector, auth name
+and declaration through the same commands without collection/assessment branches.
 
-A recipe may instead provide any other natively validated bounded workload and
-a manifest following the [closed selection schema](README.md#explicit-selected-captures).
-Place both files together and freeze their bytes before collection. Obtain the
-raw and typed workload digests offline—without traffic or a Rust helper:
+Keep each selection beside its workload leaf file and preserve exact bytes.
+`$GRILL_HOME/workloads/recipes-v1.json` remains the historical bundle manifest,
+not a selection manifest. [SHARED-RECIPES.md](SHARED-RECIPES.md) retains that
+workflow's sparkDash attribution and observed-envelope meanings; its historical
+source pin does not qualify the newer selected-capture interface.
 
-```sh
-"$GRILL_PERF" bundle inspect "$WORKLOAD"
-```
+For source fallback only, these files are under
+`$SOURCE/crates/grill-perf/examples/`. Once the baseline is captured, candidate
+collection does not need the original recipe files or their paths; it verifies
+the baseline's retained bytes and requires the same collector executable.
 
-Use the returned `source_sha256` and `workload_sha256` in the closed selection
-manifest. These are not `jq -S` or arbitrary canonical-JSON hashes. Inspect reports
-declared controls and one native run's budget; capture preflight multiplies by
-eight acquisitions. Scope and operation class must describe prospective membership;
-`unknown` does not mean normal or safe, and `stress` is not normal operation.
-No plugin or provider lookup is performed.
+## Inspect and pin offline
 
-## Reuse the deployment declaration directly
-
-Supply actual values already known by the recipe. Missing values are explicit
-operator prerequisites, not sample defaults. Construct the existing declaration
-with `jq`; there is no new deployment configuration hierarchy:
+A recipe may supply another bounded native workload with a manifest following
+the [closed selection schema](README.md#explicit-selected-captures). Obtain raw
+and typed workload digests from the existing offline command:
 
 ```sh
-: "${DEPLOYMENT_A:?absolute private declaration filename required}"
-jq -n \
-  --arg model_revision "${MODEL_REVISION_A:?actual weights revision required}" \
-  --arg runtime "${RUNTIME_REVISION_A:?actual engine build revision required}" \
-  --arg hardware "${HARDWARE_ID_A:?actual device/layout identifier required}" \
-  --arg settings "${SETTINGS_FINGERPRINT_A:?actual serving settings fingerprint required}" \
-  '{model_revision:$model_revision,runtime:$runtime,hardware:$hardware,settings:$settings}' \
-  > "$DEPLOYMENT_A"
+"$GRILL_PERF" bundle inspect "${WORKLOAD:?explicit approved workload file required}"
 ```
 
-Make the file private using the recipe's ordinary private-output policy. Keep
-credentials out of every declaration. A settings fingerprint should identify the
-reviewed configuration, including relevant context limit, quantization, parallel
-layout and speculative settings. A changed fingerprint alone does not prove
-that only one internal setting changed.
+Use its returned `source_sha256` and `workload_sha256`, not `jq -S` or arbitrary
+canonical-JSON hashes. It also reports declared controls and one native run's
+budget; capture preflight prints the complete acquisition allowance before
+traffic. Scope and operation class describe prospective membership; `unknown`
+does not mean normal or safe, and `stress` is not normal operation.
 
-## Baseline, unchanged control, change, check
+Keep source revision, executable digest, raw/typed workload digests and deployment
+declarations distinct. The staged receipt records build and package identities;
+source users record their actual toolchain, build command/profile and flags.
+Do not dump the environment or infer execution attestation from a digest.
 
-Set absolute paths for the executable, selection, declarations and new output
-directories; their parents must exist. The following path works from outside the
-checkout. Approve a finite collection window separately before contacting a
-model endpoint. `ENDPOINT` and `MODEL` are explicit operator inputs. These
-commands assume HTTPS; literal-loopback HTTP additionally requires
-`--local-http` on baseline.
+Pin drift, unsupported locally declared controls and missing declarations fail
+before requests. Backend support and authorization can still fail at the server;
+native status, request, response and partial evidence remain intact, with no
+field stripping or resend. See [first-run failure actions](INSTALL.md#optional-selections-and-failures).
 
-```sh
-"$GRILL_PERF" baseline \
-  --selection "${SELECTION:?explicit approved selection required}" \
-  --endpoint "${ENDPOINT:?approved Chat Completions resource URL required}" \
-  --model "${MODEL:?explicit server model selector required}" \
-  --deployment "$DEPLOYMENT_A" \
-  --auth-env "${AUTH_ENV:?name of independently supplied credential variable required}" \
-  --seconds "${CAPTURE_SECONDS:?approved whole-capture allowance required}" \
-  --out "${BASELINE:?new absolute private output directory required}" --json
-```
+## Read the selected scope
 
-Omit `--auth-env` for an unauthenticated endpoint; do not supply a dummy key.
-The collector stores only the environment-variable name, not the credential.
-Preflight is on stderr under `--json`; stdout contains the structured result.
-It enumerates controls, every cell, warmup/trial/concurrency counts, request and
-output-token ceilings, time limits and buffer allowances before dispatch. Pin
-checks and unsupported declared profiles fail offline; backend control support
-still requires independent qualification. A backend rejection remains an error
-with retained evidence, never a signal to strip fields and resend.
+Every explicit selection is descriptive, including selected C1. A complete
+comparison reports **COMPLETE - DESCRIPTIVE ONLY** / `DESCRIPTIVE`, not a
+faster/slower, PASS, equivalence or noninferiority claim. The
+[first-run result table](INSTALL.md#baseline-optional-control-change-check)
+separates success, incomplete evidence and invalid input from default C1 measured
+directions. Exit success is not a universal no-regression certificate.
 
-For an unchanged control, leave the server and every declaration unchanged:
-
-```sh
-"$GRILL_PERF" check "$BASELINE" --deployment "$DEPLOYMENT_A" --change none \
-  --seconds "$CAPTURE_SECONDS" --out "${CONTROL:?new private control directory required}" --json
-"$GRILL_PERF" compare "$BASELINE" "$CONTROL" --json
-```
-
-Retain the control even when it shifts or is incomplete. It observes another
-capture period, not equality, repeatability or proof of unchanged internals.
-Do not keep rerunning until a preferred result appears.
-
-For an actual settings change, change serving state separately and construct the
-candidate declaration from explicit actual values. Reuse only values the
-operator confirms unchanged:
-
-```sh
-: "${DEPLOYMENT_B:?absolute private candidate declaration filename required}"
-jq -n \
-  --arg model_revision "${MODEL_REVISION_B:?actual candidate weights revision required}" \
-  --arg runtime "${RUNTIME_REVISION_B:?actual candidate engine revision required}" \
-  --arg hardware "${HARDWARE_ID_B:?actual candidate hardware identifier required}" \
-  --arg settings "${SETTINGS_FINGERPRINT_B:?actual candidate settings fingerprint required}" \
-  '{model_revision:$model_revision,runtime:$runtime,hardware:$hardware,settings:$settings}' \
-  > "$DEPLOYMENT_B"
-"$GRILL_PERF" check "$BASELINE" --deployment "$DEPLOYMENT_B" --change settings \
-  --seconds "$CAPTURE_SECONDS" --out "${CANDIDATE:?new private candidate directory required}" --json
-"$GRILL_PERF" compare "$BASELINE" "$CANDIDATE" --json
-```
-
-Select `model_revision`, `runtime` or `hardware` instead when that is the declared
-change. Exactly the selected declaration must differ. Multiple changed fields
-are rejected; do not conceal them by copying a stale declaration. Candidate
-collection inherits the retained selection and workload, endpoint, model selector
-and credential-variable name. There is no check-side reselection knob. Original
-source files need not remain at their original path, but retained baseline bytes
-and the collector executable must match. Offline `compare` needs no credentials,
-performs no network calls and does not rewrite reports.
-
-Every explicit selection is descriptive, including selected C1 workloads.
-Complete selected checks emit `DESCRIPTIVE` (exit 0) with a **COMPLETE -
-DESCRIPTIVE ONLY** terminal banner. This means successful observation/comparison,
-not a faster/slower, PASS, equivalence or noninferiority claim.
-Incomplete captures remain `INCONCLUSIVE`/exit 2; invalid evidence is `INVALID`/exit 1.
-Keep each acquisition/cell separate;
-concurrent lanes are not independent acquisition samples. Native summaries and
-wave attempts retain missing usage, partial peers, request failures, timing,
-aggregate throughput and per-stream rates. Do not replace an unavailable value
-with zero or pool unlike cells into an improvement percentage.
+Keep acquisitions/cells separate; concurrent lanes are not independent samples.
+Native summaries retain missing usage, partial peers, request failures, timing,
+aggregate throughput and per-stream rates. Do not replace unavailable values with
+zero or pool unlike cells into an improvement percentage. Retain unchanged
+controls and budget stops rather than rerunning until a preferred result appears.
 
 ## Contributor PR report
 

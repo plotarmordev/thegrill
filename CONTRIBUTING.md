@@ -4,6 +4,11 @@ Keep changes focused on observable behavior. For a substantial change, open an i
 
 ## Development
 
+For installed performance use, begin with [Install and first capture](docs/performance/INSTALL.md).
+There are no published releases yet; reviewed staged archives and the documented
+source fallback work before publication. The quality CLI remains a separate
+source-built work in progress.
+
 The Grill is a Rust CLI for Linux. Build and check it with:
 
 ```sh
@@ -16,6 +21,11 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 Integration tests run the CLI against synthetic inputs and loopback fixtures. Do not point tests at a model service. Use `cargo test --locked --test offline` or `cargo test --locked --test runner` for a focused run.
 
 GitHub CI runs these four checks on Ubuntu 24.04 with Rust 1.98.0 for pushes and pull requests. It uses synthetic and loopback fixtures only; hosted CI does not qualify a live model deployment.
+
+Performance CLI fixtures live in `crates/grill-perf/tests/`; a focused capture
+run is `cargo test -p grill-perf --locked --test study`. For recipe-facing
+changes, use the [same baseline/check interface and reviewed PR summary](docs/performance/RECIPES.md#contributor-pr-report).
+Recipe facts are explicit data, not a reason to add a provider wrapper.
 
 ## Changes and review
 

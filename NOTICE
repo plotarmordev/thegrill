@@ -1,0 +1,22 @@
+The Grill
+Copyright (c) 2026 plotarmordev
+Project code and documentation: MIT; see LICENSE.
+
+The bundled sparkdash-decode-v1.json and sparkdash-prefill-v1.json
+workloads preserve the sparkDash attribution documented in
+https://github.com/plotarmordev/thegrill/blob/737440d46c2b607465f8a3ce6fdd7b0253b432d9/docs/performance/SHARED-RECIPES.md
+The glm-decode-v1.json and glm-prefill-v1.json variants retain those
+workload contents except for their declared names and thinking controls.
+Upstream project: https://github.com/MiaAI-Lab/sparkDash
+Upstream MIT license: licenses/sparkDash-LICENSE, copied from
+https://raw.githubusercontent.com/MiaAI-Lab/sparkDash/f25b542038e76e542b3892e2209893b9eb27a0d8/LICENSE
+The upstream copyright line is preserved verbatim, without inventing a holder.
+This revision pins the copied license, not the origin of every workload byte.
+
+Model weights and user-supplied benchmark data are not included and retain
+their own licenses. No quality CLI or captured model evidence is included.
+
+Statically linked dependency notices are reproduced in
+licenses/THIRD-PARTY-NOTICES.txt, with the pinned Rust standard-library
+distribution notices under licenses/rust-standard-library/.
+licenses/NOTICE-INPUTS.json binds the reviewed dependency and toolchain inputs.

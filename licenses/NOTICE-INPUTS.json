@@ -1,0 +1,24 @@
+{
+  "cargo_lock_sha256": "6f1b08507c8b5647abcb3ac72886316de725d011baf373a4ca22082557f9ef3f",
+  "manifest_sha256": {
+    "Cargo.toml": "142ee2dca910ba18b3c85102fe97f17910a5d9ab7818492ecbd92e030e31780f",
+    "crates/grill-perf/Cargo.toml": "1403c8dcc129fa4bab93aeb29f023ac352d18260603ec4bf20c2ed6cd3b90dd6",
+    "crates/grill-sse/Cargo.toml": "ba697c044b157e98194cfb668e51668f5e2e89031bfdc5e385f6d74073a62d78"
+  },
+  "notice_sha256": {
+    "licenses/THIRD-PARTY-NOTICES.txt": "56da8cf1f6664840a4d0d089f7f698f5f17cf6b91c5ffbb52977f9ffe31d08a1",
+    "licenses/rust-standard-library/COPYRIGHT-library.html": "68129500b616d5838629e68f55ff3aed5e096dacf60ce9eb41bbe599a563afa6",
+    "licenses/rust-standard-library/licenses/Apache-2.0.txt": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+    "licenses/rust-standard-library/licenses/BSD-2-Clause.txt": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
+    "licenses/rust-standard-library/licenses/MIT.txt": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+    "licenses/rust-standard-library/licenses/Unicode-3.0.txt": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443"
+  },
+  "rust_source_commit": "88d9e12ae178fab0fb5cc050a94da85685d449ea",
+  "rust_toolchain": "1.98.0",
+  "schema_version": 1,
+  "scope": "Pinned conservative Cargo/native notices and unmodified Rust standard-library distribution notices; re-review this ledger when lockfile or toolchain changes.",
+  "targets": [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu"
+  ]
+}

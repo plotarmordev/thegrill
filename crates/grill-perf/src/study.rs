@@ -288,18 +288,19 @@ impl Report {
 fn declaration(bytes: &[u8]) -> Result<Deployment> {
     let value: Deployment = serde_json::from_slice(bytes)
         .map_err(|e| format!("invalid deployment declaration: {e}"))?;
-    value.validate()?;
-    if [
-        &value.model_revision,
-        &value.runtime,
-        &value.hardware,
-        &value.settings,
-    ]
-    .iter()
-    .any(|v| v.as_deref().is_none_or(|s| s.trim().is_empty()))
-    {
-        return Err("baseline/check require nonempty model_revision, runtime, hardware and settings declarations".into());
+    for (field, declared) in [
+        ("model_revision", &value.model_revision),
+        ("runtime", &value.runtime),
+        ("hardware", &value.hardware),
+        ("settings", &value.settings),
+    ] {
+        if declared.as_deref().is_none_or(|s| s.trim().is_empty()) {
+            return Err(format!(
+                "deployment declaration requires nonempty {field}; supply its actual deployment identifier in --deployment, not a guessed value"
+            ));
+        }
     }
+    value.validate()?;
     Ok(value)
 }
 
@@ -1045,7 +1046,12 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         if std::fs::canonicalize(parent)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                format!(
+                    "resolve output parent {}: {e}; create the parent or choose an existing nonsymlink directory",
+                    parent.display()
+                )
+            })?
             .starts_with(&baseline)
         {
             return Err("candidate output must be outside the immutable baseline directory".into());
