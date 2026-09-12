@@ -146,11 +146,18 @@ class Installed:
     def __init__(self, root, evidence):
         self.root, self.evidence = root, evidence
         self.index = 0
+        system_ca = Path("/etc/ssl/certs/ca-certificates.crt")
+        require(system_ca.is_file() and system_ca.stat().st_size > 0,
+                "clean runtime requires a native system CA trust store (Ubuntu ca-certificates)")
+        self.ca_bundle = evidence / "runtime-ca-certificates.crt"
+        with system_ca.open("rb") as source, self.ca_bundle.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
         self.base = ["docker", "run", "--rm", "--read-only",
                      "--cap-drop=ALL", "--security-opt=no-new-privileges",
                      "--user", f"{os.getuid()}:{os.getgid()}",
                      "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
                      "--mount", f"type=bind,src={root},dst=/opt/grill,readonly",
+                     "--mount", f"type=bind,src={self.ca_bundle},dst=/etc/ssl/certs/ca-certificates.crt,readonly",
                      "--mount", f"type=bind,src={evidence},dst=/evidence",
                      "--workdir", "/tmp"]
 
@@ -224,6 +231,19 @@ def main():
     else:
         raise RuntimeError("corrupted download was not rejected before execution")
     corrupted.unlink()
+    docker_context = os.environ.get("DOCKER_CONTEXT")
+    docker_host = os.environ.get("DOCKER_HOST")
+    if docker_context or docker_host is None:
+        context_args = ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
+        if docker_context:
+            context_args += ["--", docker_context]
+        docker_host = subprocess.check_output(context_args, text=True, timeout=30).strip()
+    require(docker_host.startswith("unix://"), "installed smoke requires a local Docker daemon, not SSH/TCP contexts")
+    docker_info = json.loads(subprocess.check_output(["docker", "info", "--format", "{{json .}}"], text=True, timeout=30))
+    require(docker_info["OSType"] == "linux" and docker_info["Architecture"] in
+            {TARGETS[options.target], "amd64" if options.target.startswith("x86_64") else "arm64"}
+            and not any("rootless" in option for option in docker_info.get("SecurityOptions", [])),
+            "installed smoke requires a native local rootful Linux Docker runtime")
     subprocess.run(["docker", "pull", IMAGE], check=True, capture_output=True, text=True, timeout=300)
     installed = Installed(root, evidence)
     clean = installed.raw(["/bin/sh", "-ec", "if command -v rustc || command -v cargo; then exit 1; fi; test ! -e /opt/grill/Cargo.toml; test ! -e /workspace; uname -m; getconf GNU_LIBC_VERSION"], network=False)
@@ -240,7 +260,7 @@ def main():
             "installed workload inspection failed")
     scenarios = []
     checks = ["checksum_before_execution", "corrupt_download_rejected", "payload_hashes",
-              "native_clean_runtime", "version", "help", "bundle_verify", "bundle_inspect"]
+              "native_clean_runtime", "elf_architecture", "local_runtime_guard", "version", "help", "bundle_verify", "bundle_inspect"]
     for name, control, token, selection in [
         ("neutral-alpha", "thinking", None, None),
         ("neutral-beta", "enable_thinking", TOKEN, "concurrency-enable-thinking-selection-v1.json"),
@@ -374,7 +394,9 @@ def main():
                "source_commit": receipt["source_commit"], "target": options.target,
                "archive_sha256": archive_hash, "binary_sha256": binary_hash,
                "runtime": {"image": IMAGE, "architecture": runtime_lines[0], "glibc": runtime_lines[1],
-                           "rust_available": False, "source_checkout_available": False},
+                           "rust_available": False, "source_checkout_available": False,
+                           "ca_bundle_source": "read-only native system trust store",
+                           "ca_bundle_sha256": digest(installed.ca_bundle)},
                "checks": checks, "scenarios": scenarios,
                "claim": "native clean installed CPU protocol verification, not model/backend qualification"}
     (options.out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")

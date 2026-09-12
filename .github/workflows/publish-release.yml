@@ -89,6 +89,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           from pathlib import Path
           import urllib.error
           import urllib.parse
@@ -148,7 +149,10 @@ jobs:
                   runtime = smoke['runtime']
                   require(runtime['image'] == 'ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254'
                           and runtime['architecture'] == target.split('-')[0] and runtime['glibc'] == 'glibc 2.39'
-                          and runtime['rust_available'] is False and runtime['source_checkout_available'] is False,
+                          and runtime['rust_available'] is False and runtime['source_checkout_available'] is False
+                          and runtime.get('ca_bundle_source') == 'read-only native system trust store'
+                          and isinstance(runtime.get('ca_bundle_sha256'), str)
+                          and re.fullmatch(r'[0-9a-f]{64}', runtime['ca_bundle_sha256']),
                           'Installed smoke runtime mismatch')
                   assets.extend(directory / name for name in names)
               return assets

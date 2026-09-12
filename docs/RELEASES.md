@@ -139,9 +139,12 @@ python3 tools/smoke-installed.py \
 The helper verifies the checksum before unpacking or executing the archive.
 It uses the native Ubuntu 24.04/glibc 2.39 runtime image
 `ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254`
-without Rust or a source checkout. Docker must be available on the staging host;
-fixture baseline/control/comparison and offline inspection exercise the actual
-CLI outside its extraction directory. Negative cases cover corrupt archives,
+without Rust or a source checkout. A native system CA bundle is mounted read-only
+at the standard trust-store location; its digest and source are recorded in the
+smoke summary. The HTTP client requires that OS prerequisite even for loopback
+initialization. Docker must be available on the staging host. Fixture collection
+uses host networking; help/inspection and offline replay use network isolation.
+All commands run outside the extraction directory. Negative cases cover corrupt archives,
 wrong architecture/runtime assumptions and invalid evidence. No serving, model,
 GPU or billing operation is part of this workflow.
 

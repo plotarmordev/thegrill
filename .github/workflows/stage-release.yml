@@ -174,7 +174,7 @@ jobs:
           require(set(summary) == {'schema_version', 'status', 'release_version', 'source_commit', 'target',
                   'archive_sha256', 'binary_sha256', 'runtime', 'checks', 'scenarios', 'claim'}
                   and set(summary['runtime']) == {'image', 'architecture', 'glibc',
-                  'rust_available', 'source_checkout_available'}
+                  'rust_available', 'source_checkout_available', 'ca_bundle_source', 'ca_bundle_sha256'}
                   and all(set(scenario) == {'id', 'baseline_result', 'control_result',
                   'candidate_result', 'request_count'} for scenario in summary['scenarios']),
                   'Only the public smoke summary schema may be uploaded')

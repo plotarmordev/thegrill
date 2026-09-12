@@ -14,7 +14,8 @@ a moving `latest` pin.
 Choose `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` to match `uname -m`.
 The supported baseline is native Ubuntu 24.04 / glibc 2.39; older libc and other
 runtimes are not qualified by that statement. Installed use needs no Rust or
-checkout. HTTPS needs normal system CA certificates; do not disable TLS checks.
+checkout. A readable system CA store (Ubuntu `ca-certificates`) is required for
+client initialization, including loopback HTTP; do not disable TLS checks.
 The shell examples use `curl`, `sha256sum`, `tar`, and `jq`.
 An `Exec format error` means the archive/CPU choice is wrong: obtain the native
 target rather than treating emulation as qualification. A missing `GLIBC_*`

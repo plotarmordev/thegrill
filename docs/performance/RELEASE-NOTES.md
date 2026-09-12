@@ -25,6 +25,10 @@ and Rust 1.98.0. The supported installed-runtime baseline is native Ubuntu
 24.04 with glibc 2.39; older libc, musl, other operating systems and emulation
 are not qualified by this release mechanism. Other Linux distributions need
 separate validation or a source build.
+A readable system CA trust store (Ubuntu `ca-certificates`) is required for client
+initialization, including loopback HTTP. The clean-runtime smoke records the
+read-only native CA bundle digest; no CA contents are packaged and TLS checks
+are never disabled.
 
 Existing evidence compatibility checks remain authoritative. A newer binary
 must not reinterpret or rewrite old receipts in place. Retain the exact binary,
@@ -46,7 +50,8 @@ Native archive qualification remains pending for both targets. Before approval,
 retain successful exact-source native staging runs and the public-safe
 `grill-perf-VERSION-TARGET.smoke.json` summaries produced from `summary.json`.
 Each summary must bind the reviewed source, version, target, archive and binary
-digests and record the exact pinned runtime image, native architecture and libc.
+digests and record the pinned runtime image, native architecture, libc and system
+CA trust-store identity.
 It must demonstrate the CLI fixture flows and negative cases without Rust or a
 source checkout. Commands and image identity are in the release procedure.
 No native/archive success is claimed by these notes before that evidence exists.

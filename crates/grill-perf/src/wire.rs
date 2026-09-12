@@ -192,7 +192,7 @@ pub fn client(local: bool, pool: usize) -> Result<reqwest::Client> {
         .referer(false)
         .pool_max_idle_per_host(pool)
         .build()
-        .map_err(|_| "could not construct HTTP client".into())
+        .map_err(|_| "could not construct HTTP client; verify runtime prerequisites, including a readable system CA certificate store".into())
 }
 pub fn request(
     client: &reqwest::Client,

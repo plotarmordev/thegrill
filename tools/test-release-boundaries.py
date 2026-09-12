@@ -208,7 +208,8 @@ class ReleaseBoundaries(unittest.TestCase):
                      "source_commit": SOURCE, "target": target, "archive_sha256": archive_hash,
                      "binary_sha256": binary_hash,
                      "runtime": {"image": IMAGE, "architecture": target.split("-")[0], "glibc": "glibc 2.39",
-                                 "rust_available": False, "source_checkout_available": False}}
+                                 "rust_available": False, "source_checkout_available": False,
+                                 "ca_bundle_source": "read-only native system trust store", "ca_bundle_sha256": "c" * 64}}
             receipt_path, smoke_path = directory / f"{stem}.receipt.json", directory / f"{stem}.smoke.json"
             receipt_path.write_text(json.dumps(receipt))
             smoke_path.write_text(json.dumps(smoke))
@@ -298,7 +299,8 @@ class ReleaseBoundaries(unittest.TestCase):
                       ("source_commit", "b" * 40), ("target", "wrong-target"), ("archive_sha256", "0" * 64),
                       ("binary_sha256", "0" * 64), ("runtime.image", "ubuntu:latest"),
                       ("runtime.architecture", "wrong-architecture"), ("runtime.glibc", "glibc 2.40"),
-                      ("runtime.rust_available", True), ("runtime.source_checkout_available", True)),
+                      ("runtime.rust_available", True), ("runtime.source_checkout_available", True),
+                      ("runtime.ca_bundle_source", "unknown"), ("runtime.ca_bundle_sha256", "invalid")),
         }
         for target in TARGETS:
             for kind, cases in mutations.items():

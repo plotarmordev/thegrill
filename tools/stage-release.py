@@ -229,6 +229,7 @@ def main():
                       "fresh_target_directory": True, "build_overrides": False},
             "runtime": {"os": "Ubuntu", "version": "24.04", "libc": libc,
                         "architecture": platform.machine(), "native_build": True,
+                        "system_ca_store_required": True,
                         "installed_smoke": "required separately; not attested by this receipt"},
             "archive": {"file": archive.name, "sha256": archive_hash, "bytes": archive.stat().st_size},
             "checksum": {"file": checksum.name, "sha256": digest(checksum)},
