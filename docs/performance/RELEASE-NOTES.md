@@ -16,6 +16,11 @@ in each staged build receipt; a future approved tag must identify that commit.
 - Keep stored evidence and workload identities unchanged. The release number is
   not a workload/schema version or a measurement-contract revision.
 - The quality CLI remains work in progress and is not packaged.
+- Invalid capture loads no longer substitute the built-in C1/exact400 scope for
+  an unverified selected capture. Scope and human acquisition counts are explicitly
+  unavailable; timing-window errors name the acquisition and both duration values.
+  Accounting is not promoted, and timing checks, report schemas and exit codes
+  remain unchanged. Offline replay does not rewrite historical reports.
 
 ### Target and compatibility boundary
 

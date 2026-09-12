@@ -157,6 +157,9 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
     assert!(before.status.success(), "{baseline}");
     assert_eq!(baseline["baseline_ready"], true);
     assert_eq!(baseline["baseline_complete_acquisitions"], 8);
+    let scope = baseline["scope"].as_str().unwrap();
+    assert!(scope.contains("Explicit selected workload"), "{scope}");
+    assert!(!scope.contains("unavailable"), "{scope}");
     assert_eq!(baseline["baseline_accounting"]["dispatched_requests"], 224);
     assert_eq!(
         baseline["baseline_accounting"]["output_token_ceiling"],
@@ -192,6 +195,13 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
     );
     assert!(!terminal.lines().next().unwrap().contains("INCONCLUSIVE"));
     let report = read_json(&temp.path("control/report.json"));
+    assert_eq!(
+        terminal.lines().nth(1).unwrap(),
+        format!(
+            "Scope: {}",
+            report["selected"]["manifest"]["scope"].as_str().unwrap()
+        )
+    );
     assert_eq!(report["result"], "DESCRIPTIVE");
     assert_eq!(report["declared_change"], "none");
     assert_eq!(report["candidate_complete_acquisitions"], 8);
@@ -284,7 +294,16 @@ fn selected_cli_inherits_pinned_workload_and_auth_outside_checkout_and_replays_o
         .env_remove("GRILL_SELECTION_TEST_KEY")
         .output()
         .unwrap();
-    assert_eq!(decoded(&rejected)["result"], "INVALID");
+    assert_eq!(rejected.status.code(), Some(1));
+    let rejected = decoded(&rejected);
+    assert_eq!(rejected["result"], "INVALID");
+    assert!(rejected.get("selected").is_none(), "{rejected}");
+    assert!(rejected["baseline_accounting"].is_null(), "{rejected}");
+    assert_eq!(rejected["baseline_complete_acquisitions"], 0);
+    assert!(
+        rejected["scope"].as_str().unwrap().contains("unavailable"),
+        "{rejected}"
+    );
     assert!(!temp.path("drift/acquisition-00").exists());
 }
 
@@ -523,4 +542,197 @@ fn explicit_c1_selection_never_uses_default_inference() {
     assert_eq!(decoded(&overrun)["result"], "INCONCLUSIVE");
     assert_eq!(decoded(&overrun)["baseline_complete_acquisitions"], 8);
     assert_eq!(server.count.load(Ordering::SeqCst), count);
+}
+
+/// Sum of the retained native wave makespans for one acquisition directory.
+fn acquisition_waves_us(root: &Path, index: usize) -> u64 {
+    let mut total = 0u64;
+    for entry in fs::read_dir(root.join(format!("acquisition-{index:02}"))).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("wave-"))
+        {
+            total += read_json(&path.join("wave.json"))["elapsed_us"]
+                .as_u64()
+                .unwrap();
+        }
+    }
+    total
+}
+
+/// Shorten one declared acquisition below its retained native wave duration. Native receipts stay
+/// untouched; only the capture declaration and the timing receipt that binds it change.
+fn shorten_declared_finish(root: &Path, index: usize) -> (u64, u64) {
+    let waves_us = acquisition_waves_us(root, index);
+    assert!(
+        waves_us > 1_000,
+        "paced fixture must retain more than 1ms of native wave duration: {waves_us}us"
+    );
+    let mut capture = read_json(&root.join("capture.json"));
+    let started = capture["acquisitions"][index]["started_unix_ms"]
+        .as_u64()
+        .unwrap();
+    let finished = started + (waves_us - 1) / 1_000 - 1;
+    let window_us = (waves_us - 1) / 1_000 * 1_000;
+    capture["acquisitions"][index]["finished_unix_ms"] = json!(finished);
+    write_json(&root.join("capture.json"), &capture);
+    let mut timing = read_json(&root.join("capture-timing.json"));
+    timing["capture_sha256"] = json!(file_hash(&root.join("capture.json")));
+    write_json(&root.join("capture-timing.json"), &timing);
+    (window_us, waves_us)
+}
+
+/// A verified load failure establishes no scope, accounting, selection, or directional verdict.
+fn assert_unavailable_load_failure(report: &Value, window_us: u64, waves_us: u64) {
+    assert_eq!(report["result"], "INVALID", "{report}");
+    assert_eq!(report["baseline_ready"], false);
+    assert!(report.get("selected").is_none(), "{report}");
+    assert!(report["baseline_accounting"].is_null(), "{report}");
+    assert!(report["candidate_accounting"].is_null(), "{report}");
+    assert_eq!(report["baseline_complete_acquisitions"], 0);
+    assert_eq!(report["candidate_complete_acquisitions"], 0);
+    assert_eq!(report["baseline_acquisition_medians"], json!([]));
+    assert_eq!(report["candidate_acquisition_medians"], json!([]));
+    assert!(report["observed_change_percent"].is_null());
+    assert!(report["model_based_interval_percent"].is_null());
+    assert!(report["model_based_confidence_level"].is_null());
+    assert!(report["first_failure"].is_null(), "{report}");
+    let scope = report["scope"].as_str().unwrap();
+    assert!(scope.contains("unavailable"), "{scope}");
+    assert!(!scope.contains("One short synthetic structured"));
+    assert!(!scope.contains("Explicit selected workload"));
+    let reasons = report["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        reasons.contains("native wave durations exceed the declared acquisition time window"),
+        "{reasons}"
+    );
+    assert!(reasons.contains("acquisition-03"), "{reasons}");
+    assert!(
+        reasons.contains(&format!("waves_us={waves_us}")),
+        "{reasons}"
+    );
+    assert!(
+        reasons.contains(&format!("window_us={window_us}")),
+        "{reasons}"
+    );
+}
+
+#[test]
+fn selected_window_overrun_replays_as_unavailable_without_partial_selection_or_verdict() {
+    let temp = Temp::new();
+    let selection = inputs(&temp, true);
+    let declaration = deployment(&temp, "serving.json", "before");
+    let server = Server::new(|stream, _, body| {
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"enable_thinking": false})
+        );
+        // Bounded pacing keeps retained wave duration above the declaration allowance.
+        thread::sleep(Duration::from_micros(500));
+        response(stream, Some(64), false);
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "before")
+        .output()
+        .unwrap();
+    let collected = decoded(&output);
+    assert!(output.status.success(), "{collected}");
+    assert_eq!(collected["baseline_ready"], true);
+    assert_eq!(collected["baseline_complete_acquisitions"], 8);
+    drop(server);
+
+    let pristine_report = fs::read(temp.path("before/report.json")).unwrap();
+    let pristine_text = fs::read(temp.path("before/report.txt")).unwrap();
+    copy_tree(&temp.path("before"), &temp.path("clean"));
+    let (window_us, waves_us) = shorten_declared_finish(&temp.path("before"), 3);
+    assert!(
+        window_us < waves_us,
+        "injected window {window_us}us does not undercut waves {waves_us}us"
+    );
+
+    // Offline from here: no endpoint, clock, schema, or native receipt is involved.
+    let rejected = command()
+        .arg("check")
+        .arg(temp.path("before"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--json", "--out"])
+        .arg(temp.path("rejected"))
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    let report = decoded(&rejected);
+    assert_unavailable_load_failure(&report, window_us, waves_us);
+    assert!(!temp.path("rejected/capture.json").exists());
+    assert!(!temp.path("rejected/acquisition-00").exists());
+    assert_eq!(read_json(&temp.path("rejected/report.json")), report);
+
+    let human = command()
+        .arg("check")
+        .arg(temp.path("before"))
+        .arg("--deployment")
+        .arg(&declaration)
+        .args(["--change", "none", "--out"])
+        .arg(temp.path("rejected-human"))
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(1));
+    let text = String::from_utf8(human.stdout).unwrap();
+    let mut lines = text.lines();
+    assert!(lines.next().unwrap().starts_with("INVALID"), "{text}");
+    let human_scope = lines.next().unwrap();
+    assert!(human_scope.starts_with("Scope: "), "{text}");
+    assert!(
+        human_scope.to_ascii_lowercase().contains("unavailable"),
+        "{text}"
+    );
+    assert!(!human_scope.contains("structured C1 (one concurrent"));
+    assert!(!human_scope.contains("Explicit selected workload"));
+    let counts = lines.next().unwrap();
+    assert!(counts.starts_with("Complete acquisitions: "), "{text}");
+    assert!(!counts.contains("0/8"), "{text}");
+    assert!(counts.to_ascii_lowercase().contains("unavailable"));
+    assert!(text.contains("acquisition-03"), "{text}");
+    assert!(text.contains(&format!("waves_us={waves_us}")));
+    assert!(text.contains(&format!("window_us={window_us}")));
+    for verdict in ["MEASURED FASTER", "MEASURED SLOWER", "DESCRIPTIVE"] {
+        assert!(!text.contains(verdict), "{verdict} in {text}");
+    }
+
+    let candidate_failure = compare(&temp.path("clean"), &temp.path("before"));
+    assert_eq!(candidate_failure.status.code(), Some(1));
+    assert_unavailable_load_failure(&decoded(&candidate_failure), window_us, waves_us);
+    assert_eq!(
+        compare(&temp.path("clean"), &temp.path("before")).stdout,
+        candidate_failure.stdout
+    );
+
+    let baseline_failure = compare(&temp.path("before"), &temp.path("clean"));
+    assert_eq!(baseline_failure.status.code(), Some(1));
+    assert_unavailable_load_failure(&decoded(&baseline_failure), window_us, waves_us);
+
+    // Replaying stored reports never rewrites them, even when their capture no longer verifies.
+    assert_eq!(
+        fs::read(temp.path("before/report.json")).unwrap(),
+        pristine_report
+    );
+    assert_eq!(
+        fs::read(temp.path("before/report.txt")).unwrap(),
+        pristine_text
+    );
+    assert_eq!(
+        fs::read(temp.path("clean/report.json")).unwrap(),
+        pristine_report
+    );
+    assert_eq!(
+        fs::read(temp.path("clean/report.txt")).unwrap(),
+        pristine_text
+    );
 }

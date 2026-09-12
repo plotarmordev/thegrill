@@ -9,6 +9,8 @@ const CRITICAL: f64 = 2.364624251;
 const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
 const ASSUMPTIONS: &str = "Model-based interval assumes stable, independent acquisition-level variation and an adequate log-scale mean model. Resetting a client does not prove independence. Positive autocorrelation can make the interval narrower than justified, increasing false directional conclusions. Sequential captures cannot remove time or carryover confounding; no causal attribution, equivalence, noninferiority, or guaranteed precision/power is established.";
 const SCOPE: &str = "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed.";
+const UNAVAILABLE_SCOPE: &str =
+    "unavailable: capture workload identity was not verified for this report";
 const UNCHANGED_SCOPE: &str = "Unchanged-deployment control: any directional result is an observed capture-period shift requiring repeatability investigation, not evidence of a serving-change effect. An inconclusive result does not establish equality or repeatability.";
 const SELECTED_SCOPE: &str = "Explicit selected workload: descriptive per-cell/acquisition observations only. No pooled improvement, C1 inference, capacity, tail-SLO, equivalence or causal claim; concurrent lanes are correlated, not independent acquisitions.";
 const OVERHEAD_STOP: &str =
@@ -259,7 +261,7 @@ impl Report {
             stop_reason: None,
             first_failure: None,
             assumptions: ASSUMPTIONS,
-            scope: SCOPE,
+            scope: UNAVAILABLE_SCOPE,
             selected: None,
         }
     }
@@ -577,7 +579,10 @@ fn load(root: &Path) -> Result<Verified> {
             .try_fold(0u64, |total, wave| total.checked_add(wave.elapsed_us))
             .ok_or("acquisition wave durations overflow")?;
         if waves_us > window_us {
-            return Err("native wave durations exceed the declared acquisition time window".into());
+            return Err(format!(
+                "native wave durations exceed the declared acquisition time window ({}: waves_us={waves_us}, window_us={window_us}; durations in microseconds; window includes +1ms allowance for millisecond-resolution declarations)",
+                acquisition.directory
+            ));
         }
         previous_finish = Some(finished);
         if first_failure.is_none() {
@@ -961,6 +966,8 @@ fn selected_report(report: &mut Report, selected: Option<SelectedReport>) {
         report.assumptions = SELECTED_SCOPE;
         report.result_scope = SELECTED_SCOPE;
         report.selected = selected;
+    } else {
+        report.scope = SCOPE;
     }
 }
 
@@ -1347,14 +1354,34 @@ pub fn human(report: &Report) -> String {
             Outcome::Invalid => "INVALID: evidence or declarations cannot support this comparison",
         }
     };
-    let scope = report.selected.as_ref().map_or(
-        "structured C1 (one concurrent request), exactly 400 output tokens per request.",
-        |selected| selected.manifest.scope.as_str(),
-    );
-    let mut text = format!(
-        "{label}\nScope: {scope}\nComplete acquisitions: baseline {}/{ACQUISITIONS}; candidate {}/{ACQUISITIONS}\n",
-        report.baseline_complete_acquisitions, report.candidate_complete_acquisitions
-    );
+    let scope = if let Some(selected) = &report.selected {
+        selected.manifest.scope.as_str()
+    } else if report.scope == SCOPE {
+        "structured C1 (one concurrent request), exactly 400 output tokens per request."
+    } else {
+        report.scope
+    };
+    let mut text = format!("{label}\nScope: {scope}\nComplete acquisitions: ");
+    for (side, accounting, complete) in [
+        (
+            "baseline ",
+            &report.baseline_accounting,
+            report.baseline_complete_acquisitions,
+        ),
+        (
+            "; candidate ",
+            &report.candidate_accounting,
+            report.candidate_complete_acquisitions,
+        ),
+    ] {
+        text.push_str(side);
+        if accounting.is_some() {
+            text.push_str(&format!("{complete}/{ACQUISITIONS}"));
+        } else {
+            text.push_str("unavailable");
+        }
+    }
+    text.push('\n');
     if let Some(selected) = &report.selected {
         text.push_str(&format!(
             "Selection {}: {}; operation scope {:?} (operator declaration)\n{}\n",

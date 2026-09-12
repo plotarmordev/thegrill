@@ -93,9 +93,11 @@ This is a presentation mapping for the capture workflow, not a new verdict
 schema. JSON result codes, numeric observations, interval calculations, thresholds
 and exit statuses are unchanged. Existing stored `report.json` and `report.txt`
 files are never migrated or renamed. New text reports and human-readable
-`compare` output use the display labels, with default structured C1 or the
-explicit selected scope immediately below the headline. Machine consumers should
-continue to use the JSON codes, not parse the display text.
+`compare` output use the display labels, with the verified default structured C1
+or explicit selected scope immediately below the headline. If capture loading
+fails, scope is explicitly unavailable; it never falls back to the default
+workload. Machine consumers should continue to use the JSON codes, not parse
+the display text.
 
 Reports keep the observed percentage separate from the uncertainty range and
 explain that correlated or drifting measurements can make that range too narrow.
@@ -104,6 +106,15 @@ Measured direction does not establish its cause or practical importance.
 declared change, artifact paths and verified request/token accounting. Missing
 usage stays unknown. Failure reports contain the first failing request's status,
 reported usage, expected output count, errors and raw-evidence path.
+
+A failed capture load remains `INVALID`/exit 1, with no performance verdict or
+partial `selected` report. Its accounting remains null. The existing JSON
+complete-acquisition counters count verified acquisitions; when the corresponding
+accounting is null, their zero values are placeholders, not observed zero coverage.
+Human output displays those counts as unavailable. Native-wave duration failures
+identify the acquisition, the summed wave duration and the declared window in
+microseconds, including the unchanged 1 ms resolution allowance. A mismatch does
+not establish a clock-adjustment cause or authorize relaxing integrity checks.
 
 Each root contains immutable `capture.json`, exact workload/deployment bytes and
 eight indexed native acquisition directories, including empty unstarted slots.
