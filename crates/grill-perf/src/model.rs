@@ -25,7 +25,6 @@ pub enum Role {
 pub enum Profile {
     PortableChatV1,
     VllmFixedV1,
-    VllmConversationV1,
     VllmConversationV2,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

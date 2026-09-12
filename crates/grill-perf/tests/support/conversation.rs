@@ -1,17 +1,13 @@
 use super::*;
 use std::cell::RefCell;
 
-const STEPS: usize = 11;
+const STEPS: usize = 13;
 
 fn fixture(fault: Option<(usize, &'static str)>) -> Server {
-    fixture_version(false, fault)
-}
-
-fn fixture_version(v2: bool, fault: Option<(usize, &'static str)>) -> Server {
     let prefixes = RefCell::new(Vec::<(String, Vec<u8>)>::new());
     Server::new(move |mut stream, index, request| {
-        let step = index % if v2 { 13 } else { STEPS };
-        let streaming = v2 && step != 7;
+        let step = index % STEPS;
+        let streaming = step != 7;
         assert_eq!(request["stream"], streaming);
         if streaming {
             assert_eq!(request["stream_options"], json!({"include_usage":true}));
@@ -38,7 +34,7 @@ fn fixture_version(v2: bool, fault: Option<(usize, &'static str)>) -> Server {
             })
             .max()
             .unwrap_or(0);
-        if matches!(step, 0 | 2 | 9) || (v2 && step == 11) {
+        if matches!(step, 0 | 2 | 9 | 11) {
             assert_eq!(cached, 0);
         } else {
             assert!(cached > 0);
@@ -85,7 +81,7 @@ fn fixture_version(v2: bool, fault: Option<(usize, &'static str)>) -> Server {
         if step == 8 {
             assert_eq!(fact.as_deref(), Some("sapphire"));
         }
-        if v2 && step >= 11 {
+        if step >= 11 {
             assert_eq!(fact.as_deref(), Some("amber"));
         }
         let injected = fault
@@ -120,13 +116,11 @@ fn fixture_version(v2: bool, fault: Option<(usize, &'static str)>) -> Server {
         };
         let cached = if injected == Some("evict") { 0 } else { cached };
         let usage = json!({"prompt_tokens":encoded.len()/4+1,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":cached}});
-        if v2 {
-            // Retain only the latest request for each of two LRU history slots.
-            if let Some(position) = prefixes.iter().position(|(old, _)| old == &salt) {
-                prefixes.remove(position);
-            } else if prefixes.len() == 2 {
-                prefixes.remove(0);
-            }
+        // Retain only the latest request for each of two LRU history slots.
+        if let Some(position) = prefixes.iter().position(|(old, _)| old == &salt) {
+            prefixes.remove(position);
+        } else if prefixes.len() == 2 {
+            prefixes.remove(0);
         }
         prefixes.push((salt, encoded));
         drop(prefixes);
@@ -172,16 +166,12 @@ fn fixture_version(v2: bool, fault: Option<(usize, &'static str)>) -> Server {
 }
 
 fn workload() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/conversation-v1.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/conversation-v2.json")
 }
 fn run_sequence(temp: &Temp, server: &Server) -> Output {
-    run_sequence_path(temp, server, workload())
-}
-
-fn run_sequence_path(temp: &Temp, server: &Server, workload: PathBuf) -> Output {
     command()
         .arg("run")
-        .arg(workload)
+        .arg(workload())
         .args([
             "--endpoint",
             &server.endpoint,
@@ -196,10 +186,10 @@ fn run_sequence_path(temp: &Temp, server: &Server, workload: PathBuf) -> Output 
         .unwrap()
 }
 
-fn selected_control(v2: bool) {
+#[test]
+fn conversation_replays_streamed_facts_eviction_and_recovery() {
     let temp = Temp::new();
-    let server = fixture_version(v2, None);
-    let steps = if v2 { 13 } else { STEPS };
+    let server = fixture(None);
     let declaration = deployment(&temp, "deployment.json", "fixture-settings");
     let baseline = command()
         .current_dir(&temp.0)
@@ -213,11 +203,7 @@ fn selected_control(v2: bool) {
             "--json",
         ])
         .arg("--selection")
-        .arg(workload().with_file_name(if v2 {
-            "conversation-selection-v2.json"
-        } else {
-            "conversation-selection-v1.json"
-        }))
+        .arg(workload().with_file_name("conversation-selection-v2.json"))
         .arg("--deployment")
         .arg(&declaration)
         .arg("--out")
@@ -226,7 +212,7 @@ fn selected_control(v2: bool) {
         .unwrap();
     let report = decoded(&baseline);
     assert_eq!(report["baseline_ready"], true, "{report}");
-    assert_eq!(server.count.load(Ordering::SeqCst), 8 * steps);
+    assert_eq!(server.count.load(Ordering::SeqCst), 8 * STEPS);
     let candidate = command()
         .current_dir(&temp.0)
         .arg("check")
@@ -240,59 +226,54 @@ fn selected_control(v2: bool) {
         .unwrap();
     let report = decoded(&candidate);
     assert_eq!(report["result"], "DESCRIPTIVE", "{report}");
-    assert_eq!(server.count.load(Ordering::SeqCst), 16 * steps);
+    assert_eq!(server.count.load(Ordering::SeqCst), 16 * STEPS);
     let offline = decoded(&compare(&temp.path("baseline"), &temp.path("candidate")));
     assert_eq!(offline, report);
     let wave = read_json(&temp.path("baseline/acquisition-00/wave-000001/wave.json"));
     assert_eq!(wave["attempts"][0]["sequence"]["correct"], true);
     assert_eq!(wave["attempts"][0]["sequence"]["canonical_match"], false);
-    if v2 {
-        let timing = &wave["attempts"][0]["timing"];
-        let first = timing["first_generated_text_us"].as_u64().unwrap();
-        assert_eq!(timing["first_answer_text_us"], first);
-        assert!(timing["terminal_us"].as_u64().unwrap() > first);
-        assert!(
-            timing["terminal_us"].as_u64().unwrap()
-                > timing["last_generated_text_us"].as_u64().unwrap()
-        );
-        let tool = read_json(&temp.path("baseline/acquisition-00/wave-000007/wave.json"));
-        for field in [
-            "first_generated_text_us",
-            "first_answer_text_us",
-            "last_generated_text_us",
-        ] {
-            assert!(tool["attempts"][0]["timing"][field].is_null());
-        }
-        let returned = read_json(&temp.path("baseline/acquisition-00/wave-000011/wave.json"));
-        assert_eq!(returned["attempts"][0]["usage"]["cached_prompt_tokens"], 0);
-        assert_eq!(returned["attempts"][0]["sequence"]["correct"], true);
-        assert_eq!(returned["eligible"], true);
-        let recovered = read_json(&temp.path("baseline/acquisition-00/wave-000012/wave.json"));
-        assert!(
-            recovered["attempts"][0]["usage"]["cached_prompt_tokens"]
-                .as_u64()
-                .unwrap()
-                > 0
-        );
-        assert_eq!(
-            recovered["attempts"][0]["sequence"]["parent"],
-            "return-beta"
-        );
-        assert_eq!(recovered["eligible"], true);
-        let request = read_json(&temp.path("baseline/acquisition-00/wave-000003/reservation.json"));
-        let request: Value =
-            serde_json::from_str(request["requests"][0].as_str().unwrap()).unwrap();
-        assert!(
-            request["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|message| message["role"] == "assistant"
-                    && message["content"] == "\n{\"fact\":\"copper\"}\n")
-        );
-    } else {
-        assert!(wave["attempts"][0]["timing"]["first_generated_text_us"].is_null());
+    let timing = &wave["attempts"][0]["timing"];
+    let first = timing["first_generated_text_us"].as_u64().unwrap();
+    assert_eq!(timing["first_answer_text_us"], first);
+    assert!(timing["terminal_us"].as_u64().unwrap() > first);
+    assert!(
+        timing["terminal_us"].as_u64().unwrap()
+            > timing["last_generated_text_us"].as_u64().unwrap()
+    );
+    let tool = read_json(&temp.path("baseline/acquisition-00/wave-000007/wave.json"));
+    for field in [
+        "first_generated_text_us",
+        "first_answer_text_us",
+        "last_generated_text_us",
+    ] {
+        assert!(tool["attempts"][0]["timing"][field].is_null());
     }
+    let returned = read_json(&temp.path("baseline/acquisition-00/wave-000011/wave.json"));
+    assert_eq!(returned["attempts"][0]["usage"]["cached_prompt_tokens"], 0);
+    assert_eq!(returned["attempts"][0]["sequence"]["correct"], true);
+    assert_eq!(returned["eligible"], true);
+    let recovered = read_json(&temp.path("baseline/acquisition-00/wave-000012/wave.json"));
+    assert!(
+        recovered["attempts"][0]["usage"]["cached_prompt_tokens"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        recovered["attempts"][0]["sequence"]["parent"],
+        "return-beta"
+    );
+    assert_eq!(recovered["eligible"], true);
+    let request = read_json(&temp.path("baseline/acquisition-00/wave-000003/reservation.json"));
+    let request: Value = serde_json::from_str(request["requests"][0].as_str().unwrap()).unwrap();
+    assert!(
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "assistant"
+                && message["content"] == "\n{\"fact\":\"copper\"}\n")
+    );
     let path = temp.path("baseline/acquisition-00/wave-000005/wave.json");
     let mut tampered = read_json(&path);
     tampered["attempts"][0]["sequence"]["parent"] = json!("edit-alpha");
@@ -304,79 +285,22 @@ fn selected_control(v2: bool) {
 }
 
 #[test]
-fn conversation_selected_control_replays_real_branches_and_tool_history() {
-    selected_control(false);
-}
-
-#[test]
-fn conversation_v2_replays_streamed_facts_eviction_and_recovery() {
-    selected_control(true);
-}
-
-#[test]
-fn conversation_failures_stop_admission_and_keep_semantics_distinct_from_cache() {
-    for (step, fault) in [
-        (2, "leak"),
-        (4, "stale"),
-        (6, "evict"),
-        (7, "arguments"),
-        (7, "name"),
-        (7, "id"),
-        (9, "strict"),
-    ] {
-        let temp = Temp::new();
-        let server = fixture(Some((step, fault)));
-        let output = run_sequence(&temp, &server);
-        let report = decoded(&output);
-        assert_eq!(
-            report["status"],
-            if fault == "evict" {
-                "stopped-after-ineligible-response"
-            } else {
-                "stopped-after-sequence-check"
-            },
-            "{report}"
-        );
-        assert_eq!(server.count.load(Ordering::SeqCst), step + 1);
-        assert!(!temp.path(&format!("run/wave-{:06}", step + 1)).exists());
-        let wave = read_json(&temp.path(&format!("run/wave-{step:06}/wave.json")));
-        assert_eq!(wave["eligible"], fault != "evict");
-        let check = &wave["attempts"][0]["sequence"];
-        assert_eq!(check["correct"], fault == "evict" || fault == "strict");
-        if fault == "strict" {
-            assert_eq!(check["strict_match"], false);
-        }
-        let replay = command()
-            .arg("compare")
-            .arg(temp.path("run"))
-            .arg(temp.path("run"))
-            .arg("--json")
-            .output()
-            .unwrap();
-        let replay = decoded(&replay);
-        assert_eq!(&replay["baseline"][step]["sequence_check"], check);
-        assert_eq!(replay["changes"][step]["eligible"], false);
-    }
-}
-
-#[test]
-fn conversation_v2_invalid_or_incomplete_evidence_stops_and_replays() {
+fn conversation_invalid_or_incomplete_evidence_stops_and_replays() {
     for (step, fault, status, correct) in [
         (0, "stream-tool", "unsupported", false),
         (1, "missing-done", "incomplete", false),
         (2, "leak", "complete", false),
         (4, "stale", "complete", false),
+        (6, "evict", "complete", true),
         (7, "arguments", "complete", false),
+        (7, "name", "complete", false),
+        (7, "id", "complete", false),
         (9, "strict", "complete", true),
         (12, "evict", "complete", true),
     ] {
         let temp = Temp::new();
-        let server = fixture_version(true, Some((step, fault)));
-        let output = run_sequence_path(
-            &temp,
-            &server,
-            workload().with_file_name("conversation-v2.json"),
-        );
+        let server = fixture(Some((step, fault)));
+        let output = run_sequence(&temp, &server);
         let report = decoded(&output);
         assert_ne!(report["status"], "completed");
         assert_eq!(server.count.load(Ordering::SeqCst), step + 1);
@@ -385,6 +309,9 @@ fn conversation_v2_invalid_or_incomplete_evidence_stops_and_replays() {
         assert_eq!(wave["attempts"][0]["status"], status);
         assert_eq!(wave["attempts"][0]["sequence"]["correct"], correct);
         assert_eq!(wave["eligible"], status == "complete" && fault != "evict");
+        if fault == "strict" {
+            assert_eq!(wave["attempts"][0]["sequence"]["strict_match"], false);
+        }
         if fault == "missing-done" {
             let timing = &wave["attempts"][0]["timing"];
             assert!(timing["first_generated_text_us"].is_u64());
@@ -467,7 +394,7 @@ fn interrupted_sequence_retains_partial_response_without_followups_or_resume() {
     let started = Arc::new(AtomicBool::new(false));
     let observed = started.clone();
     let server = Server::new(move |mut stream, _, _| {
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 4096\r\n\r\n{{\"choices\":[").unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"{{\"}}}}]}}\n\n").unwrap();
         stream.flush().unwrap();
         observed.store(true, Ordering::SeqCst);
         thread::sleep(Duration::from_secs(2));

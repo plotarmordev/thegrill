@@ -44,10 +44,7 @@ pub fn validate(workload: &Workload) -> Result<()> {
     let sequence = workload.version == 2;
     if !sequence {
         if workload.cases.iter().any(|case| case.step.is_some())
-            || matches!(
-                workload.request.profile,
-                Profile::VllmConversationV1 | Profile::VllmConversationV2
-            )
+            || workload.request.profile == Profile::VllmConversationV2
         {
             return Err(
                 "sequence steps and conversation profile require workload version 2".into(),
@@ -55,16 +52,15 @@ pub fn validate(workload: &Workload) -> Result<()> {
         }
         return Ok(());
     }
-    if !matches!(
-        (workload.request.profile, workload.request.stream),
-        (Profile::VllmConversationV1, false) | (Profile::VllmConversationV2, true)
-    ) || workload.request.output.mode != OutputMode::Cap
+    if workload.request.profile != Profile::VllmConversationV2
+        || !workload.request.stream
+        || workload.request.output.mode != OutputMode::Cap
         || workload.request.cache != Cache::Observe
         || workload.cases.len() > 16
         || workload.cells.len() != workload.cases.len()
         || workload.limits.response_bytes > 64 * 1024
     {
-        return Err("workload v2 requires bounded vllm-conversation-v1 nonstreaming or vllm-conversation-v2 factual streaming, capped output, per-step cache declarations and at most 16 ordered C1 steps".into());
+        return Err("workload v2 requires bounded vllm-conversation-v2 factual streaming, capped output, per-step cache declarations and at most 16 ordered C1 steps".into());
     }
     for (index, (case, cell)) in workload.cases.iter().zip(&workload.cells).enumerate() {
         let step = case.step.as_ref().ok_or("every v2 case requires a step")?;
@@ -145,9 +141,7 @@ pub fn settings(workload: &Workload, spec: &WaveSpec) -> RequestSettings {
         .and_then(|c| c.step.as_ref())
     {
         settings.cache = step.cache;
-        if settings.profile == Profile::VllmConversationV2 {
-            settings.stream = matches!(step.expect, Expected::Json { .. });
-        }
+        settings.stream = matches!(step.expect, Expected::Json { .. });
     }
     settings
 }

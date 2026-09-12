@@ -568,10 +568,7 @@ fn complete_semantic(
     retain_answer: bool,
 ) -> Result<Semantic> {
     let mut semantic = Semantic {
-        allow_tools: matches!(
-            profile,
-            Profile::VllmConversationV1 | Profile::VllmConversationV2
-        ),
+        allow_tools: profile == Profile::VllmConversationV2,
         answer: retain_answer.then(String::new),
         ..Semantic::default()
     };
@@ -639,10 +636,7 @@ pub fn verify_partial_arrivals(
         return Ok(());
     }
     let mut semantic = Semantic {
-        allow_tools: matches!(
-            profile,
-            Profile::VllmConversationV1 | Profile::VllmConversationV2
-        ),
+        allow_tools: profile == Profile::VllmConversationV2,
         ..Semantic::default()
     };
     let mut timing = Timing::default();
@@ -717,10 +711,7 @@ pub async fn collect(
     };
     let mut body = Vec::new();
     let mut semantic = Semantic {
-        allow_tools: matches!(
-            settings.profile,
-            Profile::VllmConversationV1 | Profile::VllmConversationV2
-        ),
+        allow_tools: settings.profile == Profile::VllmConversationV2,
         ..Semantic::default()
     };
     let total =

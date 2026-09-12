@@ -19,12 +19,11 @@ No agent, cache reset, tool process or experiment coordinator is involved.
 
 ## Scope and budget
 
-The pinned scenario has thirteen ordered C1 steps. Its first eleven retain the
-original alpha/beta prime, reuse, alternation, edit/restore, fixed tool continuity
-and short prime/reuse inputs and checks. After the short history is introduced,
-`return-beta` observes cache reuse without requiring a hit; `recover-beta` is
-parented to that actual return and requires a reported hit. Existing hit
-requirements are not relaxed after an eviction.
+The pinned scenario has thirteen ordered C1 steps: alpha/beta prime, reuse,
+alternation, edit/restore, fixed tool continuity and short prime/reuse. After the
+short history is introduced, `return-beta` observes cache reuse without requiring
+a hit; `recover-beta` is parented to that actual return and requires a reported
+hit. These requirements are prospective, not relaxed after an eviction.
 
 Each capture contains eight whole-sequence acquisitions: **104 requests, at most
 13,312 requested output tokens**, including all primes and follow-ups. There are
@@ -54,10 +53,13 @@ collector. A delayed terminal is not the last answer arrival. Tool
 first-output/first-answer latency and decode-only rates remain **unavailable**:
 body or header arrival is not a generated-token observation.
 
-The archived `conversation-v1.json`, its selection and `vllm-conversation-v1`
-profile remain unchanged and nonstreaming. Their captures retain the original
-eleven-step budget and unavailable first-text timing. Text-only profiles still
-reject tools; the separate quality evaluator is unchanged.
+This is the sole supported conversation path. Its `v2` identity is retained to
+keep the selected workload bytes and pins stable; it does not imply a shipped v1
+compatibility path. The earlier all-nonstreaming prototype was development-only,
+not a published contract or a separately supported capability. Replay of its
+private development receipts uses the preserved pre-consolidation source and
+binary, not a compatibility branch in the current collector. Text-only published
+profiles still reject tools; the separate quality evaluator is unchanged.
 
 ## Prefix and lineage contract
 

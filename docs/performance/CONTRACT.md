@@ -20,8 +20,8 @@ Explicit [selected captures](README.md#explicit-selected-captures) use capture v
 pin their workload/control selection and include the final timing receipt in
 comparison identity. They do not inherit structured-C1 inference.
 [Conversation workload v2](CONVERSATIONS.md) adds bounded ordered case steps and
-the `vllm-conversation-v1` nonstream profile and the explicit `vllm-conversation-v2`
-profile (streamed factual steps, nonstream tool steps); wave receipts remain v1 with an
+the sole `vllm-conversation-v2` profile (streamed factual steps, nonstream tool
+steps); wave receipts remain v1 with an
 optional `Attempt.sequence` check omitted for ordinary workloads. Its stable
 history salts and actual parent-output replay do not reinterpret v1 filled prompts.
 Semantic/strict checks are separate from performance eligibility; either failed
