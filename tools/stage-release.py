@@ -79,7 +79,8 @@ def clean_source(root, source):
 
 
 def build_environment(root):
-    allowed = {"CARGO_HOME", "CARGO_TERM_COLOR", "RUSTUP_HOME"}
+    allowed = {"CARGO_HOME", "CARGO_TERM_COLOR", "CARGO_TERM_PROGRESS_WHEN",
+               "CARGO_TERM_PROGRESS_WIDTH", "RUSTUP_HOME"}
     overrides = []
     for key, value in os.environ.items():
         if key in allowed:
