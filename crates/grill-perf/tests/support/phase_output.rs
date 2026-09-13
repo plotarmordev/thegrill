@@ -180,6 +180,57 @@ fn warmup_usage_is_admitted_against_the_phase_cap_not_measured() {
 }
 
 #[test]
+fn phase_output_admission_bounds_distinct_active_warmup() {
+    let temp = Temp::new();
+    let input = temp.path("boundary.json");
+    let admit = |work: &Value| {
+        fs::write(&input, serde_json::to_vec(work).unwrap()).unwrap();
+        cli()
+            .arg("preflight")
+            .arg(&input)
+            .args([
+                "--endpoint",
+                "http://127.0.0.1:1/v1/chat/completions",
+                "--model",
+                "fixture-model",
+                "--local-http",
+            ])
+            .output()
+            .unwrap()
+    };
+    for (concurrency, boundary) in [
+        (1, "encoded request exceeds 2 MiB"),
+        (17, "reservation receipt bound"),
+    ] {
+        let mut work = version3(Some((32, "cap")), (400, "cap"), 1, 1);
+        work["cells"][0]["concurrency"] = json!(concurrency);
+        work["limits"]["wave_buffer_bytes"] = json!(128 * 1024 * 1024);
+        work["cases"][0]["messages"][0]["content"] = json!("{fill}");
+        work["cases"][0]["fill"] = json!({"unit":"xxx","repeat":1});
+        // Find the admitted edge through the CLI, without pinning serializer
+        // overhead. C1 binds request size; C17 binds second-escaped receipts.
+        let (mut low, mut high) = (1, 700_000);
+        while low < high {
+            let middle = (low + high + 1) / 2;
+            work["cases"][0]["fill"]["repeat"] = json!(middle);
+            if admit(&work).status.success() {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        work["cases"][0]["fill"]["repeat"] = json!(low);
+        successful(&admit(&work));
+        work["request"]["warmup_output"]["mode"] = json!("exact");
+        let error = rejected(admit(&work));
+        assert!(error.contains(boundary), "{error}");
+        // The extra exact-output fields matter only for a dispatched phase.
+        work["cells"][0]["warmup_trials"] = json!(0);
+        successful(&admit(&work));
+    }
+}
+
+#[test]
 fn phase_output_override_schema_bounds_and_profile_are_enforced() {
     let temp = Temp::new();
     let mut legacy1 = workload(1, 1, 3);
