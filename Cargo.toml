@@ -3,10 +3,6 @@ members = ["crates/*"]
 default-members = [".", "crates/grill-sse"]
 resolver = "3"
 
-# Native capture tests hash collector binaries even on CPUs without SHA extensions.
-[profile.dev.package.sha2]
-opt-level = 3
-
 [package]
 name = "grill"
 version = "0.1.0"
