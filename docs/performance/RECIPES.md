@@ -73,6 +73,11 @@ budget; capture preflight prints the complete acquisition allowance before
 traffic. Scope and operation class describe prospective membership; `unknown`
 does not mean normal or safe, and `stress` is not normal operation.
 
+Before a raw `run`, also use [offline run preflight](README.md#offline-run-preflight)
+with the intended endpoint, model and optional deployment, policy, metrics and
+credential inputs. It shares `run` admission, returns JSON and creates no capture
+or network traffic. Workload-only `bundle inspect` does not validate these inputs.
+
 Keep source revision, executable digest, raw/typed workload digests and deployment
 declarations distinct. The staged receipt records build and package identities;
 source users record their actual toolchain, build command/profile and flags.

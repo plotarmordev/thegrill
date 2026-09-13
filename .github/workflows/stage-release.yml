@@ -131,10 +131,11 @@ jobs:
       - name: Existing checks using synthetic and loopback fixtures
         run: |
           set -euo pipefail
-          cargo +1.98.0 build --workspace --locked
+          # This override applies only to fixture builds, never the exact-source release stager.
+          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
           cargo +1.98.0 fmt --all --check
-          cargo +1.98.0 test --workspace --locked -- --test-threads=1
-          cargo +1.98.0 clippy --workspace --locked --all-targets -- -D warnings
+          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
+          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
       - name: Stage exact clean source
         run: |
           set -euo pipefail

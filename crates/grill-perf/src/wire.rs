@@ -40,9 +40,24 @@ struct Body<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_salt: Option<String>,
 }
-pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
-    let r = crate::sequence::settings(&plan.workload, wave);
-    let case = plan
+pub struct BodyContext<'a> {
+    pub workload: &'a Workload,
+    pub model: &'a str,
+    pub cache_namespace: Option<&'a str>,
+}
+impl<'a> From<&'a Plan> for BodyContext<'a> {
+    fn from(plan: &'a Plan) -> Self {
+        Self {
+            workload: &plan.workload,
+            model: &plan.model,
+            cache_namespace: plan.cache_namespace.as_deref(),
+        }
+    }
+}
+
+pub fn request_body(context: &BodyContext<'_>, wave: &WaveSpec, lane: u32) -> Result<String> {
+    let r = crate::sequence::settings(context.workload, wave);
+    let case = context
         .workload
         .cases
         .iter()
@@ -52,10 +67,7 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
     let salt = match r.cache {
         Cache::Observe => None,
         cache => {
-            let nonce = plan
-                .cache_namespace
-                .as_deref()
-                .ok_or("missing cache namespace")?;
+            let nonce = context.cache_namespace.ok_or("missing cache namespace")?;
             Some(if cache == Cache::ReportedPrefixZero {
                 format!("{nonce}-{}-{lane}", wave.index)
             } else {
@@ -64,10 +76,7 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         }
     };
     let messages = if let Some(fill) = &case.fill {
-        let namespace = plan
-            .cache_namespace
-            .as_deref()
-            .ok_or("missing cache namespace")?;
+        let namespace = context.cache_namespace.ok_or("missing cache namespace")?;
         let text_salt = format!("{}-{}-{lane}", &namespace[..16], wave.index);
         Cow::Owned(
             case.messages
@@ -105,7 +114,7 @@ pub fn request_body(plan: &Plan, wave: &WaveSpec, lane: u32) -> Result<String> {
         Cow::Borrowed(case.messages.as_slice())
     };
     let body = serde_json::to_string(&Body {
-        model: &plan.model,
+        model: context.model,
         messages: &messages,
         stream: r.stream,
         max_tokens: r.output.tokens,

@@ -753,15 +753,17 @@ fn collect(
             break;
         }
         let options = run::Options {
-            workload: root.join("workload.json"),
-            endpoint: manifest.endpoint.clone(),
-            model: manifest.model.clone(),
+            common: run::CommonArgs {
+                workload: root.join("workload.json"),
+                endpoint: manifest.endpoint.clone(),
+                model: manifest.model.clone(),
+                deployment: Some(root.join("deployment.json")),
+                policy: None,
+                metrics_url: None,
+                auth_env: manifest.auth_env.clone(),
+                local_http: manifest.local_http,
+            },
             out: root.join(directory(index)),
-            deployment: Some(root.join("deployment.json")),
-            policy: None,
-            metrics_url: None,
-            auth_env: manifest.auth_env.clone(),
-            local_http: manifest.local_http,
             json: true,
         };
         let outcome = run::execute_bounded(&options, deadline);

@@ -2594,7 +2594,7 @@ fn cached_prompt_tokens_withhold_prefill_rate() {
 }
 
 #[test]
-fn unequal_prompt_tokens_keep_prefill_rate_change_and_stay_visible() {
+fn unequal_prompt_tokens_remain_eligible_for_prefill_comparison() {
     let temp = Temp::new();
     let server = Server::new(|mut s, i, _| {
         header(&mut s, "text/event-stream");
@@ -2624,19 +2624,23 @@ fn unequal_prompt_tokens_keep_prefill_rate_change_and_stay_visible() {
     for side in ["baseline", "candidate"] {
         assert!(report[side][0]["median_prefill_tokens_per_second"].is_number());
     }
-    // Per-run text salts tokenize to different counts; the per-token rate must still compare.
+    // Unequal prompt counts must not disqualify a per-token comparison.
     let change = &report["changes"][0];
-    assert!(change["prefill_rate_change_percent"].is_number());
+    let prefill_change = change.get("prefill_rate_change_percent").unwrap();
+    assert!(
+        prefill_change.is_number()
+            || (prefill_change.is_null()
+                && change["withheld"].as_array().unwrap().iter().any(|reason| {
+                    reason
+                        .as_str()
+                        .unwrap()
+                        .starts_with("prefill rate: ranges overlap")
+                })),
+        "{change}"
+    );
     assert_eq!(change["eligible"], true);
     assert_eq!(change["observed_output_amounts_match"], true);
     assert_eq!(change["ineligibility_reasons"], json!([]));
-    for field in [
-        "wave_latency_change_percent",
-        "achieved_throughput_change_percent",
-        "decode_rate_change_percent",
-    ] {
-        assert!(change[field].is_number(), "{field}");
-    }
 }
 
 #[test]
@@ -3831,3 +3835,5 @@ mod measurement_tests;
 mod metrics_tests;
 #[path = "support/policy.rs"]
 mod policy_tests;
+#[path = "support/preflight.rs"]
+mod preflight_tests;

@@ -21,6 +21,11 @@ in each staged build receipt; a future approved tag must identify that commit.
   unavailable; timing-window errors name the acquisition and both duration values.
   Accounting is not promoted, and timing checks, report schemas and exit codes
   remain unchanged. Offline replay does not rewrite historical reports.
+- Add offline `preflight` using the same local admission as `run`, including
+  optional deployment, policy, metrics and credential inputs. It returns workload
+  pins and bounded budgets without network traffic or capture creation. Deployment
+  validation now names the offending field and observed UTF-8 byte count; the
+  4,096-byte, nonempty and control-free limits remain unchanged.
 
 ### Target and compatibility boundary
 

@@ -288,7 +288,13 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
                     detail: "policy sidecar hash mismatch".into(),
                 });
             }
-            crate::policy::parse(&bytes, &plan).map_err(|reason| LoadError {
+            crate::policy::parse(
+                &bytes,
+                &plan.collector_sha256,
+                &plan.source_sha256,
+                &plan.workload,
+            )
+            .map_err(|reason| LoadError {
                 detail: reason.as_str().into(),
                 reason,
             })
@@ -307,6 +313,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
     let mut metrics_budget = crate::metrics::Budget::default();
     let mut metrics_waves = Vec::new();
     let mut sequence = crate::sequence::State::default();
+    let body_context = crate::wire::BodyContext::from(&plan);
     for spec in &plan.waves {
         let dir = wave_dir(root, spec.index);
         if !exists(&dir)? {
@@ -336,7 +343,7 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         {
             if body.len() > REQUEST_CAP
                 || digest(body.as_bytes()) != *hash
-                || *body != sequence.request(&plan, spec, lane as u32)?
+                || *body != sequence.request(&body_context, spec, lane as u32)?
             {
                 return Err("request evidence does not match declared controls".into());
             }
