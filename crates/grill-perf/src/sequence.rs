@@ -134,6 +134,8 @@ pub fn validate(workload: &Workload) -> Result<()> {
 
 pub fn settings(workload: &Workload, spec: &WaveSpec) -> RequestSettings {
     let mut settings = workload.request.clone();
+    settings.output = workload.request.effective_output(spec.phase).clone();
+    settings.warmup_output = None;
     if let Some(step) = workload
         .cases
         .iter()

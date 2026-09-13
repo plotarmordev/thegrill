@@ -50,8 +50,11 @@ reference-spread gate, outcome precedence and command-specific exits.
 
 ## Workload admission
 
-This section describes unchanged workload v1 admission. Workload v2 adds the
-explicit conversation restrictions linked above rather than weakening v1 profiles.
+Workload v1 retains its flat schedule and profiles. Workload v2 adds the explicit
+conversation restrictions linked above rather than weakening v1 profiles.
+Workload v3 adds phase-specific output budgets to the flat workload; it does not
+admit conversation steps. These workload versions are separate from native plan
+versions: a v3 workload requires a native version 3 plan.
 
 The workload has `version`, `name`, `request`, `limits`, `cases` and `cells`.
 See the complete [portable example](../../crates/grill-perf/examples/quick.json).
@@ -77,6 +80,21 @@ an answer-first event does not prove reasoning was absent elsewhere. A successfu
 response does not qualify a provider's template support. Thinking declarations
 do not change eligibility or impose an answer-only requirement.
 Streaming requests explicitly request usage with `stream_options.include_usage`.
+
+Only workload v3 may declare `request.warmup_output: {tokens, mode}`. When absent,
+`request.output` applies to both phases; when present, it overrides warmup only.
+Explicit null is rejected, including in legacy versions. Both declared budgets
+must satisfy token and profile bounds even when a phase has no planned requests.
+An absent override is omitted from typed serialization, preserving old workload
+identities. An explicit override participates in workload identity, native request
+generation, usage eligibility and offline evidence verification. Different phase
+controls are not compatible matched workloads.
+
+Request/output ceilings are phase-weighted with checked arithmetic. Local
+admission bounds both active, distinct phase encodings, including exact-output
+extensions and reservation JSON escaping. Failure expectations use the failing
+wave's budget. Full-capture minimum output rates require every planned phase to
+be exact; a capped phase is not an exact-output obligation.
 
 Cases may declare `fill: {unit, repeat}`. The unit is nonempty and at most 64
 bytes; repeat is 1..1,000,000. Such a case requires exactly one `{fill}` and at

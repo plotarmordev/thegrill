@@ -671,6 +671,39 @@ reported count. A flag plus a reported zero is **not universal proof of cold
 cache state**. Model weights, operating-system/JIT/GPU caches and engine state
 are not inspected or flushed. Missing usage remains unknown, never zero.
 
+## Phase-specific output budgets
+
+Flat workload **version 3** optionally declares `request.warmup_output`; measured
+requests retain `request.output`. For a separate capped warmup32/measured400
+workload, create a new file rather than editing a frozen example:
+
+```sh
+jq '.version = 3 | .name = "phase-output-v3" |
+    .request.warmup_output = {"tokens":32,"mode":"cap"} |
+    .request.output = {"tokens":400,"mode":"cap"}' \
+  crates/grill-perf/examples/quick.json > phase-output-v3.json
+target/release/grill-perf bundle inspect phase-output-v3.json
+```
+
+Run [offline preflight](#offline-run-preflight) with the intended run inputs.
+For baseline/check, use the returned raw and typed pins in a new
+[explicit selection manifest](#explicit-selected-captures). Keep the same pinned
+workload throughout the native baseline/control/candidate relationship.
+
+Absent `warmup_output` uses `output` for both phases. Explicit null is invalid;
+versions 1 and 2 reject the field. Each budget is 1..32,768 tokens, and exact
+output in either phase requires the fixed-output profile. Conversation v2 is a
+separate contract, not extended by v3.
+
+Requests, usage eligibility and retained evidence use the actual wave's budget.
+Warmup remains retained but excluded from measured results. Ceilings sum warmup
+requests times the warmup budget plus measured requests times the measured
+budget. A full-capture minimum completion rate is inferred only when every
+planned phase is exact; an unused warmup declaration does not affect it.
+Changing either phase's controls changes workload identity and prevents a
+matched comparison. Existing exact400 recipes and hashes remain unchanged.
+Matching token counts alone is [not sparkDash protocol equivalence](SHARED-RECIPES.md#phase-counts-are-not-protocol-equivalence).
+
 ## Optional provider snapshots
 
 Add `--metrics-url https://your-server.example/metrics` to `run` to retain bounded

@@ -736,3 +736,199 @@ fn selected_window_overrun_replays_as_unavailable_without_partial_selection_or_v
         pristine_text
     );
 }
+
+fn phase_workload(
+    warmup: Option<(u32, &str)>,
+    measured: (u32, &str),
+    warmup_trials: u32,
+    trials: u32,
+) -> Value {
+    let mut request = json!({
+        "profile": "vllm-fixed-v1",
+        "stream": true,
+        "output": {"tokens": measured.0, "mode": measured.1},
+        "cache": "observe",
+        "temperature_milli": 0,
+        "top_p_milli": 1000,
+        "seed": 0
+    });
+    if let Some((tokens, mode)) = warmup {
+        request["warmup_output"] = json!({"tokens": tokens, "mode": mode});
+    }
+    json!({
+        "version": 3,
+        "name": "phase-output-v3",
+        "request": request,
+        "limits": {"total_ms": 6000, "idle_ms": 3000, "response_bytes": 65536, "wave_buffer_bytes": 33554432},
+        "cases": [{"id": "one", "messages": [{"role": "user", "content": "Say cafe."}]}],
+        "cells": [{"id": "cell", "case": "one", "concurrency": 1, "warmup_trials": warmup_trials, "trials": trials}]
+    })
+}
+
+/// Pin a version 3 workload through the production inspector so the selected
+/// manifest binds the exact source and normalized digests the loader checks.
+fn phase_selection(temp: &Temp, name: &str, workload: &Value) -> PathBuf {
+    let leaf = format!("{name}.json");
+    let source = temp.path(&leaf);
+    fs::write(&source, serde_json::to_vec_pretty(workload).unwrap()).unwrap();
+    let inspect = command()
+        .args(["bundle", "inspect"])
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        inspect.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let pins: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    let manifest = temp.path(&format!("{name}-selection.json"));
+    write_json(
+        &manifest,
+        &json!({
+            "version": 1,
+            "id": format!("{name}-v3"),
+            "workload": leaf,
+            "source_sha256": pins["source_sha256"],
+            "workload_sha256": pins["workload_sha256"],
+            "scope": "Prospective capped-warmup/exact-measured phase output fixture; descriptive per-cell observations only. All cells retained.",
+            "operation_scope": "unknown"
+        }),
+    );
+    manifest
+}
+
+#[test]
+fn selected_phase_ceiling_weights_active_warmup_and_unused_warmup_keeps_the_floor() {
+    let temp = Temp::new();
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    // Capped warmup32 + exact measured400: warmup output is a cap, so the
+    // whole-capture completion floor is withheld even though measured is exact.
+    let capped = phase_selection(
+        &temp,
+        "phase-capped",
+        &phase_workload(Some((32, "cap")), (400, "exact"), 1, 3),
+    );
+    let server = Server::new(|stream, index, _| {
+        response(stream, Some(if index % 4 == 0 { 32 } else { 400 }), false)
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &capped, "capped")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", decoded(&output));
+    let report = decoded(&output);
+    assert_eq!(report["baseline_ready"], true);
+    assert_eq!(report["baseline_complete_acquisitions"], 8);
+    assert_eq!(report["baseline_accounting"]["request_ceiling"], 32);
+    assert_eq!(
+        report["baseline_accounting"]["output_token_ceiling"],
+        8 * 32 + 24 * 400
+    );
+    assert!(report["baseline_accounting"]["minimum_full_capture_tokens_per_second"].is_null());
+    let capture = read_json(&temp.path("capped/capture.json"));
+    assert_eq!(capture["request_ceiling"], 32);
+    assert_eq!(capture["output_token_ceiling"], 9856);
+    let warmup = read_json(&temp.path("capped/acquisition-00/wave-000000/wave.json"));
+    assert_eq!(warmup["spec"]["phase"], "warmup");
+    assert_eq!(warmup["eligible"], true);
+    let measured = read_json(&temp.path("capped/acquisition-00/wave-000001/wave.json"));
+    assert_eq!(measured["spec"]["phase"], "measured");
+    assert_eq!(measured["eligible"], true);
+    let human = fs::read_to_string(temp.path("capped/report.txt")).unwrap();
+    assert!(
+        !human.contains("Full completion needs"),
+        "a capped phase must not imply a completion floor: {human}"
+    );
+    drop(server);
+
+    // A declared but unused warmup budget cannot withhold the floor: only
+    // planned phases count, and the inactive budget still had to validate.
+    let inactive = phase_selection(
+        &temp,
+        "phase-inactive",
+        &phase_workload(Some((32, "cap")), (400, "exact"), 0, 3),
+    );
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &inactive, "inactive")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", decoded(&output));
+    let report = decoded(&output);
+    assert_eq!(report["baseline_ready"], true);
+    assert_eq!(report["baseline_accounting"]["request_ceiling"], 24);
+    assert_eq!(
+        report["baseline_accounting"]["output_token_ceiling"],
+        24 * 400
+    );
+    assert_eq!(
+        report["baseline_accounting"]["minimum_full_capture_tokens_per_second"].as_f64(),
+        Some(9600.0 / 300.0)
+    );
+}
+
+#[test]
+fn selected_failure_expectation_and_wording_follow_the_failing_phase() {
+    let temp = Temp::new();
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let selection = phase_selection(
+        &temp,
+        "phase-capped",
+        &phase_workload(Some((32, "cap")), (400, "exact"), 1, 3),
+    );
+    // Warmup overshoots its 32-token cap: the retained expectation is the
+    // warmup budget and the requirement reads as a cap, not measured's exact 400.
+    let server = Server::new(|stream, index, _| {
+        response(stream, Some(if index % 4 == 0 { 40 } else { 400 }), false)
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "warmup")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report = decoded(&output);
+    assert_eq!(report["result"], "INVALID");
+    assert_eq!(report["first_failure"]["wave"]["phase"], "warmup");
+    assert_eq!(report["first_failure"]["expected_completion_tokens"], 32);
+    assert!(
+        report["first_failure"]["eligibility_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "reported_output_exceeds_cap"),
+        "{report}"
+    );
+    let human = fs::read_to_string(temp.path("warmup/report.txt")).unwrap();
+    assert!(human.contains("the declared cap was 32"), "{human}");
+    assert!(!human.contains("exactly 400 were required"), "{human}");
+    drop(server);
+
+    // Measured is exact: the same workload now reports the measured budget and
+    // the exact requirement, so the wording follows the failing phase.
+    let server = Server::new(|stream, index, _| {
+        response(stream, Some(if index % 4 == 0 { 32 } else { 399 }), false)
+    });
+    let output = selected_baseline(
+        &temp,
+        &server.endpoint,
+        &declaration,
+        &selection,
+        "measured",
+    )
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report = decoded(&output);
+    assert_eq!(report["result"], "INVALID");
+    assert_eq!(report["first_failure"]["wave"]["phase"], "measured");
+    assert_eq!(report["first_failure"]["expected_completion_tokens"], 400);
+    assert!(
+        report["first_failure"]["eligibility_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "reported_output_not_exact"),
+        "{report}"
+    );
+    let human = fs::read_to_string(temp.path("measured/report.txt")).unwrap();
+    assert!(human.contains("exactly 400 were required"), "{human}");
+    assert!(!human.contains("the declared cap was 32"), "{human}");
+}

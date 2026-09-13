@@ -115,6 +115,33 @@ DeepSeek sends `chat_template_kwargs: {"thinking": false}`; GLM sends
 qualifies the other. Preserve the frozen sparkDash files and attribution to
 [MiaAI-Lab's sparkDash](https://github.com/MiaAI-Lab/sparkDash).
 
+### Phase counts are not protocol equivalence
+
+The separate [v3 phase-budget option](README.md#phase-specific-output-budgets)
+can request capped warmup32/measured400 without changing these frozen exact400
+recipes. It is a new workload identity, not a repair or relabeling of old evidence.
+The historical installation pin above predates v3; use an approved source revision
+containing the feature, not a historical qualification receipt as a feature claim.
+
+At pinned upstream sparkDash revision
+`d0c7f71296a1071d0d75f95b14c21413d4d06321`,
+[`DecodeBench.js`](https://github.com/MiaAI-Lab/sparkDash/blob/d0c7f71296a1071d0d75f95b14c21413d4d06321/server/collectors/DecodeBench.js)
+uses capped 32-token best-effort warmup. Measured output defaults to 400 with
+`min_tokens`, `ignore_eos` and `stop: []`; an HTTP 400 path can strip fill-force
+fields and resend. A capped400 TheGrill request therefore differs from that
+initial measured request, even when its maximum token count matches.
+Upstream [`LlmStreaming.js`](https://github.com/MiaAI-Lab/sparkDash/blob/d0c7f71296a1071d0d75f95b14c21413d4d06321/server/collectors/LlmStreaming.js)
+also sends `enable_thinking`, `thinking` and `thinking_mode` together and has
+thinking-control fallback behavior. TheGrill sends one explicitly declared
+thinking-key mapping, never infers it from a model name and never strips controls
+or retries. It retains warmup evidence and stops on ineligible responses rather
+than treating warmup as best-effort.
+
+Neither matching 32/400 counts nor selecting exact measured output establishes
+full protocol equivalence: control sets, failure handling, schedules and timing
+semantics remain separate. Qualify the declared workload and template rather
+than claiming source fidelity from token counts alone.
+
 ## Create and approve the policy before collection
 
 Choose the recipe and one workload first. A decode study and a prefill study are

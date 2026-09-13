@@ -199,21 +199,12 @@ pub fn verify(path: &Path) -> Result<Verification> {
         .into_iter()
         .zip(workloads)
         .map(|(identity, workload)| {
-            // Workload admission bounds trials, concurrency and output tokens.
-            let warmup_requests = workload
-                .cells
-                .iter()
-                .map(|cell| u64::from(cell.warmup_trials) * u64::from(cell.concurrency))
-                .sum::<u64>();
-            let measured_requests = workload
-                .cells
-                .iter()
-                .map(|cell| u64::from(cell.trials) * u64::from(cell.concurrency))
-                .sum::<u64>();
+            let (warmup, measured, tokens) = crate::selection::budgets(&workload, 1)?;
+            let warmup_requests = warmup as u64;
+            let measured_requests = measured as u64;
             let total_requests = warmup_requests + measured_requests;
-            let total_output_token_ceiling =
-                total_requests * u64::from(workload.request.output.tokens);
-            VerifiedEntry {
+            let total_output_token_ceiling = tokens as u64;
+            Ok(VerifiedEntry {
                 identity,
                 name: workload.name,
                 request: workload.request,
@@ -225,9 +216,9 @@ pub fn verify(path: &Path) -> Result<Verification> {
                     request_bytes_cap: REQUEST_CAP,
                     limits: workload.limits,
                 },
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     Ok(Verification {
         version: 1,
         claim: "verified-declared-bundle-not-live-qualification-or-cross-recipe-equivalence",

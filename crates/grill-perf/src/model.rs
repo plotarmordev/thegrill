@@ -52,6 +52,12 @@ pub struct RequestSettings {
     pub profile: Profile,
     pub stream: bool,
     pub output: OutputBudget,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "RequestSettings::deserialize_warmup_output"
+    )]
+    pub warmup_output: Option<OutputBudget>,
     pub cache: Cache,
     pub temperature_milli: Option<u16>,
     pub top_p_milli: Option<u16>,
@@ -61,6 +67,20 @@ pub struct RequestSettings {
     pub thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_control: Option<ThinkingControl>,
+}
+impl RequestSettings {
+    fn deserialize_warmup_output<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<OutputBudget>, D::Error> {
+        OutputBudget::deserialize(deserializer).map(Some)
+    }
+
+    pub fn effective_output(&self, phase: Phase) -> &OutputBudget {
+        match phase {
+            Phase::Warmup => self.warmup_output.as_ref().unwrap_or(&self.output),
+            Phase::Measured => &self.output,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
@@ -122,8 +142,11 @@ impl Workload {
         self.version == 2 || self.cases.iter().any(|case| case.fill.is_some())
     }
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.version, 1 | 2) || !identifier(&self.name) {
-            return Err("expected workload version 1 or 2 and a short ASCII name".into());
+        if !matches!(self.version, 1..=3) || !identifier(&self.name) {
+            return Err("expected workload version 1, 2 or 3 and a short ASCII name".into());
+        }
+        if self.version < 3 && self.request.warmup_output.is_some() {
+            return Err("request.warmup_output requires workload version 3".into());
         }
         crate::sequence::validate(self)?;
         if self.cases.is_empty()
@@ -178,8 +201,9 @@ impl Workload {
             }
         }
         let r = &self.request;
-        if r.output.tokens == 0
-            || r.output.tokens > 32_768
+        if std::iter::once(&r.output)
+            .chain(r.warmup_output.as_ref())
+            .any(|output| !(1..=32_768).contains(&output.tokens))
             || r.temperature_milli.is_some_and(|n| n > 2000)
             || r.top_p_milli.is_some_and(|n| n == 0 || n > 1000)
         {
@@ -192,6 +216,9 @@ impl Workload {
         }
         if r.profile == Profile::PortableChatV1
             && (r.output.mode == OutputMode::Exact
+                || r.warmup_output
+                    .as_ref()
+                    .is_some_and(|output| output.mode == OutputMode::Exact)
                 || r.cache != Cache::Observe
                 || r.thinking_control.is_some()
                 || r.thinking.is_some())
