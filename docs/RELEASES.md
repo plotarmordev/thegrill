@@ -117,11 +117,15 @@ dispatch and calls from the publication workflow. Native hosted `ubuntu-24.04`
 and `ubuntu-24.04-arm` runners execute these existing checks before staging:
 
 ```sh
-cargo +1.98.0 build --workspace --locked
+cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
 cargo +1.98.0 fmt --all --check
-cargo +1.98.0 test --workspace --locked -- --test-threads=1
-cargo +1.98.0 clippy --workspace --locked --all-targets -- -D warnings
+cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
+cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
 ```
+
+The per-command dev-profile override speeds software SHA in fixture builds.
+It does not change pinned manifests or carry into the exact-source release
+build, which uses the unchanged `--release` command above.
 
 Then stage the exact clean source with the command above. Set `VERSION` to the
 checked-out `grill-perf` package version, not a moving tag or a hardcoded default.
