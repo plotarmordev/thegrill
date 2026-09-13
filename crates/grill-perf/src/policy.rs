@@ -97,7 +97,12 @@ fn sha(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-pub fn parse(bytes: &[u8], plan: &Plan) -> Result<Policy, Reason> {
+pub fn parse(
+    bytes: &[u8],
+    collector_sha256: &str,
+    source_sha256: &str,
+    workload: &Workload,
+) -> Result<Policy, Reason> {
     if bytes.len() > CAP {
         return Err(Reason::InvalidPolicy);
     }
@@ -111,19 +116,18 @@ pub fn parse(bytes: &[u8], plan: &Plan) -> Result<Policy, Reason> {
     {
         return Err(Reason::InvalidPolicy);
     }
-    if policy.collector_sha256 != plan.collector_sha256 {
+    if policy.collector_sha256 != collector_sha256 {
         return Err(Reason::PolicyCollectorMismatch);
     }
-    if policy.workload_source_sha256 != plan.source_sha256 {
+    if policy.workload_source_sha256 != source_sha256 {
         return Err(Reason::PolicySourceMismatch);
     }
-    if policy.cells.len() != plan.workload.cells.len() {
+    if policy.cells.len() != workload.cells.len() {
         return Err(Reason::PolicyScopeMismatch);
     }
     let mut cells = HashSet::new();
     for declared in &policy.cells {
-        let cell = plan
-            .workload
+        let cell = workload
             .cells
             .iter()
             .find(|c| c.id == declared.cell)

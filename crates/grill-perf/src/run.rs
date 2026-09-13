@@ -36,14 +36,12 @@ fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 #[derive(clap::Args)]
-pub struct Options {
+pub struct CommonArgs {
     pub workload: PathBuf,
     #[arg(long)]
     pub endpoint: String,
     #[arg(long)]
     pub model: String,
-    #[arg(long)]
-    pub out: PathBuf,
     /// Optional JSON declarations of model revision, runtime, hardware and settings.
     #[arg(long)]
     pub deployment: Option<PathBuf>,
@@ -57,9 +55,88 @@ pub struct Options {
     pub auth_env: Option<String>,
     #[arg(long)]
     pub local_http: bool,
+}
+#[derive(clap::Args)]
+pub struct Options {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    #[arg(long)]
+    pub out: PathBuf,
     #[arg(long)]
     pub json: bool,
 }
+
+struct Admitted {
+    source: Vec<u8>,
+    source_sha256: String,
+    workload: Workload,
+    workload_sha256: String,
+    endpoint: String,
+    deployment: Option<Deployment>,
+    waves: Vec<WaveSpec>,
+    metrics: Option<metrics::Config>,
+    policy_bytes: Option<Vec<u8>>,
+    policy_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct DeploymentBytes {
+    model_revision: Option<usize>,
+    runtime: Option<usize>,
+    hardware: Option<usize>,
+    settings: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct PreflightReport<'a> {
+    claim: &'static str,
+    source_sha256: String,
+    workload_sha256: String,
+    name: String,
+    request: RequestSettings,
+    limits: Limits,
+    warmup_requests: usize,
+    measured_requests: usize,
+    total_output_token_ceiling: usize,
+    endpoint: String,
+    model: &'a str,
+    local_http: bool,
+    auth_env: Option<&'a str>,
+    deployment_bytes: Option<DeploymentBytes>,
+    metrics_url: Option<String>,
+    policy_sha256: Option<String>,
+    planned_waves: usize,
+}
+
+pub fn preflight(o: &CommonArgs) -> Result<PreflightReport<'_>> {
+    let admitted = admit(o)?;
+    let (warmup, measured, tokens) = crate::selection::budgets(&admitted.workload, 1)?;
+    Ok(PreflightReport {
+        claim: "offline-declared-run-admission-not-backend-qualification",
+        source_sha256: admitted.source_sha256,
+        workload_sha256: admitted.workload_sha256,
+        name: admitted.workload.name,
+        request: admitted.workload.request,
+        limits: admitted.workload.limits,
+        warmup_requests: warmup,
+        measured_requests: measured,
+        total_output_token_ceiling: tokens,
+        endpoint: admitted.endpoint,
+        model: &o.model,
+        local_http: o.local_http,
+        auth_env: o.auth_env.as_deref(),
+        deployment_bytes: admitted.deployment.as_ref().map(|value| DeploymentBytes {
+            model_revision: value.model_revision.as_ref().map(String::len),
+            runtime: value.runtime.as_ref().map(String::len),
+            hardware: value.hardware.as_ref().map(String::len),
+            settings: value.settings.as_ref().map(String::len),
+        }),
+        metrics_url: admitted.metrics.map(|config| config.endpoint),
+        policy_sha256: admitted.policy_sha256,
+        planned_waves: admitted.waves.len(),
+    })
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Summary {
@@ -82,13 +159,13 @@ pub fn execute(o: &Options) -> Result<Summary> {
 }
 
 pub fn execute_bounded(o: &Options, deadline: Instant) -> Result<Summary> {
-    if o.metrics_url.is_some() {
+    if o.common.metrics_url.is_some() {
         return Err("metrics diagnostics are unsupported in bounded capture; use the advanced unbounded run path".into());
     }
     execute_inner(o, Some(deadline))
 }
 
-fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
+fn admit(o: &CommonArgs) -> Result<Admitted> {
     let source = evidence::read(&o.workload, FILE_CAP)?;
     let workload: Workload =
         serde_json::from_slice(&source).map_err(|e| format!("invalid workload: {e}"))?;
@@ -112,12 +189,6 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
         })
         .transpose()?;
     wire::credential(o.auth_env.as_deref())?;
-    let pool = workload
-        .cells
-        .iter()
-        .map(|c| c.concurrency as usize)
-        .max()
-        .unwrap_or(1);
     let waves = workload.waves();
     let metrics = o
         .metrics_url
@@ -127,64 +198,46 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
                 .map(|url| metrics::Config::new(url.to_string(), waves.len()))
         })
         .transpose()?;
-    let normalized = serde_json::to_vec(&workload).map_err(|e| e.to_string())?;
-    let cache_namespace = if workload.request.cache == Cache::Observe && !workload.salted() {
-        None
-    } else {
-        let mut random = [0u8; 16];
-        std::fs::File::open("/dev/urandom")
-            .and_then(|mut f| f.read_exact(&mut random))
-            .map_err(|_| "cannot obtain cache-salt entropy")?;
-        Some(evidence::digest(&random))
-    };
-    let cache_mechanism = (workload.request.profile != Profile::PortableChatV1)
-        .then(|| "declared-vllm-prefix-cache".into());
+    let source_sha256 = evidence::digest(&source);
+    let workload_sha256 =
+        evidence::digest(&serde_json::to_vec(&workload).map_err(|e| e.to_string())?);
     let policy_bytes = o
         .policy
         .as_ref()
         .map(|path| evidence::read(path, crate::policy::CAP))
         .transpose()?;
-    let plan = Plan {
-        version: 3,
-        metric_contract: Some(METRIC_CONTRACT.into()),
-        kind: "performance-run-v1".into(),
-        tool_version: env!("CARGO_PKG_VERSION").into(),
-        collector_sha256: evidence::binary_digest()?,
-        workload,
-        workload_sha256: evidence::digest(&normalized),
-        source_sha256: evidence::digest(&source),
-        model: o.model.clone(),
-        deployment,
-        cache_mechanism,
-        cache_evidence_source: "provider-reported:usage.prompt_tokens_details.cached_tokens".into(),
-        endpoint: url.to_string(),
-        auth_env: o.auth_env.clone(),
-        local_http: o.local_http,
-        pool_max_idle_per_host: pool,
-        started_unix_ms: unix_ms(),
-        cache_namespace,
-        waves,
-        metrics,
-        policy_sha256: policy_bytes.as_deref().map(evidence::digest),
+    // Execution salts are hex digests; this bound has their exact encoded width
+    // without generating or publishing an execution identity.
+    let context = wire::BodyContext {
+        workload: &workload,
+        model: &o.model,
+        cache_namespace: (workload.request.cache != Cache::Observe || workload.salted())
+            .then_some("0000000000000000000000000000000000000000000000000000000000000000"),
     };
-    if plan.workload.version == 2 {
-        for (case, spec) in plan.workload.cases.iter().zip(&plan.waves) {
+    if workload.version == 2 {
+        for (case, spec) in workload.cases.iter().zip(&waves) {
             if case.step.as_ref().is_some_and(|step| step.parent.is_none()) {
                 let mut root = spec.clone();
                 root.index = 0;
-                crate::sequence::State::default().request(&plan, &root, 0)?;
+                crate::sequence::State::default().request(&context, &root, 0)?;
             }
         }
     }
     if let Some(bytes) = &policy_bytes {
-        crate::policy::parse(bytes, &plan).map_err(|e| e.as_str().to_owned())?;
+        crate::policy::parse(
+            bytes,
+            &evidence::binary_digest()?,
+            &source_sha256,
+            &workload,
+        )
+        .map_err(|e| e.as_str().to_owned())?;
     }
     // Seed magnitude peaks at a corner of the trial/lane range and index 1023 is
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
     // each of the cache salt and the text salt, so an interior body can exceed a
     // corner sample by two bytes. Bound with that slack rather than serializing
     // every repeated prompt.
-    for cell in &plan.workload.cells {
+    for cell in &workload.cells {
         for (trial, lane) in [(0, 0), (100, 63)] {
             let bound = WaveSpec {
                 index: 1023,
@@ -194,7 +247,7 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
                 trial,
                 concurrency: cell.concurrency,
             };
-            let body = wire::request_body(&plan, &bound, lane)?;
+            let body = wire::request_body(&context, &bound, lane)?;
             if body.len() + 2 > REQUEST_CAP {
                 return Err("encoded request exceeds 2 MiB".into());
             }
@@ -209,10 +262,68 @@ fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
             }
         }
     }
+    Ok(Admitted {
+        source,
+        source_sha256,
+        workload,
+        workload_sha256,
+        endpoint: url.to_string(),
+        deployment,
+        waves,
+        metrics,
+        policy_sha256: policy_bytes.as_deref().map(evidence::digest),
+        policy_bytes,
+    })
+}
+
+fn execute_inner(o: &Options, deadline: Option<Instant>) -> Result<Summary> {
+    let admitted = admit(&o.common)?;
+    let cache_namespace =
+        if admitted.workload.request.cache == Cache::Observe && !admitted.workload.salted() {
+            None
+        } else {
+            let mut random = [0u8; 16];
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut random))
+                .map_err(|_| "cannot obtain cache-salt entropy")?;
+            Some(evidence::digest(&random))
+        };
+    let cache_mechanism = (admitted.workload.request.profile != Profile::PortableChatV1)
+        .then(|| "declared-vllm-prefix-cache".into());
+    let pool = admitted
+        .workload
+        .cells
+        .iter()
+        .map(|c| c.concurrency as usize)
+        .max()
+        .unwrap_or(1);
+    let plan = Plan {
+        version: 3,
+        metric_contract: Some(METRIC_CONTRACT.into()),
+        kind: "performance-run-v1".into(),
+        tool_version: env!("CARGO_PKG_VERSION").into(),
+        collector_sha256: evidence::binary_digest()?,
+        workload: admitted.workload,
+        workload_sha256: admitted.workload_sha256,
+        source_sha256: admitted.source_sha256,
+        model: o.common.model.clone(),
+        deployment: admitted.deployment,
+        cache_mechanism,
+        cache_evidence_source: "provider-reported:usage.prompt_tokens_details.cached_tokens".into(),
+        endpoint: admitted.endpoint,
+        auth_env: o.common.auth_env.clone(),
+        local_http: o.common.local_http,
+        pool_max_idle_per_host: pool,
+        started_unix_ms: unix_ms(),
+        cache_namespace,
+        waves: admitted.waves,
+        metrics: admitted.metrics,
+        policy_sha256: admitted.policy_sha256,
+    };
     evidence::fresh(&o.out)?;
     let _owner = lifecycle::ownership(&o.out)?;
-    evidence::write(&o.out.join("workload.json"), &source)?;
-    if let Some(bytes) = &policy_bytes {
+    evidence::write(&o.out.join("workload.json"), &admitted.source)?;
+    if let Some(bytes) = &admitted.policy_bytes {
         evidence::write(&o.out.join("policy.json"), bytes)?;
     }
     let plan_bytes = evidence::json(&o.out.join("plan.json"), &plan)?;
@@ -320,6 +431,7 @@ fn collect(
         let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).map_err(|_| "cannot subscribe to interrupt signal")?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|_| "cannot subscribe to termination signal")?;
         let mut sequence = crate::sequence::State::default();
+        let body_context = wire::BodyContext::from(plan);
         for spec in &plan.waves[first_wave..] {
             if interrupted() { summary.status = "interrupted".into(); break; }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) { summary.status = "budget-exhausted".into(); break; }
@@ -332,7 +444,7 @@ fn collect(
             };
             if lifecycle::requested(&session_dir)? { summary.status = "paused".into(); break; }
             let preparation = Instant::now();
-            let requests: Vec<_> = (0..spec.concurrency).map(|lane| sequence.request(plan, spec, lane)).collect::<Result<_>>()?;
+            let requests: Vec<_> = (0..spec.concurrency).map(|lane| sequence.request(&body_context, spec, lane)).collect::<Result<_>>()?;
             let hashes = requests.iter().map(|r| evidence::digest(r.as_bytes())).collect();
             let reservation = Reservation { version: 1, plan_sha256: plan_hash.into(), wave: spec.clone(), requests, request_sha256: hashes };
             if interrupted() { summary.status = "interrupted".into(); break; }

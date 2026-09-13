@@ -466,6 +466,29 @@ nor a prefill rate proves a cold cache. Switching to `observe` changes the
 workload and its claim. Real tokenizer counts, long-context endpoint support,
 thinking-control compliance and live prefill rates remain unverified.
 
+### Offline run preflight
+
+Use `preflight` to admit the workload together with the inputs intended for
+`run`, without contacting model or metrics endpoints or creating a capture:
+
+```sh
+target/release/grill-perf preflight crates/grill-perf/examples/quick.json \
+  --endpoint https://your-server.example/v1/chat/completions \
+  --model your-model --auth-env MODEL_API_KEY --deployment deployment.json
+```
+
+`--deployment`, `--policy`, `--metrics-url`, `--auth-env` and `--local-http` have
+the same local validation as `run`; endpoint and model are required. The
+credential named by `--auth-env` must be valid locally, but its value is not
+reported. Output is always JSON: raw and typed workload pins, admitted controls,
+request and output-token ceilings, planned waves and declaration byte counts.
+There is no `--out` or `--json` flag. No execution timestamp or cache identity is
+generated. This is declared-run admission, **not backend qualification**:
+authorization, model availability and server support remain untested.
+
+`bundle inspect` remains workload-only. Re-run preflight when run inputs change;
+a successful check does not bypass `run` admission.
+
 ### Larger-prompt buffer sizing
 
 The ladder's response cap is 65,536 bytes, independent of request size.
@@ -710,6 +733,10 @@ See the [snapshot schema and bounds](CONTRACT.md#provider-snapshot-protocol).
 `model_revision`, `runtime`, `hardware` and `settings` strings. These are operator
 declarations, not verification that a server loaded those bytes. Keep secrets
 out of declarations. Use exact public model/runtime references where available.
+Each supplied string must be nonempty, control-free and at most 4,096 UTF-8
+bytes. Rejections name the field and observed byte count without echoing its
+contents. Keep declaration summaries within the bound rather than embedding
+full configuration dumps.
 Reference comparison requires every field on both A runs: omitted deployment or
 nullable fields yield identity `unavailable`, not a match. Known differences
 yield `declared_mismatch`; complete equal declarations yield `declared_match`.

@@ -3831,3 +3831,5 @@ mod measurement_tests;
 mod metrics_tests;
 #[path = "support/policy.rs"]
 mod policy_tests;
+#[path = "support/preflight.rs"]
+mod preflight_tests;

@@ -114,15 +114,17 @@ fn bounded_capture_preserves_invalid_prefix_facts_but_not_missing_usage_guesses(
             requests
         });
         let options = Options {
-            workload: input,
-            endpoint,
-            model: "fixture-model".into(),
+            common: CommonArgs {
+                workload: input,
+                endpoint,
+                model: "fixture-model".into(),
+                deployment: None,
+                policy: None,
+                metrics_url: None,
+                auth_env: None,
+                local_http: true,
+            },
             out: temp.0.join("run"),
-            deployment: None,
-            policy: None,
-            metrics_url: None,
-            auth_env: None,
-            local_http: true,
             json: true,
         };
         let deadline = Instant::now() + Duration::from_secs(2);

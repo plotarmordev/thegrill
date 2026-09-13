@@ -326,19 +326,20 @@ pub struct Deployment {
 }
 impl Deployment {
     pub fn validate(&self) -> Result<()> {
-        for value in [
-            &self.model_revision,
-            &self.runtime,
-            &self.hardware,
-            &self.settings,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for (field, value) in [
+            ("model_revision", &self.model_revision),
+            ("runtime", &self.runtime),
+            ("hardware", &self.hardware),
+            ("settings", &self.settings),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
             if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
-                return Err(
-                    "deployment declarations must be nonempty text within 4096 bytes".into(),
-                );
+                return Err(format!(
+                    "deployment.{field}: {} bytes; must be nonempty, control-free text within 4096 bytes",
+                    value.len()
+                ));
             }
         }
         Ok(())

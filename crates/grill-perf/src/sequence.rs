@@ -172,9 +172,14 @@ pub struct State {
 }
 
 impl State {
-    pub fn request(&mut self, plan: &Plan, spec: &WaveSpec, lane: u32) -> Result<String> {
-        if plan.workload.version != 2 {
-            return crate::wire::request_body(plan, spec, lane);
+    pub fn request(
+        &mut self,
+        context: &crate::wire::BodyContext<'_>,
+        spec: &WaveSpec,
+        lane: u32,
+    ) -> Result<String> {
+        if context.workload.version != 2 {
+            return crate::wire::request_body(context, spec, lane);
         }
         if self.stopped {
             return Err("sequence cannot admit a step after invalid or incomplete evidence".into());
@@ -184,15 +189,16 @@ impl State {
                 "sequence admission must follow each settled declared step exactly once".into(),
             );
         }
-        let case = plan
+        let case = context
             .workload
             .cases
             .iter()
             .find(|c| c.id == spec.case)
             .ok_or("unknown sequence case")?;
         let step = case.step.as_ref().ok_or("missing step")?;
-        let mut body: Value = serde_json::from_str(&crate::wire::request_body(plan, spec, lane)?)
-            .map_err(|e| e.to_string())?;
+        let mut body: Value =
+            serde_json::from_str(&crate::wire::request_body(context, spec, lane)?)
+                .map_err(|e| e.to_string())?;
         let inputs = body
             .as_object_mut()
             .and_then(|body| body.remove("messages"))
@@ -213,9 +219,8 @@ impl State {
         if messages.len() > 64 {
             return Err("sequence accumulated history exceeds 64 messages".into());
         }
-        let namespace = plan
+        let namespace = context
             .cache_namespace
-            .as_deref()
             .ok_or("sequence needs a private cache namespace")?;
         body["cache_salt"] = Value::String(format!("{namespace}-{}", step.history));
         if let Expected::Tool { .. } = step.expect {

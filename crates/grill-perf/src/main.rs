@@ -32,6 +32,8 @@ enum Command {
     Check(study::CheckOptions),
     /// Collect bounded request waves; warmup is retained but excluded from measured results.
     Run(run::Options),
+    /// Validate run declarations offline without dispatch or capture output; always JSON.
+    Preflight(run::CommonArgs),
     /// Request cooperative pause after the active whole wave is published.
     Pause { run: PathBuf },
     /// Continue only never-started waves from a verified cooperative pause.
@@ -102,6 +104,10 @@ fn execute(cli: Cli) -> model::Result<u8> {
         }
         Command::Run(options) => show_summary(run::execute(&options)?, options.json)
             .map(|complete| if complete { 0 } else { 2 }),
+        Command::Preflight(options) => {
+            print_json(&run::preflight(&options)?)?;
+            Ok(0)
+        }
         Command::Bundle {
             command: BundleCommand::Verify { manifest, json },
         } => {
