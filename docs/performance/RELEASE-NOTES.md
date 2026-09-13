@@ -26,6 +26,12 @@ in each staged build receipt; a future approved tag must identify that commit.
   pins and bounded budgets without network traffic or capture creation. Deployment
   validation now names the offending field and observed UTF-8 byte count; the
   4,096-byte, nonempty and control-free limits remain unchanged.
+- Add flat workload v3 with an optional typed warmup output budget, separate from
+  measured output and conversation v2. Phase controls bind request/evidence
+  identity, weighted ceilings, usage checks and failure reporting; incompatible
+  phase controls cannot be compared as matched workloads. Old examples, recipe
+  hashes and absent-override behavior remain unchanged. A 32/400 declaration
+  does not establish sparkDash protocol or live-backend equivalence.
 
 ### Target and compatibility boundary
 

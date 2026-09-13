@@ -227,6 +227,9 @@ pub(crate) fn load_verified(root: &Path) -> Result<Loaded, LoadError> {
         return Err("metric contract does not match plan version".into());
     }
     plan.workload.validate()?;
+    if plan.workload.version == 3 && plan.version != 3 {
+        return Err("workload version 3 requires native performance plan version 3".into());
+    }
     if let Some(deployment) = &plan.deployment {
         deployment.validate()?;
     }

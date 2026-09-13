@@ -3833,3 +3833,6 @@ mod metrics_tests;
 mod policy_tests;
 #[path = "support/preflight.rs"]
 mod preflight_tests;
+
+#[path = "support/phase_output.rs"]
+mod phase_output_tests;

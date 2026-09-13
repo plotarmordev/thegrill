@@ -116,9 +116,12 @@ pub fn budgets(workload: &Workload, acquisitions: usize) -> Result<(usize, usize
             .and_then(|n| measured.checked_add(n))
             .ok_or("capture measured request ceiling overflows")?;
     }
-    let tokens = warmup
-        .checked_add(measured)
-        .and_then(|n| n.checked_mul(workload.request.output.tokens as usize))
+    let warmup_tokens = warmup
+        .checked_mul(workload.request.effective_output(Phase::Warmup).tokens as usize)
+        .ok_or("capture output token ceiling overflows")?;
+    let tokens = measured
+        .checked_mul(workload.request.effective_output(Phase::Measured).tokens as usize)
+        .and_then(|n| warmup_tokens.checked_add(n))
         .ok_or("capture output token ceiling overflows")?;
     Ok((warmup, measured, tokens))
 }

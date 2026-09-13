@@ -490,8 +490,18 @@ fn load(root: &Path) -> Result<Verified> {
         request_ceiling: manifest.request_ceiling,
         output_token_ceiling: manifest.output_token_ceiling,
         allowance_seconds: manifest.seconds,
-        minimum_full_capture_tokens_per_second: (admitted_workload.request.output.mode
-            == OutputMode::Exact)
+        minimum_full_capture_tokens_per_second: ((warmup == 0
+            || admitted_workload
+                .request
+                .effective_output(Phase::Warmup)
+                .mode
+                == OutputMode::Exact)
+            && (measured == 0
+                || admitted_workload
+                    .request
+                    .effective_output(Phase::Measured)
+                    .mode
+                    == OutputMode::Exact))
             .then_some(manifest.output_token_ceiling as f64 / manifest.seconds as f64),
     };
     for (index, acquisition) in manifest.acquisitions.iter().enumerate() {
@@ -605,7 +615,11 @@ fn load(root: &Path) -> Result<Verified> {
                         status: attempt.status.clone(),
                         http_status: attempt.http_status,
                         usage: attempt.usage.clone(),
-                        expected_completion_tokens: plan.workload.request.output.tokens,
+                        expected_completion_tokens: plan
+                            .workload
+                            .request
+                            .effective_output(wave.spec.phase)
+                            .tokens,
                         detail: attempt.detail.clone(),
                         eligibility_errors: attempt.eligibility_errors.clone(),
                         receipt_path: evidence::wave_dir(&path, wave.spec.index).join("wave.json"),
@@ -1476,7 +1490,7 @@ pub fn human(report: &Report) -> String {
             if let Some(rate) = a.minimum_full_capture_tokens_per_second {
                 text.push_str(&format!(" Full completion needs >{rate:.1} reported output tokens/s including overhead; use --seconds for a larger allowance.\n"));
             } else {
-                text.push_str(" Output is a cap, not a required amount; no minimum completion rate inferred.\n");
+                text.push_str(" At least one planned phase uses capped output; no minimum completion rate inferred.\n");
             }
         }
     }
@@ -1506,25 +1520,21 @@ pub fn human(report: &Report) -> String {
         text.push_str(&format!("Capture stop: {reason}\n"));
     }
     if let Some(failure) = &report.first_failure {
+        let exact = report.selected.as_ref().is_none_or(|s| {
+            s.request.effective_output(failure.wave.phase).mode == OutputMode::Exact
+        });
         if failure
             .usage
             .completion_tokens
             .is_some_and(|n| n > u64::from(failure.expected_completion_tokens))
             || (failure.status == Status::Complete
-                && report
-                    .selected
-                    .as_ref()
-                    .is_none_or(|s| s.request.output.mode == OutputMode::Exact)
+                && exact
                 && failure
                     .usage
                     .completion_tokens
                     .is_some_and(|n| n != u64::from(failure.expected_completion_tokens)))
         {
-            let requirement = if report
-                .selected
-                .as_ref()
-                .is_none_or(|s| s.request.output.mode == OutputMode::Exact)
-            {
+            let requirement = if exact {
                 format!(
                     "exactly {} were required",
                     failure.expected_completion_tokens

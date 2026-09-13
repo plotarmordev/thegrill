@@ -237,28 +237,38 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     // each of the cache salt and the text salt, so an interior body can exceed a
     // corner sample by two bytes. Bound with that slack rather than serializing
     // every repeated prompt.
+    // Identical output controls give warmup the same encoded bound as measured.
     for cell in &workload.cells {
-        for (trial, lane) in [(0, 0), (100, 63)] {
-            let bound = WaveSpec {
-                index: 1023,
-                phase: Phase::Measured,
-                cell: cell.id.clone(),
-                case: cell.case.clone(),
-                trial,
-                concurrency: cell.concurrency,
-            };
-            let body = wire::request_body(&context, &bound, lane)?;
-            if body.len() + 2 > REQUEST_CAP {
-                return Err("encoded request exceeds 2 MiB".into());
+        for phase in [Phase::Measured, Phase::Warmup] {
+            if phase == Phase::Warmup
+                && (cell.warmup_trials == 0
+                    || workload.request.effective_output(phase)
+                        == workload.request.effective_output(Phase::Measured))
+            {
+                continue;
             }
-            // Reservation receipts embed each body as a JSON string; the 40 MiB
-            // loader cap must hold after that second escaping plus pretty-print.
-            let escaped = serde_json::to_string(&body).map_err(|e| e.to_string())?;
-            if (escaped.len() + 2) * cell.concurrency as usize > 32 * 1024 * 1024 {
-                return Err(format!(
-                    "cell {} exceeds the reservation receipt bound",
-                    cell.id
-                ));
+            for (trial, lane) in [(0, 0), (100, 63)] {
+                let bound = WaveSpec {
+                    index: 1023,
+                    phase,
+                    cell: cell.id.clone(),
+                    case: cell.case.clone(),
+                    trial,
+                    concurrency: cell.concurrency,
+                };
+                let body = wire::request_body(&context, &bound, lane)?;
+                if body.len() + 2 > REQUEST_CAP {
+                    return Err("encoded request exceeds 2 MiB".into());
+                }
+                // Reservation receipts embed each body as a JSON string; the 40 MiB
+                // loader cap must hold after that second escaping plus pretty-print.
+                let escaped = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+                if (escaped.len() + 2) * cell.concurrency as usize > 32 * 1024 * 1024 {
+                    return Err(format!(
+                        "cell {} exceeds the reservation receipt bound",
+                        cell.id
+                    ));
+                }
             }
         }
     }
