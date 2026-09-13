@@ -89,6 +89,33 @@ These hashes identify the named staged artifacts, not every later build of
 version 0.1.0. A later source revision requires new exact-source staging and
 receipts before approval; these historical qualification records are not rewritten.
 
+#### Qualification after preflight and phase-output integration
+
+Source `dd771ac36963290cf8b1079b4c2a38be40cec949` completed both native
+installed-runtime workflows and source/output gates in
+[staging run 34740266773](https://github.com/plotarmordev/thegrill/actions/runs/34740266773).
+The local workspace gate passed 221 Rust tests (two existing opt-in ignores)
+and 15 publication-boundary tests, plus build, formatting and Clippy. The merged
+source tree is identical; [post-merge CI passed](https://github.com/plotarmordev/thegrill/actions/runs/34740590731).
+
+| Native target | Staged archive SHA-256 |
+|---|---|
+| `aarch64-unknown-linux-gnu` | `a9d73cfbe7e3b49e29c63112c0b5d98c450fca01e8695a972a1ace056d93cfe5` |
+| `x86_64-unknown-linux-gnu` | `b5a724bcd851a8fc78389a04b1b1642f63e2825cc696f690f4abc90d56d06078` |
+
+Both summaries report the same two neutral scenarios: C1 baseline ready,
+unchanged control `INCONCLUSIVE`, candidate `IMPROVED`; selected baseline ready,
+control and candidate `DESCRIPTIVE`. These are controlled CPU fixtures, not
+live performance claims. Both runtimes had neither Rust nor a source checkout.
+Checks covered inherited inputs, network-disabled replay, corrupt downloads,
+asset hashes, input/pin/authentication/backend failures and budget exhaustion.
+The downloaded archives and every payload digest were independently checked
+against their checksum sidecars and build receipts.
+
+These are additional exact-source staging records, not published releases or
+replacements for the historical hashes above. First publication still requires
+explicit maintainer approval.
+
 ### Remaining limits
 
 Prepared Actions artifacts require access to their retained workflow run; they
