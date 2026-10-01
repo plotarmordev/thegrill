@@ -6,14 +6,14 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.2.0** experimental release
-with mixed/accounting/acquisition/resource/lifecycle/kernel claim coverage.
-Use its exact version/target, checksum and build receipt; never substitute a
-moving branch or the earlier local staging hashes. Retain the published v0.1.0
-baseline and its original pins for historical studies. Installing v0.2.0 does
-not reinterpret old receipts or qualify new backend claims.
+The download commands below select the published **v0.4.0** experimental release,
+which adds cross-platform deployment comparison, portable workloads and macOS
+memory observation. Use its exact version/target, checksum and build receipt;
+never substitute a moving branch or local staging hashes. Retain earlier
+published releases and their original pins for historical studies. Installing
+v0.4.0 does not reinterpret old receipts or qualify new backend claims.
 
-A 0.2.0 package additionally carries the claim map and report template under
+Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
 startup, retention and microbench Python modules under `tools/`. Keep all of
 those bytes immutable and pin the actual executable and selected producer before
@@ -28,8 +28,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.2.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.2.0),
-from reviewed source `4166e9f0c4467ce516c8d35ae363a80abe7b6494`.
+The published prerelease is [**v0.4.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.4.0),
+from reviewed source `097faada8c62f38c3d925acec3530c99a07f20c0`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -51,8 +51,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.2.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.2.0
+VERSION=0.4.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.4.0
 ```
 
 ```sh
