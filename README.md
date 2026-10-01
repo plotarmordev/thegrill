@@ -22,10 +22,10 @@ verify a pinned artifact before unpacking, supply the actual server inputs once,
 capture a baseline, optionally capture an unchanged control, change serving state
 yourself, check, and replay the report offline.
 
-The published [v0.1.0 pre-release](https://github.com/plotarmordev/thegrill/releases/tag/v0.1.0)
-covers the baseline workflow. The expanded claim coverage below requires a
-separately reviewed staged artifact until its own release is approved; do not
-assume the historical binary contains newer source features.
+The latest published pre-release is [v0.4.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.4.0),
+with cross-platform deployment comparison and portable workloads. Earlier
+releases stay available for historical studies; do not assume an older binary
+contains newer source features.
 The published performance archive contains `bin/grill-perf`, pinned `workloads/`
 and offline performance guides. Published binaries require Linux and no Rust or
 TheGrill checkout. A Rust 1.98 source build additionally supports portable
