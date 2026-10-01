@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add the [portable sparkDash copies](README.md#portable-sparkdash-copies):
+  `sparkdash-decode-portable-v1` and `sparkdash-prefill-portable-v1` keep the
+  sparkDash prompts, sizes, cells, trials and limits byte-identical with
+  portable controls, so they run on MLX servers.
 - Add the [`realistic-decode-v1`](README.md#realistic-decode) selection:
   four ordinary coding questions and two whole-file edits at C1 with portable
   `cap-reached` output, reported per cell apart from the count prompts.

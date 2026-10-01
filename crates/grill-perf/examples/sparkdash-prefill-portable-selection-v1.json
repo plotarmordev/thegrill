@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "sparkdash-prefill-portable-v1",
+  "workload": "sparkdash-prefill-portable-v1.json",
+  "source_sha256": "3009effdf90c27df730a90e5edca5bc56c5f7051167adde59bb593f9342ffda1",
+  "workload_sha256": "a4d60bcdfda8e480c4b3e7babb98b4683a1feae90f1e0fd24a04539b8e6f333c",
+  "scope": "sparkDash PrefillBench prompts and 4k/8k/16k/32k sizes at C1 on any Chat Completions server; output capped at 8 tokens, thinking off. Descriptive per-size prefill observations only.",
+  "operation_scope": "unknown"
+}

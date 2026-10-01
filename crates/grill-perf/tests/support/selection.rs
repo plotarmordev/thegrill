@@ -1110,3 +1110,71 @@ fn realistic_decode_selection_sends_portable_cap_reached_cells_on_one_edit_modul
     assert_eq!(modules[0], modules[1]);
     assert!(modules[0].contains("logger.debug(") && modules[0].contains("qty"));
 }
+
+#[test]
+fn sparkdash_portable_copies_keep_sparkdash_prompts_and_send_only_portable_controls() {
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    // Only the request controls may differ from sparkDash; prompts, sizes, cells and limits stay identical.
+    for (original, copy) in [
+        (
+            "sparkdash-decode-v1.json",
+            "sparkdash-decode-portable-v1.json",
+        ),
+        (
+            "sparkdash-prefill-v1.json",
+            "sparkdash-prefill-portable-v1.json",
+        ),
+    ] {
+        let original = read_json(&examples.join(original));
+        let copy = read_json(&examples.join(copy));
+        for field in ["cases", "cells", "limits"] {
+            assert_eq!(copy[field], original[field], "{field}");
+        }
+    }
+
+    let temp = Temp::new();
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    for (manifest, cap, requests, name) in [
+        (
+            "sparkdash-decode-portable-selection-v1.json",
+            400,
+            576,
+            "decode",
+        ),
+        (
+            "sparkdash-prefill-portable-selection-v1.json",
+            8,
+            128,
+            "prefill",
+        ),
+    ] {
+        let selection = selection_input(&temp, manifest);
+        let server = Server::new(move |stream, _, body| {
+            assert_eq!(body["max_tokens"], cap);
+            assert_eq!(
+                body["chat_template_kwargs"],
+                json!({"thinking":false,"enable_thinking":false})
+            );
+            for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
+                assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+            }
+            response(stream, Some(cap), false);
+        });
+        let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, name)
+            .output()
+            .unwrap();
+        let report = decoded(&output);
+        assert!(output.status.success(), "{report}");
+        assert_eq!(server.count.load(Ordering::SeqCst), requests);
+        for acquisition in report["selected"]["baseline_acquisitions"]
+            .as_array()
+            .unwrap()
+        {
+            let cells = acquisition["cells"].as_array().unwrap();
+            assert!(
+                cells.iter().all(|cell| cell["eligible_trials"] == 3),
+                "{acquisition}"
+            );
+        }
+    }
+}

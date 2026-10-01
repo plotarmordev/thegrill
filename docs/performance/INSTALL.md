@@ -226,6 +226,8 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `conversation-selection-v2.json` | Bounded factual/history and fixed-tool continuity |
 | `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
+| `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
+| `sparkdash-prefill-portable-selection-v1.json` | [sparkDash prefill sizes](README.md#portable-sparkdash-copies), portable controls |
 
 For a current source build, pass
 `--selection "$SOURCE/crates/grill-perf/examples/portable-chat-selection-v1.json"`.

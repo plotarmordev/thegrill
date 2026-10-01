@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "sparkdash-decode-portable-v1",
+  "workload": "sparkdash-decode-portable-v1.json",
+  "source_sha256": "2c9cec27fc4831c26ce2dca8d7b954454964b2a12d832a93bea55b48e0b58b02",
+  "workload_sha256": "9e575a9d110b8c5cd3b43e5341e816ffd03dfa26fd319f84a29f6ee6a89c3b64",
+  "scope": "sparkDash decode prompts, cells and trials on any Chat Completions server: structured at C1/C2/C4/C8, prose, code and JSON at C1; 400-token cap-reached output, thinking off. Descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}
