@@ -850,6 +850,20 @@ nor a prefill rate proves a cold cache. Switching to `observe` changes the
 workload and its claim. Real tokenizer counts, long-context endpoint support,
 thinking-control compliance and live prefill rates remain unverified.
 
+### Portable sparkDash copies
+
+The [`sparkdash-decode-portable-v1`](../../crates/grill-perf/examples/sparkdash-decode-portable-selection-v1.json)
+and [`sparkdash-prefill-portable-v1`](../../crates/grill-perf/examples/sparkdash-prefill-portable-selection-v1.json)
+selections run the two sparkDash workloads above on any Chat Completions server,
+including MLX servers on Apple Silicon. Prompts, sizes, cells, trials and limits
+are byte-identical; only the request controls change, to the `portable-chat-v1`
+profile with the `chat-template-thinking-v1` control off. Decode uses a 400-token
+[`cap-reached`](#exact-output-and-cache-observations) output instead of forcing
+exactly 400 tokens, so a reply that ends early makes its lane ineligible rather
+than unequal; the count-to-200 prompt can end before 400 tokens with tokenizers
+that merge whole numbers. Prefill caps output at 8 tokens: its rate depends only
+on the prompt and the time to first token.
+
 ### Offline run preflight
 
 Use `preflight` to admit the workload together with the inputs intended for

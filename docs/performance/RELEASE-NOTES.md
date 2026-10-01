@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add the [portable sparkDash copies](README.md#portable-sparkdash-copies):
+  `sparkdash-decode-portable-v1` and `sparkdash-prefill-portable-v1` keep the
+  sparkDash prompts, sizes, cells, trials and limits byte-identical with
+  portable controls, so they run on MLX servers.
 - Observe macOS memory in the resource domain: `macos_process {pid}` records
   the process's physical footprint (what `footprint -p` reports) as
   `memory_used` plus its lifetime peak, and `macos_host_memory` records free

@@ -229,6 +229,8 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
 | `prefill-ladder-96k-selection-v1.json` | [Prefill at ~2K/8K/32K/96K](README.md#long-context-decode-and-prefill), portable controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
+| `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
+| `sparkdash-prefill-portable-selection-v1.json` | [sparkDash prefill sizes](README.md#portable-sparkdash-copies), portable controls |
 
 For a current source build, pass
 `--selection "$SOURCE/crates/grill-perf/examples/portable-chat-selection-v1.json"`.
