@@ -94,9 +94,11 @@ Verification and limits of this version:
   `footprint -p` (contributor report in #86). No Mac-versus-NVIDIA comparison
   has been run yet, and the portable sparkDash copies have not been run on real
   servers.
-- One hosted macOS timing test,
-  `evidence_is_not_published_while_a_peer_request_is_active`, fails
-  intermittently and passes on rerun; it does not involve the changes above.
+- Hosted macOS timing tests are sensitive to runner load. A wall-clock bound in
+  `streaming_decode_rate_uses_post_first_text_interval_and_measured_lanes`
+  failed twice and was removed (#84). `evidence_is_not_published_while_a_peer_request_is_active`
+  failed once (run 36803234260) and passed on rerun; it does not involve the
+  changes above.
 
 ## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 
