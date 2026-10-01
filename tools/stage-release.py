@@ -26,6 +26,8 @@ WORKLOADS = (
     "baseline-v2.json",
     "concurrency-enable-thinking-selection-v1.json",
     "concurrency-enable-thinking-v1.json",
+    "concurrency-ladder-selection-v1.json",
+    "concurrency-ladder-v1.json",
     "concurrency-selection-v1.json",
     "concurrency-v1.json",
     "conversation-selection-v2.json",

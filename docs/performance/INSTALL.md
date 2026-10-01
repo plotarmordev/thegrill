@@ -223,6 +223,7 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 |---|---|
 | `concurrency-selection-v1.json` | C1/C2/C4 with legacy `thinking: false` |
 | `concurrency-enable-thinking-selection-v1.json` | Same ladder, distinct `enable_thinking: false` control |
+| `concurrency-ladder-selection-v1.json` | [C1/C2/C4/C8 coding question](README.md#concurrency-ladder), 400-token portable replies |
 | `conversation-selection-v2.json` | Bounded factual/history and fixed-tool continuity |
 | `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
