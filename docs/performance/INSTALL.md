@@ -226,7 +226,7 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `concurrency-ladder-selection-v1.json` | [C1/C2/C4/C8 coding question](README.md#concurrency-ladder), 400-token portable replies |
 | `conversation-selection-v2.json` | Bounded factual/history and fixed-tool continuity |
 | `long-context-decode-selection-v1.json` | [Decode after ~32K/48K/96K prompts](README.md#long-context-decode-and-prefill), portable controls |
-| `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
+| `portable-chat-selection-v1.json` | Portable C1 cap observation; no backend-specific controls |
 | `prefill-ladder-96k-selection-v1.json` | [Prefill at ~2K/8K/32K/96K](README.md#long-context-decode-and-prefill), portable controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
 | `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
@@ -234,9 +234,9 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 
 For a current source build, pass
 `--selection "$SOURCE/crates/grill-perf/examples/portable-chat-selection-v1.json"`.
-The files are allowlisted for the next reviewed release, where the path will be
-`$GRILL_HOME/workloads/portable-chat-selection-v1.json`. The published v0.3.0
-artifacts remain immutable and do not gain these files retroactively.
+From v0.4.0 the release path is
+`$GRILL_HOME/workloads/portable-chat-selection-v1.json`. Published v0.3.0 and
+earlier artifacts remain immutable and do not gain these files retroactively.
 
 All explicit selections are descriptive, including a selected C1 workload.
 `workloads/recipes-v1.json` is the historical bundle, not a selection manifest.
