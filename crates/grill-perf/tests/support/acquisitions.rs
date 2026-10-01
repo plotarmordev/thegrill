@@ -253,3 +253,71 @@ fn acquisition6_native_policy3_runs_declared_roles_and_reports_step_whole_and_ta
     assert!(report["tail"][0]["ranges"]["candidate"].is_null());
     assert_eq!(server.count.load(Ordering::SeqCst), 24);
 }
+
+/// Serves `long-context-recall-v1`, answering each step with the code its own
+/// prompt records, or a wrong code at request `wrong`. Records each request's
+/// filler length and whether the record precedes the filler.
+fn recall(temp: &Temp, name: &str, wrong: Option<usize>) -> (Output, Vec<(usize, bool)>) {
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let server = Server::new(move |stream, index, request| {
+        assert_eq!(request["max_tokens"], 32);
+        assert_eq!(
+            request["chat_template_kwargs"],
+            json!({"thinking":false,"enable_thinking":false})
+        );
+        let user = request["messages"][1]["content"].as_str().unwrap();
+        let record = user.find("Record: the access code for vault ").unwrap();
+        let (vault, code) = user[record + "Record: the access code for vault ".len()..]
+            .split_once(".\n")
+            .unwrap()
+            .0
+            .split_once(" is ")
+            .unwrap();
+        assert!(user.ends_with(&format!("What is the access code for vault {vault}?")));
+        let filler = user
+            .lines()
+            .find(|line| line.starts_with(" the the"))
+            .unwrap();
+        assert_eq!(filler, " the".repeat(filler.len() / 4));
+        let before = record < user.find(filler).unwrap();
+        seen.lock().unwrap().push((filler.len() / 4, before));
+        let answer = if wrong == Some(index) {
+            "XX0-0000-XX"
+        } else {
+            code
+        };
+        response(stream, &json!({ "fact": answer }).to_string());
+    });
+    let workload: Value =
+        serde_json::from_str(include_str!("../../examples/long-context-recall-v1.json")).unwrap();
+    let output = run(temp, &server, name, &workload);
+    assert_eq!(
+        server.count.load(Ordering::SeqCst),
+        requests.lock().unwrap().len()
+    );
+    let requests = requests.lock().unwrap().clone();
+    (output, requests)
+}
+
+#[test]
+fn long_context_recall_grades_each_code_at_its_depth_and_stops_on_a_miss() {
+    let temp = Temp::new();
+    let (output, requests) = recall(&temp, "recall", None);
+    successful(&output);
+    let steps = [
+        (16_384, false),
+        (16_384, true),
+        (49_152, false),
+        (49_152, true),
+        (98_304, false),
+        (98_304, true),
+    ];
+    assert_eq!(requests, steps.repeat(3));
+
+    let (output, requests) = recall(&temp, "missed", Some(5));
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 6);
+    let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(run["status"], "stopped-after-sequence-check", "{run}");
+}

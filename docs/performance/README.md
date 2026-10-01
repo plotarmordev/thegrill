@@ -378,6 +378,24 @@ approximate. `cache: observe` sends no cache control: a per-request `{salt}` at
 the start of the prompt keeps it from matching an earlier prefix, while any
 reported cached tokens remain visible in the evidence. Both are descriptive only.
 
+### Long-context recall
+
+[`long-context-recall-v1`](../../crates/grill-perf/examples/long-context-recall-v1.json)
+checks that a server still reads a long prompt correctly. Each of six ordered
+C1 steps places one fixed access code before or after about 16K, 48K or 96K
+filler tokens and asks for it back; the answer is graded as the exact
+[JSON fact](CONVERSATIONS.md), and the first wrong answer stops the run. Steps
+run from the shortest and nearest record to the 96K record at the start of the
+prompt, so a stop names the length and depth where recall failed. Three
+repetitions give 18 requests with a 32-token cap, greedy sampling and thinking
+off.
+
+Recall needs more than a selected capture's 128 KiB conversation request, so it
+is a workload-6 conversation acquisition: run it with
+`grill-perf run long-context-recall-v1.json` and compare runs descriptively.
+The profile sends `cache_salt`, which servers without it may ignore; a cached
+prefix does not change the graded answer.
+
 ### Selected reports
 
 Selected reports use comparison v2 and retain `selected.manifest`, its digest,

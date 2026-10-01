@@ -68,6 +68,7 @@ WORKLOADS = (
     "glm-long-context-v6.json",
     "glm-p95-stress-v6.json",
     "glm-tools-v6.json",
+    "long-context-recall-v1.json",
     "microbench-cpu-sum-u64.json",
     "microbench-exl3-e3-grouped.json",
     "microbench-nccl-allreduce-sum.json",
