@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "name": "long-context-decode-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 256, "mode": "cap-reached" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "chat-template-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 600000,
+    "idle_ms": 300000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "decode-32k",
+      "messages": [
+        { "role": "user", "content": "[long-context-decode {salt}]\nThe filler below is padding; ignore it.\n{fill}\nIgnoring the filler, implement a thread-safe LRU cache class in Python with get, put, and a capacity limit. Include type hints and pytest tests." }
+      ],
+      "fill": { "unit": " the", "repeat": 32768 }
+    },
+    {
+      "id": "decode-48k",
+      "messages": [
+        { "role": "user", "content": "[long-context-decode {salt}]\nThe filler below is padding; ignore it.\n{fill}\nIgnoring the filler, implement a thread-safe LRU cache class in Python with get, put, and a capacity limit. Include type hints and pytest tests." }
+      ],
+      "fill": { "unit": " the", "repeat": 49152 }
+    },
+    {
+      "id": "decode-96k",
+      "messages": [
+        { "role": "user", "content": "[long-context-decode {salt}]\nThe filler below is padding; ignore it.\n{fill}\nIgnoring the filler, implement a thread-safe LRU cache class in Python with get, put, and a capacity limit. Include type hints and pytest tests." }
+      ],
+      "fill": { "unit": " the", "repeat": 98304 }
+    }
+  ],
+  "cells": [
+    { "id": "decode-32k-1", "case": "decode-32k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "decode-48k-1", "case": "decode-48k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "decode-96k-1", "case": "decode-96k", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}

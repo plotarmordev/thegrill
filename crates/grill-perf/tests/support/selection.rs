@@ -1112,6 +1112,125 @@ fn realistic_decode_selection_sends_portable_cap_reached_cells_on_one_edit_modul
 }
 
 #[test]
+fn concurrency_ladder_selection_reaches_c8_with_portable_cap_reached_lanes() {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, "concurrency-ladder-selection-v1.json");
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let server = Server::new(|stream, _, body| {
+        assert_eq!(body["max_tokens"], 400);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"thinking":false,"enable_thinking":false})
+        );
+        for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("Implement a thread-safe LRU cache")
+        );
+        response(stream, Some(400), false);
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "ladder")
+        .output()
+        .unwrap();
+    let report = decoded(&output);
+    assert!(output.status.success(), "{report}");
+    assert_eq!(server.count.load(Ordering::SeqCst), 480);
+    for acquisition in report["selected"]["baseline_acquisitions"]
+        .as_array()
+        .unwrap()
+    {
+        let lanes: Vec<u64> = acquisition["waves"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|wave| wave["spec"]["phase"] == "measured")
+            .map(|wave| {
+                assert_eq!(wave["eligible"], true, "{wave}");
+                wave["attempts"].as_array().unwrap().len() as u64
+            })
+            .collect();
+        assert_eq!(lanes, [1, 1, 1, 2, 2, 2, 4, 4, 4, 8, 8, 8]);
+    }
+}
+
+/// Runs a shipped long-prompt selection against a fixture that answers every
+/// request with `tokens` capped completion tokens, and returns the filler
+/// length (in `" the"` units) and salted header of every request.
+fn long_prompt_requests(name: &str, tokens: u64) -> (Value, Vec<(usize, String)>) {
+    let temp = Temp::new();
+    let selection = selection_input(&temp, name);
+    let declaration = deployment(&temp, "serving.json", "unchanged");
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = requests.clone();
+    let server = Server::new(move |stream, _, body| {
+        assert_eq!(body["max_tokens"], tokens);
+        assert_eq!(
+            body["chat_template_kwargs"],
+            json!({"thinking":false,"enable_thinking":false})
+        );
+        for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
+            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
+        }
+        let content = body["messages"][0]["content"].as_str().unwrap();
+        let lines: Vec<&str> = content.split('\n').collect();
+        assert_eq!(lines.len(), 4, "header, instruction, filler, question");
+        assert_eq!(lines[2].len() % 4, 0);
+        assert_eq!(lines[2], " the".repeat(lines[2].len() / 4));
+        seen.lock()
+            .unwrap()
+            .push((lines[2].len() / 4, lines[0].to_owned()));
+        response(stream, Some(tokens), false);
+    });
+    let output = selected_baseline(&temp, &server.endpoint, &declaration, &selection, "long")
+        .output()
+        .unwrap();
+    let report = decoded(&output);
+    assert!(output.status.success(), "{report}");
+    let requests = requests.lock().unwrap().clone();
+    (report, requests)
+}
+
+#[test]
+fn long_context_selections_send_salted_fillers_at_each_declared_length() {
+    for (name, tokens, lengths) in [
+        (
+            "long-context-decode-selection-v1.json",
+            256,
+            vec![32_768, 49_152, 98_304],
+        ),
+        (
+            "prefill-ladder-96k-selection-v1.json",
+            1,
+            vec![2_048, 8_192, 32_768, 98_304],
+        ),
+    ] {
+        let (report, requests) = long_prompt_requests(name, tokens);
+        // Eight acquisitions of one warmup and three measured trials per length.
+        assert_eq!(requests.len(), 8 * 4 * lengths.len(), "{name}");
+        let mut seen: Vec<usize> = requests.iter().map(|(fill, _)| *fill).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, lengths, "{name}");
+        // A repeated header would let a server reuse an earlier prompt's prefix.
+        let headers: std::collections::HashSet<&String> =
+            requests.iter().map(|(_, header)| header).collect();
+        assert_eq!(headers.len(), requests.len(), "{name}");
+        for acquisition in report["selected"]["baseline_acquisitions"]
+            .as_array()
+            .unwrap()
+        {
+            for cell in acquisition["cells"].as_array().unwrap() {
+                assert_eq!(cell["eligible_trials"], 3, "{name}: {cell}");
+            }
+        }
+    }
+}
+
+#[test]
 fn sparkdash_portable_copies_keep_sparkdash_prompts_and_send_only_portable_controls() {
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     // Only the request controls may differ from sparkDash; prompts, sizes, cells and limits stay identical.

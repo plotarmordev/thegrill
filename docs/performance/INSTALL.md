@@ -223,8 +223,11 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 |---|---|
 | `concurrency-selection-v1.json` | C1/C2/C4 with legacy `thinking: false` |
 | `concurrency-enable-thinking-selection-v1.json` | Same ladder, distinct `enable_thinking: false` control |
+| `concurrency-ladder-selection-v1.json` | [C1/C2/C4/C8 coding question](README.md#concurrency-ladder), 400-token portable replies |
 | `conversation-selection-v2.json` | Bounded factual/history and fixed-tool continuity |
+| `long-context-decode-selection-v1.json` | [Decode after ~32K/48K/96K prompts](README.md#long-context-decode-and-prefill), portable controls |
 | `portable-chat-selection-v1.json` | Source/next-reviewed-release portable C1 cap observation; no backend-specific controls |
+| `prefill-ladder-96k-selection-v1.json` | [Prefill at ~2K/8K/32K/96K](README.md#long-context-decode-and-prefill), portable controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
 | `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
 | `sparkdash-prefill-portable-selection-v1.json` | [sparkDash prefill sizes](README.md#portable-sparkdash-copies), portable controls |
@@ -272,8 +275,9 @@ in the git checkout match that commit, and otherwise `(source unrecorded)`.
 macOS has no release archive: build from a git clone at a clean commit to
 record the source; a build from a source tarball reports `unrecorded`.
 Source builds of the portable serving workflow need Linux or Apple Silicon
-macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, native
-resource capture and external-program microbench capture remain Linux-only. Use
-explicit selection paths under `$SOURCE/crates/grill-perf/examples/` instead of
-packaged `workloads/`. Record build flags and actual hashes; a local build is not
+macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, Linux
+`/proc`/cgroup/NVML resource sources and external-program microbench capture
+remain Linux-only; macOS uses [its own resource sources](RESOURCES.md#macos-sources).
+Use explicit selection paths under `$SOURCE/crates/grill-perf/examples/` instead
+of packaged `workloads/`. Record build flags and actual hashes; a local build is not
 proof of native installed-artifact verification or live backend qualification.

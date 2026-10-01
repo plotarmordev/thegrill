@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "concurrency-ladder-v1",
+  "workload": "concurrency-ladder-v1.json",
+  "source_sha256": "4e73a89c07e9194826b86e5e2808332c7998bb90a767c712d86854eafb1be3a9",
+  "workload_sha256": "0eda775488cabf9204e15d0d71422191b6f6380dbbb433189366ef696d6941e0",
+  "scope": "Prospective fixed C1/C2/C4/C8 ladder on one ordinary coding question; 400-token cap-reached output, thinking off, every lane the same prompt. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}

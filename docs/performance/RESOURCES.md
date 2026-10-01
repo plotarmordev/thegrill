@@ -2,10 +2,11 @@
 
 `grill-perf resource` is a separate version-1 domain evidence path. It does not
 change serving plan/workload meanings or collect serving requests. This source
-slice implements ordinary Linux host and explicitly selected NVML producers,
-retained raw replay, finite import/inspect, and prospective A/B/A2 resource
-comparisons. It does **not** implement a capacity or retention-pressure runner,
-or establish real-adapter/live qualification from source code or synthetic tests.
+slice implements ordinary Linux host, [macOS process and host memory](#macos-sources)
+and explicitly selected NVML producers, retained raw replay, finite
+import/inspect, and prospective A/B/A2 resource comparisons. It does **not**
+implement a capacity or retention-pressure runner, or establish
+real-adapter/live qualification from source code or synthetic tests.
 
 ## Commands
 
@@ -73,6 +74,8 @@ Supported native sources:
 | `host_memory` | `/proc/meminfo` | MemFree bytes and MemTotal capacity, descriptive, not model-owned memory |
 | `nvidia_memory {uuid, rank?}` | dynamically loaded NVML memory-v1 API | device used/free/total bytes; total uses `memory_limit`, not safe capacity |
 | `nvidia_power {uuid, rank?}` | NVML field 186, GPU-only scope 0 | instantaneous power, converted exactly from milliwatts to microwatts |
+| `macos_process {pid}` | one `proc_pid_rusage` `rusage_info_v4` record | physical footprint as `memory_used`, lifetime footprint peak |
+| `macos_host_memory` | sysctls `hw.memsize`, `vm.pagesize`, `vm.page_free_count`, `kern.memorystatus_vm_pressure_level` | free-queue bytes, physical memory capacity, pressure level; descriptive |
 
 Native source directories are held open, filesystem type is checked, and fixed
 source files use bounded nonblocking/no-follow reads rather than immutable-file
@@ -96,14 +99,41 @@ Byte/count/deadline admission is finite, but userspace cannot preempt a stalled
 kernel filesystem read. Deadline and cancellation checks occur between reads;
 an overlong read is retained as a coverage failure, not a hard-real-time claim.
 
+### macOS sources
+
+A macOS collector observes only `macos_*` sources and a Linux collector only the
+others; one configuration never mixes them, and the other platform's sources
+fail observer start. Raw entries are the kernel's native little-endian bytes, so
+any host replays them.
+
+`macos_process` reads the footprint that `footprint -p PID` reports as
+`phys_footprint` (Apple's per-process charge, including compressed and
+IOKit/GPU-owned memory, not RSS) and `ri_lifetime_max_phys_footprint`.
+`proc_pid_rusage` needs only the same user; `task_info` on another process needs
+`task_for_pid`, which an unprivileged, unentitled collector is refused. The
+incarnation is `ri_proc_start_abstime`, so a reused PID is `source_changed`; one
+call returns one process, so there is no within-sample re-read. A vanished PID
+or an exited, unreaped process is `missing`, another user's process is
+`permission`, and a wrongly sized or zeroed record is `malformed`.
+
+`macos_host_memory` avoids `host_statistics64`: for a non-Apple process it
+returns an earlier cached copy with success after a few calls per second, which
+would substitute a stale value. Free memory is `vm.page_free_count` times
+`vm.pagesize` (the kernel page; Rosetta changes `hw.pagesize`), lower than
+`vm_stat` "Pages free", which on memory-tagging hardware also counts free
+tag-storage pages. `memory_pressure_level` is the dispatch level (1 normal,
+2 warning, 4 critical, unit `dispatch_memorypressure_level`); any other value is
+`malformed`.
+
 ## Clocks, exposure, and exact summaries
 
-Offsets are integer microseconds on an identified monotonic origin. Native
-resolution is observed with `clock_getres` and floored to the retained 1 us
-quantization. Acquisitions may have different origins, but comparisons require
-the same clock kind, unit, resolution, and synchronization contract. Unix
-provenance timestamps establish declared A/B/A2 ordering only; they never enter
-a duration or integral.
+Offsets are integer microseconds on an identified monotonic origin: the clock
+`std::time::Instant` reads, `linux_monotonic` (`CLOCK_MONOTONIC`) or
+`macos_uptime_raw` (`CLOCK_UPTIME_RAW`). Native resolution is observed with
+`clock_getres` and floored to the retained 1 us quantization. Acquisitions may
+have different origins, but comparisons require the same clock kind, unit,
+resolution, and synchronization contract. Unix provenance timestamps establish
+declared A/B/A2 ordering only; they never enter a duration or integral.
 
 The ordinary-process command samples once before its requested interval and
 continues for the prospectively fixed duration. It retains actual boundaries;

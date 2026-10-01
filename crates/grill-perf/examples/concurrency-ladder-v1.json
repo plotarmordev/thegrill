@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "name": "concurrency-ladder-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 400, "mode": "cap-reached" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "chat-template-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 180000,
+    "idle_ms": 60000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "chat-lru",
+      "messages": [
+        { "role": "user", "content": "Implement a thread-safe LRU cache class in Python with get, put, and a capacity limit. Include type hints and pytest tests." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "chat-lru-1", "case": "chat-lru", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "chat-lru-2", "case": "chat-lru", "concurrency": 2, "warmup_trials": 1, "trials": 3 },
+    { "id": "chat-lru-4", "case": "chat-lru", "concurrency": 4, "warmup_trials": 1, "trials": 3 },
+    { "id": "chat-lru-8", "case": "chat-lru", "concurrency": 8, "warmup_trials": 1, "trials": 3 }
+  ]
+}

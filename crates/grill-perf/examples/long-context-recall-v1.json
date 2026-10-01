@@ -1,0 +1,92 @@
+{
+  "version": 6,
+  "name": "long-context-recall-v1",
+  "request": {
+    "profile": "vllm-conversation-v3",
+    "stream": true,
+    "output": { "tokens": 32, "mode": "cap" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "chat-template-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 600000,
+    "idle_ms": 600000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 16777216
+  },
+  "acquisition": {
+    "kind": "conversation",
+    "repetitions": 3,
+    "warmup_repetitions": 0,
+    "measured_steps": ["recall-16k-end", "recall-16k-start", "recall-48k-end", "recall-48k-start", "recall-96k-end", "recall-96k-start"],
+    "input_bytes": 1048576,
+    "retained_history_bytes": 4194304
+  },
+  "cases": [
+    {
+      "id": "recall-16k-end",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "The filler below is padding; ignore it.\n{fill}\nRecord: the access code for vault Aster is QX7-2941-LM.\nWhat is the access code for vault Aster?" }
+      ],
+      "fill": { "unit": " the", "repeat": 16384 },
+      "step": { "history": "recall-16k-end", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "QX7-2941-LM" }, "strict": null } }
+    },
+    {
+      "id": "recall-16k-start",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "Record: the access code for vault Birch is TN4-8815-QD.\nThe filler below is padding; ignore it.\n{fill}\nWhat is the access code for vault Birch?" }
+      ],
+      "fill": { "unit": " the", "repeat": 16384 },
+      "step": { "history": "recall-16k-start", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "TN4-8815-QD" }, "strict": null } }
+    },
+    {
+      "id": "recall-48k-end",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "The filler below is padding; ignore it.\n{fill}\nRecord: the access code for vault Cedar is HW2-3067-KP.\nWhat is the access code for vault Cedar?" }
+      ],
+      "fill": { "unit": " the", "repeat": 49152 },
+      "step": { "history": "recall-48k-end", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "HW2-3067-KP" }, "strict": null } }
+    },
+    {
+      "id": "recall-48k-start",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "Record: the access code for vault Dune is ZR9-5528-BF.\nThe filler below is padding; ignore it.\n{fill}\nWhat is the access code for vault Dune?" }
+      ],
+      "fill": { "unit": " the", "repeat": 49152 },
+      "step": { "history": "recall-48k-start", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "ZR9-5528-BF" }, "strict": null } }
+    },
+    {
+      "id": "recall-96k-end",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "The filler below is padding; ignore it.\n{fill}\nRecord: the access code for vault Ember is JM6-1473-VC.\nWhat is the access code for vault Ember?" }
+      ],
+      "fill": { "unit": " the", "repeat": 98304 },
+      "step": { "history": "recall-96k-end", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "JM6-1473-VC" }, "strict": null } }
+    },
+    {
+      "id": "recall-96k-start",
+      "messages": [
+        { "role": "system", "content": "Answer questions about the records in the user message. Return only a JSON object with one string field fact, for example {\"fact\": \"value\"}." },
+        { "role": "user", "content": "Record: the access code for vault Fjord is LP3-7390-XS.\nThe filler below is padding; ignore it.\n{fill}\nWhat is the access code for vault Fjord?" }
+      ],
+      "fill": { "unit": " the", "repeat": 98304 },
+      "step": { "history": "recall-96k-start", "parent": null, "cache": "observe", "expect": { "kind": "json", "value": { "fact": "LP3-7390-XS" }, "strict": null } }
+    }
+  ],
+  "cells": [
+    { "id": "recall-16k-end", "case": "recall-16k-end", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "recall-16k-start", "case": "recall-16k-start", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "recall-48k-end", "case": "recall-48k-end", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "recall-48k-start", "case": "recall-48k-start", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "recall-96k-end", "case": "recall-96k-end", "concurrency": 1, "warmup_trials": 0, "trials": 1 },
+    { "id": "recall-96k-start", "case": "recall-96k-start", "concurrency": 1, "warmup_trials": 0, "trials": 1 }
+  ]
+}
