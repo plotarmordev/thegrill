@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the [`long-context-decode-v1` and `prefill-ladder-96k-v1`](README.md#long-context-decode-and-prefill)
+  selections: decode after about 32K/48K/96K-token prompts, and a prefill
+  ladder ending at 96K, both with portable `cap-reached` controls.
 - Add the [`concurrency-ladder-v1`](README.md#concurrency-ladder) selection:
   one ordinary coding question at C1/C2/C4/C8 with 400-token portable
   `cap-reached` replies.

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "long-context-decode-v1",
+  "workload": "long-context-decode-v1.json",
+  "source_sha256": "9669a6103ac3de255bf4ad3c1eff52c101b0b0e91d9c75895c6d686e29c0bde3",
+  "workload_sha256": "bfe65b9ed067db53f870b935075bde18b51f4c7614db6021e2caa2695bc6f1f3",
+  "scope": "Prospective fixed C1 decode of an ordinary coding answer after salted ~32K, ~48K and ~96K-token filler prompts; 256-token cap-reached output, thinking off. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}

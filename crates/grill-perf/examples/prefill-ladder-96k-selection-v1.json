@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "prefill-ladder-96k-v1",
+  "workload": "prefill-ladder-96k-v1.json",
+  "source_sha256": "01ec58e3b55cd393859cc08de53eb9f1d2b8455a305bde811c4b0d4c0ba7ea6a",
+  "workload_sha256": "b2ec3b7ff0981f3d0bc98ec274131c309390651238411d84c849de920fbff394",
+  "scope": "Prospective fixed C1 prefill ladder at salted ~2K, ~8K, ~32K and ~96K-token filler prompts, one cap-reached output token, thinking off. All cells retained; descriptive acquisition-level comparisons only.",
+  "operation_scope": "unknown"
+}
