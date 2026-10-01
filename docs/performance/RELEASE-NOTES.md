@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.4.0 — cross-platform deployment comparison and portable workloads
 
 - Add the [portable sparkDash copies](README.md#portable-sparkdash-copies):
   `sparkdash-decode-portable-v1` and `sparkdash-prefill-portable-v1` keep the
@@ -55,7 +55,8 @@
   `--client-placement same-host|network` and the built-in workload chosen with
   `baseline --workload baseline-v1|baseline-v2|portable-v1`. The default is now
   `baseline-v2`, which sends both thinking keys, so Qwen-family templates also
-  turn thinking off; `baseline-v1` stays selectable. `check --change deployment` accepts another endpoint, model,
+  turn thinking off; `baseline-v1` stays selectable. `check --change deployment`
+  accepts another endpoint, model,
   credential name and collector binary when the collector version and recorded
   source commit match, and reports `PENDING` (exit 0). `compare A B --reference A2`
   gives a verdict only when B differs in the same direction from the baseline and
@@ -79,6 +80,23 @@
   print absent values as `null` (matching the JSON) instead of Rust
   `Some(...)`/`None`, lane eligibility errors as a `;`-separated list, and a
   declared change by its `--change` name. JSON evidence is unchanged.
+
+Verification and limits of this version:
+
+- Hosted CI covers the Linux x86_64 and aarch64 build, format, tests, clippy,
+  release staging and installed-archive smoke, and the `grill-perf` build,
+  tests and clippy on macOS 15. Release archives are Linux only; on macOS,
+  build from a git clone at a clean commit so `--version` records the source.
+- On an Apple M5 Ultra, `portable-v1` and `baseline-v2` ran with every lane
+  eligible and thinking off on oMLX and TensorFold, `outputs` found identical
+  text across the two engines, the A/B/A2 deployment flow completed between
+  those engines on the same Mac, and the memory observer's peak matched
+  `footprint -p` (contributor report in #86). No Mac-versus-NVIDIA comparison
+  has been run yet, and the portable sparkDash copies have not been run on real
+  servers.
+- One hosted macOS timing test,
+  `evidence_is_not_published_while_a_peer_request_is_active`, fails
+  intermittently and passes on rerun; it does not involve the changes above.
 
 ## Version 0.3.0 — experimental KV observation, runtime source contracts and shared tool declarations
 
