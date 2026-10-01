@@ -764,10 +764,11 @@ their separately authorized evidence and independent review.
 
 Portable serving collection supports Linux and Apple Silicon macOS source builds
 with Rust/Cargo 1.98 and the native build tools required by rustls/AWS-LC.
-Published archives and the complete native resource/external-program collector
-remain Linux-only. On macOS, `baseline`, `check`, ordinary `run`/lifecycle,
-offline comparison, and bundle inspection are supported; a resource attachment
-fails closed instead of substituting incomplete Apple telemetry.
+Published archives, the Linux `/proc`/cgroup/NVML resource sources and the
+external-program collector remain Linux-only. On macOS, `baseline`, `check`,
+ordinary `run`/lifecycle, offline comparison, and bundle inspection are
+supported; resource capture and attachments observe only the
+[macOS resource sources](RESOURCES.md#macos-sources), and Linux sources fail closed.
 
 From the workspace root:
 
@@ -1357,10 +1358,11 @@ their existing schema and bytes.
 ## Independent host resource observations
 
 [`resource capture/import/inspect/compare`](RESOURCES.md) provides a bounded
-ordinary Linux process/cgroup/explicit host observer and source-specific offline
-A/B/A2 comparisons. It does not change the default serving collector, execute
-GPU sources, or implement capacity/retention studies. Imported device/provider
-bytes remain imported evidence; source delivery is not live qualification.
+ordinary Linux process/cgroup/explicit host or macOS process/host-memory
+observer and source-specific offline A/B/A2 comparisons. It does not change the
+default serving collector, execute GPU sources, or implement capacity/retention
+studies. Imported device/provider bytes remain imported evidence; source
+delivery is not live qualification.
 
 ## Finite capacity and acquisition resources
 

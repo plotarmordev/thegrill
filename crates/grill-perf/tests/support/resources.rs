@@ -611,8 +611,354 @@ fn import_cannot_promote_a_native_claim_and_digest_corruption_is_rejected() {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
+fn macos_source(target: Target) -> Source {
+    Source {
+        id: "process".into(),
+        ownership: if matches!(target, Target::MacosProcess { .. }) {
+            Ownership::ProcessAddressSpace
+        } else {
+            Ownership::HostShared
+        },
+        target,
+    }
+}
+fn rusage(start: u64, exit: u64, footprint: u64, peak: u64) -> Vec<u8> {
+    let mut bytes = vec![0xa5; RUSAGE_INFO_V4_BYTES];
+    for (offset, value) in [(72, footprint), (80, start), (88, exit), (240, peak)] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+fn macos_process_snapshot(t: u64, start: u64, footprint: u64, peak: u64) -> Snapshot {
+    let source = macos_source(Target::MacosProcess { pid: 7 });
+    let raw = vec![raw("rusage_info_v4", rusage(start, 0, footprint, peak))];
+    let (incarnation, readings) = parse_snapshot(&source, &raw, None).unwrap();
+    Snapshot {
+        source: source.id,
+        clock: clock().id,
+        started_us: t,
+        observed_us: t,
+        incarnation,
+        raw,
+        readings,
+        failure: None,
+    }
+}
+fn host_raw(pagesize: &[u8], free: u32, pressure: i32) -> Vec<Raw> {
+    vec![
+        raw("hw.memsize", (256u64 << 30).to_le_bytes().to_vec()),
+        raw("vm.pagesize", pagesize.to_vec()),
+        raw("vm.page_free_count", free.to_le_bytes().to_vec()),
+        raw(
+            "kern.memorystatus_vm_pressure_level",
+            pressure.to_le_bytes().to_vec(),
+        ),
+    ]
+}
 #[test]
-fn native_resource_observation_fails_closed_on_unsupported_hosts() {
-    assert!(host_clock("unsupported-host".into()).is_err());
+fn macos_rusage_record_is_exact_and_fails_closed() {
+    let source = macos_source(Target::MacosProcess { pid: 7 });
+    let parse = |bytes: Vec<u8>| parse_snapshot(&source, &[raw("rusage_info_v4", bytes)], None);
+    let (incarnation, readings) = parse(rusage(99, 0, 3 << 30, 5 << 30)).unwrap();
+    assert_eq!(incarnation.as_deref(), Some("pid:7:start_abstime:99"));
+    assert_eq!(
+        readings,
+        [
+            reading(Metric::MemoryUsed, Unit::Bytes, Ok(3 << 30)),
+            reading(Metric::LifetimePeakMemory, Unit::Bytes, Ok(5 << 30)),
+        ]
+    );
+    let mut truncated = rusage(99, 0, 1, 1);
+    truncated.pop();
+    assert_eq!(parse(truncated), Err(Failure::Malformed));
+    let mut extended = rusage(99, 0, 1, 1);
+    extended.push(0);
+    assert_eq!(parse(extended), Err(Failure::Malformed));
+    // A zeroed record has no process identity, so its zero footprint is not a reading.
+    assert_eq!(
+        parse(vec![0; RUSAGE_INFO_V4_BYTES]),
+        Err(Failure::Malformed)
+    );
+    assert_eq!(parse(rusage(99, 100, 1, 1)), Err(Failure::Missing));
+    let mut denied = raw("rusage_info_v4", Vec::new());
+    denied.error = Some(Failure::Permission);
+    assert_eq!(
+        parse_snapshot(&source, &[denied], None),
+        Err(Failure::Permission)
+    );
+}
+#[test]
+fn macos_pid_reuse_and_peak_reset_never_qualify() {
+    let source = macos_source(Target::MacosProcess { pid: 7 });
+    let g = gate(Metric::MemoryUsed, Statistic::SampledMaximum);
+    let o = observation(
+        source.clone(),
+        vec![
+            macos_process_snapshot(1000, 99, 10, 30),
+            macos_process_snapshot(2000, 99, 20, 30),
+        ],
+    );
+    validate_observation(&o).unwrap();
+    assert_eq!(summary_value(&o, &g), Ok((20, 1).into()));
+    let reused = observation(
+        source.clone(),
+        vec![
+            macos_process_snapshot(1000, 99, 10, 30),
+            macos_process_snapshot(2000, 100, 20, 30),
+        ],
+    );
+    validate_observation(&reused).unwrap();
+    assert_eq!(summary_value(&reused, &g), Err(Failure::SourceChanged));
+    let reset = observation(
+        source,
+        vec![
+            macos_process_snapshot(1000, 99, 10, 30),
+            macos_process_snapshot(2000, 99, 20, 29),
+        ],
+    );
+    assert_eq!(summary_value(&reset, &g), Err(Failure::CounterReset));
+    // The lifetime peak is descriptive; only sampled footprint can be a gate.
+    assert_eq!(
+        summary_value(
+            &o,
+            &gate(Metric::LifetimePeakMemory, Statistic::SampledMaximum)
+        ),
+        Err(Failure::UnsupportedMetric)
+    );
+}
+#[test]
+fn macos_host_memory_values_are_observed_or_unavailable_never_substituted() {
+    let source = macos_source(Target::MacosHostMemory);
+    let values = |raw: &[Raw]| {
+        parse_snapshot(&source, raw, None)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|r| (r.metric, r.value))
+            .collect::<Vec<_>>()
+    };
+    let observed = |value| Value::Observed { value };
+    let unavailable = |reason| Value::Unavailable { reason };
+    assert_eq!(
+        values(&host_raw(&16384u32.to_le_bytes(), 10, 1)),
+        [
+            (Metric::MemoryFree, observed(163_840)),
+            (Metric::MemoryLimit, observed(256 << 30)),
+            (Metric::MemoryPressureLevel, observed(1)),
+        ]
+    );
+    let mut raw = host_raw(&16384u32.to_le_bytes(), 10, 3);
+    assert_eq!(values(&raw)[2].1, unavailable(Failure::Malformed));
+    raw[3].bytes = vec![4];
+    assert_eq!(values(&raw)[2].1, unavailable(Failure::Malformed));
+    raw[3].error = Some(Failure::Permission);
+    assert_eq!(values(&raw)[2].1, unavailable(Failure::Permission));
+    for pagesize in [0u32, 12288] {
+        let raw = host_raw(&pagesize.to_le_bytes(), 10, 4);
+        assert_eq!(values(&raw)[0].1, unavailable(Failure::Malformed));
+        assert_eq!(values(&raw)[1].1, observed(256 << 30));
+    }
+    let raw = host_raw(&(1u64 << 63).to_le_bytes(), 2, 2);
+    assert_eq!(values(&raw)[0].1, unavailable(Failure::Overflow));
+    let mut raw = host_raw(&16384u32.to_le_bytes(), 10, 1);
+    raw[0].bytes.truncate(7);
+    assert_eq!(values(&raw)[1].1, unavailable(Failure::Malformed));
+    let mut forged = observation(
+        source,
+        vec![Snapshot {
+            source: "process".into(),
+            clock: clock().id,
+            started_us: 1000,
+            observed_us: 1000,
+            incarnation: Some("host-memory".into()),
+            readings: parse_snapshot(
+                &macos_source(Target::MacosHostMemory),
+                &host_raw(&16384u32.to_le_bytes(), 10, 1),
+                None,
+            )
+            .unwrap()
+            .1,
+            raw: host_raw(&16384u32.to_le_bytes(), 10, 1),
+            failure: None,
+        }],
+    );
+    validate_observation(&forged).unwrap();
+    forged.snapshots[0].readings[2].unit = Unit::Bytes;
+    assert!(validate_observation(&forged).is_err());
+}
+#[test]
+fn macos_sources_never_mix_with_linux_contracts() {
+    let mut c = config(macos_source(Target::MacosProcess { pid: 7 }));
+    c.validate().unwrap();
+    c.sources.push(Source {
+        id: "host".into(),
+        target: Target::HostMemory,
+        ownership: Ownership::HostShared,
+    });
+    assert!(c.validate().is_err());
+    c.sources[1] = macos_source(Target::MacosHostMemory);
+    c.sources[1].id = "host".into();
+    c.validate().unwrap();
+    c.sources[0].ownership = Ownership::HostShared;
+    assert!(c.validate().is_err());
+    let mut o = observation(
+        macos_source(Target::MacosProcess { pid: 7 }),
+        vec![
+            macos_process_snapshot(1000, 99, 10, 30),
+            macos_process_snapshot(2000, 99, 20, 30),
+        ],
+    );
+    o.provenance = Provenance::NativeObserved;
+    o.adapter = MACOS_ADAPTER.into();
+    assert!(validate_observation(&o).is_err());
+    o.clock.kind = ClockKind::MacosUptimeRaw;
+    validate_observation(&o).unwrap();
+    assert!(!compatible_clocks(&clock(), &o.clock));
+    o.adapter = ADAPTER.into();
+    assert!(validate_observation(&o).is_err());
+}
+#[test]
+fn native_observer_rejects_sources_of_another_platform() {
+    let (native, foreign) = if cfg!(target_os = "macos") {
+        (macos_source(Target::MacosHostMemory), process_source())
+    } else {
+        (
+            Source {
+                id: "host".into(),
+                target: Target::HostMemory,
+                ownership: Ownership::HostShared,
+            },
+            macos_source(Target::MacosProcess {
+                pid: std::process::id(),
+            }),
+        )
+    };
+    let clock = host_clock("platform".into()).unwrap();
+    assert!(Observer::start(config(foreign), Instant::now(), clock.clone()).is_err());
+    Observer::start(config(native), Instant::now(), clock).unwrap();
+}
+#[cfg(target_os = "macos")]
+fn live(target: Target) -> std::result::Result<(Option<String>, Vec<Reading>), Failure> {
+    let source = macos_source(target);
+    let raw: Vec<Raw> = expected_files(&source.target)
+        .iter()
+        .map(|name| read_macos(&source.target, name, 4096))
+        .collect();
+    parse_snapshot(&source, &raw, None)
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_observer_tracks_touched_footprint_and_replays() {
+    const BLOCK: u64 = 256 << 20;
+    let pid = std::process::id();
+    let mut c = config(macos_source(Target::MacosProcess { pid }));
+    c.sources.push(macos_source(Target::MacosHostMemory));
+    c.sources[1].id = "host".into();
+    c.max_read_us = 100_000;
+    c.max_gap_us = 10_000_000;
+    let origin = Instant::now();
+    let clock = host_clock("live".into()).unwrap();
+    assert_eq!(clock.kind, ClockKind::MacosUptimeRaw);
+    let mut observer = Observer::start(c, origin, clock.clone()).unwrap();
+    assert!(observer.sample().unwrap());
+    let started_us = observer.last_observed_us().unwrap();
+    // Anonymous mappings, not the allocator, so unmapping returns the pages at once.
+    // SAFETY: a fresh private anonymous mapping; no existing memory is replaced.
+    let block = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            BLOCK as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(block, libc::MAP_FAILED);
+    for offset in (0..BLOCK as usize).step_by(4096) {
+        // SAFETY: offset is inside the writable mapping created above.
+        unsafe { block.cast::<u8>().add(offset).write_volatile(1) };
+    }
+    assert!(observer.sample().unwrap());
+    // SAFETY: unmaps exactly the mapping created above; nothing references it afterwards.
+    assert_eq!(unsafe { libc::munmap(block, BLOCK as usize) }, 0);
+    assert!(observer.sample().unwrap());
+    let settled_us = observer.covered_end_us().unwrap();
+    let o = observer
+        .finish(
+            MeasuredInterval {
+                clock: clock.id,
+                started_us,
+                settled_us,
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(o.adapter, MACOS_ADAPTER);
+    let value = |i: usize, metric| {
+        numeric(
+            &o.snapshots[i]
+                .readings
+                .iter()
+                .find(|r| r.metric == metric)
+                .unwrap()
+                .value,
+        )
+        .unwrap()
+    };
+    let used = [0, 2, 4].map(|i| value(i, Metric::MemoryUsed));
+    assert!(used[1] - used[0] >= BLOCK - (16 << 20), "{used:?}");
+    assert!(used[1] - used[2] >= BLOCK - (16 << 20), "{used:?}");
+    for i in [0, 2, 4] {
+        assert!(value(i, Metric::LifetimePeakMemory) >= value(i, Metric::MemoryUsed));
+        assert_eq!(o.snapshots[i].incarnation, o.snapshots[0].incarnation);
+    }
+    assert!(value(4, Metric::LifetimePeakMemory) >= used[1]);
+    let mut memsize = 0u64;
+    let mut len = size_of::<u64>();
+    // SAFETY: fixed NUL-terminated name and an owned u64 output of the given length.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut memsize).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(status, 0);
+    assert_eq!(value(1, Metric::MemoryLimit), memsize);
+    assert!(value(1, Metric::MemoryFree) < memsize);
+    assert!(matches!(value(1, Metric::MemoryPressureLevel), 1 | 2 | 4));
+    assert_eq!(
+        summary_value(&o, &gate(Metric::MemoryUsed, Statistic::SampledMaximum)),
+        Ok((used[1], 1).into())
+    );
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exited_and_foreign_processes_are_unavailable() {
+    let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+    let pid = child.id();
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: waits for our own child without reaping it (WNOWAIT) into owned storage.
+    let status = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    assert_eq!(status, 0);
+    assert_eq!(live(Target::MacosProcess { pid }), Err(Failure::Missing));
+    child.wait().unwrap();
+    assert_eq!(live(Target::MacosProcess { pid }), Err(Failure::Missing));
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        assert_eq!(
+            live(Target::MacosProcess { pid: 1 }),
+            Err(Failure::Permission)
+        );
+    }
 }

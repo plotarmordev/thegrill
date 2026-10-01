@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Observe macOS memory in the resource domain: `macos_process {pid}` records
+  the process's physical footprint (what `footprint -p` reports) as
+  `memory_used` plus its lifetime peak, and `macos_host_memory` records free
+  and total memory and the new `memory_pressure_level` metric. macOS
+  observations use the `macos_uptime_raw` clock and adapter
+  `macos-libproc-sysctl-resource-v1`, so they never compare with Linux ones;
+  Linux sources, evidence and behaviour are unchanged. Resource capture and
+  serving resource attachments work on macOS with these sources, and each
+  platform refuses the other's. See [macOS sources](RESOURCES.md#macos-sources).
 - Add the [`long-context-recall-v1`](README.md#long-context-recall) workload:
   six ordered recall steps at about 16K, 48K and 96K tokens, graded as exact
   JSON facts, run with `grill-perf run`.

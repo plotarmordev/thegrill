@@ -24,6 +24,9 @@ mod nvml;
 const ARTIFACT_CAP: usize = 64 * 1024 * 1024;
 const PLAN_CAP: usize = 128 * 1024;
 const ADAPTER: &str = "linux-proc-cgroup-resource-v1";
+const MACOS_ADAPTER: &str = "macos-libproc-sysctl-resource-v1";
+// sizeof(struct rusage_info_v4) in <sys/resource.h>; asserted against libc on macOS.
+const RUSAGE_INFO_V4_BYTES: usize = 296;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +42,7 @@ pub struct Clock {
 pub enum ClockKind {
     LinuxMonotonic,
     SourceMonotonic,
+    MacosUptimeRaw,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +97,10 @@ pub enum Target {
         device: Option<String>,
         rank: Option<u32>,
     },
+    MacosProcess {
+        pid: u32,
+    },
+    MacosHostMemory,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +136,7 @@ pub enum Metric {
     KvUsed,
     KvCapacity,
     Power,
+    MemoryPressureLevel,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +145,7 @@ pub enum Unit {
     ClockTicks,
     Microseconds,
     Microwatts,
+    DispatchMemorypressureLevel,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -316,7 +326,24 @@ fn checked(n: Option<u64>) -> std::result::Result<u64, Failure> {
     n.ok_or(Failure::Overflow)
 }
 
+fn macos_target(target: &Target) -> bool {
+    matches!(
+        target,
+        Target::MacosProcess { .. } | Target::MacosHostMemory
+    )
+}
+// ResourcesConfig::validate admits no mix of macOS and Linux targets.
+fn native_clock(config: &ResourcesConfig) -> ClockKind {
+    if config.sources.iter().any(|s| macos_target(&s.target)) {
+        ClockKind::MacosUptimeRaw
+    } else {
+        ClockKind::LinuxMonotonic
+    }
+}
 fn native_adapter(config: &ResourcesConfig) -> &'static str {
+    if native_clock(config) == ClockKind::MacosUptimeRaw {
+        return MACOS_ADAPTER;
+    }
     let gpu = config
         .sources
         .iter()
@@ -363,7 +390,7 @@ impl ResourcesConfig {
                 return Err("duplicate or invalid resource source".into());
             }
             let ownership_ok = match &source.target {
-                Target::Process { pid } => {
+                Target::Process { pid } | Target::MacosProcess { pid } => {
                     *pid > 0
                         && *pid <= i32::MAX as u32
                         && source.ownership == Ownership::ProcessAddressSpace
@@ -376,7 +403,9 @@ impl ResourcesConfig {
                             .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
                         && source.ownership == Ownership::CgroupMembers
                 }
-                Target::HostCpu | Target::HostMemory => source.ownership == Ownership::HostShared,
+                Target::HostCpu | Target::HostMemory | Target::MacosHostMemory => {
+                    source.ownership == Ownership::HostShared
+                }
                 Target::NvidiaMemory { uuid, .. } | Target::NvidiaPower { uuid, .. } => {
                     nvml::valid_uuid(uuid)
                         && match &source.ownership {
@@ -399,6 +428,14 @@ impl ResourcesConfig {
             if !ownership_ok {
                 return Err("source scope or ownership mismatch".into());
             }
+        }
+        let macos = self
+            .sources
+            .iter()
+            .filter(|s| macos_target(&s.target))
+            .count();
+        if macos != 0 && macos != self.sources.len() {
+            return Err("macOS and Linux resource sources cannot share one observer".into());
         }
         Ok(())
     }
@@ -473,6 +510,79 @@ fn raw_bytes<'a>(raw: &'a [Raw], name: &str) -> std::result::Result<&'a [u8], Fa
     }
     Ok(&entry.bytes)
 }
+// Kernel integers as retained native bytes; every macOS target is little-endian.
+fn little_endian(bytes: &[u8]) -> std::result::Result<u64, Failure> {
+    match *bytes {
+        [a, b, c, d] => Ok(u32::from_le_bytes([a, b, c, d]).into()),
+        _ => bytes
+            .try_into()
+            .map(u64::from_le_bytes)
+            .map_err(|_| Failure::Malformed),
+    }
+}
+fn parse_macos(
+    target: &Target,
+    raw: &[Raw],
+) -> std::result::Result<(Option<String>, Vec<Reading>), Failure> {
+    let get = |name| raw_bytes(raw, name);
+    if let Target::MacosProcess { pid } = target {
+        let info = get("rusage_info_v4")?;
+        if info.len() != RUSAGE_INFO_V4_BYTES {
+            return Err(Failure::Malformed);
+        }
+        // rusage_info_v4 offsets: ri_phys_footprint 72, ri_proc_start_abstime 80,
+        // ri_proc_exit_abstime 88, ri_lifetime_max_phys_footprint 240.
+        let field = |offset: usize| little_endian(&info[offset..offset + 8]);
+        let start = field(80)?;
+        if start == 0 {
+            return Err(Failure::Malformed);
+        }
+        // An exited, unreaped process keeps its PID and final accounting, not live memory.
+        if field(88)? != 0 {
+            return Err(Failure::Missing);
+        }
+        return Ok((
+            Some(format!("pid:{pid}:start_abstime:{start}")),
+            vec![
+                reading(Metric::MemoryUsed, Unit::Bytes, field(72)),
+                reading(Metric::LifetimePeakMemory, Unit::Bytes, field(240)),
+            ],
+        ));
+    }
+    let value = |name| get(name).and_then(little_endian);
+    // vm.pagesize is the kernel page that counts free pages; Rosetta changes hw.pagesize.
+    let page = value("vm.pagesize").and_then(|n| {
+        if n.is_power_of_two() {
+            Ok(n)
+        } else {
+            Err(Failure::Malformed)
+        }
+    });
+    // DISPATCH_MEMORYPRESSURE_NORMAL, _WARN and _CRITICAL; nothing else has a meaning.
+    let pressure = value("kern.memorystatus_vm_pressure_level").and_then(|n| {
+        if matches!(n, 1 | 2 | 4) {
+            Ok(n)
+        } else {
+            Err(Failure::Malformed)
+        }
+    });
+    Ok((
+        Some("host-memory".into()),
+        vec![
+            reading(
+                Metric::MemoryFree,
+                Unit::Bytes,
+                value("vm.page_free_count").and_then(|free| checked(free.checked_mul(page?))),
+            ),
+            reading(Metric::MemoryLimit, Unit::Bytes, value("hw.memsize")),
+            reading(
+                Metric::MemoryPressureLevel,
+                Unit::DispatchMemorypressureLevel,
+                pressure,
+            ),
+        ],
+    ))
+}
 fn expected_files(target: &Target) -> &'static [&'static str] {
     match target {
         Target::Process { .. } => &["stat", "status", "stat_after"],
@@ -481,6 +591,13 @@ fn expected_files(target: &Target) -> &'static [&'static str] {
         Target::HostMemory => &["meminfo"],
         Target::NvidiaMemory { .. } | Target::NvidiaPower { .. } => &["nvml.json"],
         Target::Imported { .. } => &["readings.json"],
+        Target::MacosProcess { .. } => &["rusage_info_v4"],
+        Target::MacosHostMemory => &[
+            "hw.memsize",
+            "vm.pagesize",
+            "vm.page_free_count",
+            "kern.memorystatus_vm_pressure_level",
+        ],
     }
 }
 fn parse_snapshot(
@@ -588,6 +705,7 @@ fn parse_snapshot(
                 serde_json::from_slice(get("readings.json")?).map_err(|_| Failure::Malformed)?;
             Ok((directory_identity.map(str::to_owned), readings))
         }
+        Target::MacosProcess { .. } | Target::MacosHostMemory => parse_macos(&source.target, raw),
     }
 }
 
@@ -611,7 +729,7 @@ fn source_directory(target: &Target) -> PathBuf {
     }
 }
 fn open_source(source: &Source) -> OpenSource {
-    if nvml::selected(&source.target).is_some() {
+    if nvml::selected(&source.target).is_some() || macos_target(&source.target) {
         return OpenSource {
             directory: None,
             identity: None,
@@ -701,6 +819,76 @@ fn read_source(open: &OpenSource, name: &str, cap: usize) -> Raw {
     }
     raw
 }
+#[cfg(target_os = "macos")]
+fn macos_value(target: &Target, name: &str) -> std::result::Result<Vec<u8>, Failure> {
+    const _: () = assert!(size_of::<libc::rusage_info_v4>() == RUSAGE_INFO_V4_BYTES);
+    let failure = || {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Failure::Missing
+        } else {
+            io_failure(&error)
+        }
+    };
+    if let Target::MacosProcess { pid } = target {
+        let mut info = vec![0u8; RUSAGE_INFO_V4_BYTES];
+        // SAFETY: validate() bounds pid to i32; the kernel writes one rusage_info_v4,
+        // whose size is asserted above, into the owned buffer.
+        let status = unsafe {
+            libc::proc_pid_rusage(*pid as i32, libc::RUSAGE_INFO_V4, info.as_mut_ptr().cast())
+        };
+        return if status == 0 {
+            Ok(info)
+        } else {
+            Err(failure())
+        };
+    }
+    let name = std::ffi::CString::new(name).expect("fixed sysctl name");
+    let mut value = [0u8; 8];
+    let mut len = value.len();
+    // SAFETY: NUL-terminated fixed name; the kernel writes at most `len` bytes into the
+    // owned buffer and no new value is supplied.
+    let status = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        return Err(failure());
+    }
+    Ok(value[..len].to_vec())
+}
+#[cfg(not(target_os = "macos"))]
+fn macos_value(_: &Target, _: &str) -> std::result::Result<Vec<u8>, Failure> {
+    Err(Failure::Missing)
+}
+// Names come only from expected_files; they are libproc/sysctl identities, not paths.
+fn read_macos(target: &Target, name: &str, cap: usize) -> Raw {
+    let mut raw = Raw {
+        name: name.into(),
+        bytes: Vec::new(),
+        error: Some(Failure::ByteBudget),
+    };
+    if cap == 0 {
+        return raw;
+    }
+    match macos_value(target, name) {
+        Ok(bytes) => {
+            raw.bytes = bytes;
+            raw.error = None;
+        }
+        Err(error) => raw.error = Some(error),
+    }
+    if raw.bytes.len() > cap {
+        raw.bytes.truncate(cap);
+        raw.error = Some(Failure::ByteBudget);
+    }
+    raw
+}
 fn elapsed(origin: Instant) -> Result<u64> {
     u64::try_from(origin.elapsed().as_micros()).map_err(|_| "resource clock overflow".into())
 }
@@ -726,12 +914,14 @@ impl Observer {
             return Err("native observer cannot execute imported sources".into());
         }
         validate_clock(&clock)?;
-        if clock.resolution_ns != host_clock(clock.id.clone())?.resolution_ns {
+        let host = host_clock(clock.id.clone())?;
+        if clock.resolution_ns != host.resolution_ns {
             return Err("host resource clock resolution mismatch".into());
         }
-        if clock.kind != ClockKind::LinuxMonotonic
-            || clock.synchronization != Synchronization::LocalOrigin
-        {
+        if native_clock(&config) != host.kind {
+            return Err("selected native resource sources are not observable on this host".into());
+        }
+        if clock.kind != host.kind || clock.synchronization != Synchronization::LocalOrigin {
             return Err("host observer requires the shared local monotonic clock".into());
         }
         let observer_started_us = elapsed(origin)?;
@@ -816,6 +1006,8 @@ impl Observer {
                     }
                 } else if let Some((uuid, memory)) = nvml::selected(&source.target) {
                     self.nvml.read(uuid, memory, remaining as usize)
+                } else if macos_target(&source.target) {
+                    read_macos(&source.target, name, remaining as usize)
                 } else {
                     read_source(open, name, remaining as usize)
                 };
@@ -886,16 +1078,21 @@ impl Observer {
 }
 
 pub fn host_clock(id: String) -> Result<Clock> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = id;
-        Err("native resource observation is supported on Linux only".into())
+        Err("native resource observation is supported on Linux and macOS only".into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        // The clock std::time::Instant reads, which is the observer origin's clock.
+        #[cfg(target_os = "linux")]
+        let (source, kind) = (libc::CLOCK_MONOTONIC, ClockKind::LinuxMonotonic);
+        #[cfg(target_os = "macos")]
+        let (source, kind) = (libc::CLOCK_UPTIME_RAW, ClockKind::MacosUptimeRaw);
         let mut resolution = std::mem::MaybeUninit::<libc::timespec>::uninit();
         // SAFETY: clock_getres only writes into the owned timespec buffer.
-        if unsafe { libc::clock_getres(libc::CLOCK_MONOTONIC, resolution.as_mut_ptr()) } != 0 {
+        if unsafe { libc::clock_getres(source, resolution.as_mut_ptr()) } != 0 {
             return Err("monotonic resolution unavailable".into());
         }
         // SAFETY: clock_getres returned 0, so it initialized the buffer.
@@ -912,7 +1109,7 @@ pub fn host_clock(id: String) -> Result<Clock> {
         // Retained offsets are truncated to microseconds even when the host clock is finer.
         Ok(Clock {
             id,
-            kind: ClockKind::LinuxMonotonic,
+            kind,
             unit: ClockUnit::Microseconds,
             resolution_ns: ns.max(1000),
             synchronization: Synchronization::LocalOrigin,
@@ -936,6 +1133,7 @@ fn valid_reading(reading: &Reading, imported: bool) -> bool {
     let unit_ok = match reading.metric {
         Metric::CpuTime => matches!(reading.unit, Unit::ClockTicks | Unit::Microseconds),
         Metric::Power => reading.unit == Unit::Microwatts && imported,
+        Metric::MemoryPressureLevel => reading.unit == Unit::DispatchMemorypressureLevel,
         _ => reading.unit == Unit::Bytes,
     };
     unit_ok && (!matches!(reading.value, Value::Unlimited) || reading.metric == Metric::MemoryLimit)
@@ -963,7 +1161,7 @@ pub fn validate_observation(observation: &Observation) -> Result<()> {
     }
     if o.provenance == Provenance::NativeObserved
         && (o.adapter != native_adapter(&o.config)
-            || o.clock.kind != ClockKind::LinuxMonotonic
+            || o.clock.kind != native_clock(&o.config)
             || o.clock.synchronization != Synchronization::LocalOrigin
             || o.config
                 .sources
@@ -1114,6 +1312,13 @@ fn source_supports(source: &Source, metric: Metric) -> bool {
         ),
         Target::NvidiaPower { .. } => metric == Metric::Power,
         Target::Imported { .. } => true,
+        Target::MacosProcess { .. } => {
+            matches!(metric, Metric::MemoryUsed | Metric::LifetimePeakMemory)
+        }
+        Target::MacosHostMemory => matches!(
+            metric,
+            Metric::MemoryFree | Metric::MemoryLimit | Metric::MemoryPressureLevel
+        ),
     }
 }
 #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
@@ -1329,7 +1534,7 @@ fn compatible_configs(a: &ResourcesConfig, b: &ResourcesConfig) -> bool {
         let mut c = c.clone();
         for source in &mut c.sources {
             match &mut source.target {
-                Target::Process { pid } => *pid = 1,
+                Target::Process { pid } | Target::MacosProcess { pid } => *pid = 1,
                 Target::CgroupV2 { path } => *path = PathBuf::from("/sys/fs/cgroup"),
                 _ => {}
             }
@@ -1859,7 +2064,7 @@ fn inspection(capture: &Capture, plan: Option<&Path>) -> Result<serde_json::Valu
 
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// Sample only prospectively selected ordinary Linux host sources; no process launch.
+    /// Sample only prospectively selected ordinary Linux or macOS host sources; no process launch.
     Capture {
         #[arg(long)]
         plan: PathBuf,
