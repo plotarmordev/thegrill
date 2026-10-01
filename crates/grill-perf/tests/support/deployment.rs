@@ -94,6 +94,11 @@ fn capture_v3_records_collector_placement_and_builtin_while_v1_still_checks() {
     assert_eq!(report["baseline_ready"], true, "{report}");
     // cap-reached fixes every request's output count, so the completion floor is known.
     assert!(report["baseline_accounting"]["minimum_full_capture_tokens_per_second"].is_number());
+    // The scope describes the captured built-in, not the exact400 baseline workloads.
+    assert!(
+        !report["scope"].as_str().unwrap().contains("exact400"),
+        "{report}"
+    );
     let capture = read_json(&temp.path("portable/capture.json"));
     assert_eq!(capture["version"], 3);
     assert_eq!(capture["kind"], "performance-capture-v3");
