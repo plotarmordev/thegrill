@@ -9,7 +9,6 @@ const METRIC_CONTRACT: &str = "generated-text-arrival-v2";
 // Cross-host captures are ordered by each client's clock; the gap absorbs ordinary clock skew.
 const DEPLOYMENT_GAP_MS: u64 = 60_000;
 const ASSUMPTIONS: &str = "Model-based interval assumes stable, independent acquisition-level variation and an adequate log-scale mean model. Resetting a client does not prove independence. Positive autocorrelation can make the interval narrower than justified, increasing false directional conclusions. Sequential captures cannot remove time or carryover confounding; no causal attribution, equivalence, noninferiority, or guaranteed precision/power is established.";
-const SCOPE: &str = "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed.";
 const UNAVAILABLE_SCOPE: &str =
     "unavailable: capture workload identity was not verified for this report";
 const UNCHANGED_SCOPE: &str = "Unchanged-deployment control: any directional result is an observed capture-period shift requiring repeatability investigation, not evidence of a serving-change effect. An inconclusive result does not establish equality or repeatability.";
@@ -91,6 +90,16 @@ impl Builtin {
             Self::BaselineV1 => include_bytes!("../examples/baseline-v1.json"),
             Self::BaselineV2 => include_bytes!("../examples/baseline-v2.json"),
             Self::PortableV1 => include_bytes!("../examples/portable-v1.json"),
+        }
+    }
+    fn scope(self) -> &'static str {
+        match self {
+            Self::BaselineV1 | Self::BaselineV2 => {
+                "One short synthetic structured C1/exact400 workload; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed."
+            }
+            Self::PortableV1 => {
+                "One short synthetic count C1 workload with 400 output tokens verified by cap-reached; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed."
+            }
         }
     }
 }
@@ -1053,7 +1062,7 @@ fn preflight(
         return Err("model must be a nonempty selector within 4096 bytes".into());
     }
     let (warmup, measured, tokens) = selection::budgets(workload, ACQUISITIONS)?;
-    let scope = selected.map_or(SCOPE, |s| s.scope.as_str());
+    let scope = selected.map_or(options.workload.scope(), |s| s.scope.as_str());
     let controls = serde_json::to_string(&workload.request).map_err(|e| e.to_string())?;
     let mut text = format!(
         "Preflight: workload {}; selection {}; scope: {}\nControls: {}\n",
@@ -1103,7 +1112,11 @@ fn preflight(
     Ok(())
 }
 
-fn selected_report(report: &mut Report, selected: Option<SelectedReport>) {
+fn selected_report(
+    report: &mut Report,
+    selected: Option<SelectedReport>,
+    builtin: Option<Builtin>,
+) {
     if selected.is_some() {
         report.version = 2;
         report.kind = "performance-capture-comparison-v2";
@@ -1112,7 +1125,7 @@ fn selected_report(report: &mut Report, selected: Option<SelectedReport>) {
         report.result_scope = SELECTED_SCOPE;
         report.selected = selected;
     } else {
-        report.scope = SCOPE;
+        report.scope = builtin.unwrap_or(Builtin::BaselineV1).scope();
     }
 }
 
@@ -1173,7 +1186,7 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
         report.baseline_acquisition_medians = verified.observations;
         report.baseline_capture_sha256 = Some(verified.sha256);
         report.baseline_ready = verified.manifest.status == CaptureStatus::Complete;
-        selected_report(&mut report, verified.selected);
+        selected_report(&mut report, verified.selected, verified.manifest.workload);
         if verified.manifest.status == CaptureStatus::Invalid {
             report.result = Outcome::Invalid;
         }
@@ -1238,7 +1251,7 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
         report.baseline_complete_acquisitions = before.complete_acquisitions;
         report.baseline_acquisition_medians = before.observations;
         report.baseline_capture_sha256 = Some(before.sha256.clone());
-        selected_report(&mut report, before.selected);
+        selected_report(&mut report, before.selected, before.manifest.workload);
         if before.manifest.baseline_sha256.is_some() {
             return Err("check requires an original baseline capture, not a previous check".into());
         }
@@ -1428,7 +1441,7 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> R
             selected.candidate_acquisitions = candidate.baseline_acquisitions;
             selected.candidate_timing = Some(candidate.baseline_timing);
         }
-        selected_report(&mut report, selected);
+        selected_report(&mut report, selected, before.manifest.workload);
         linked(&before, &after)?;
         if after.manifest.change == Some(Change::Deployment) {
             return deployment(&mut report, &before, &after, reference);
@@ -1710,8 +1723,10 @@ pub fn human(report: &Report) -> String {
     };
     let scope = if let Some(selected) = &report.selected {
         selected.manifest.scope.as_str()
-    } else if report.scope == SCOPE {
+    } else if report.scope == Builtin::BaselineV2.scope() {
         "structured C1 (one concurrent request), exactly 400 output tokens per request."
+    } else if report.scope == Builtin::PortableV1.scope() {
+        "count C1 (one concurrent request), 400 output tokens per request verified by cap-reached."
     } else {
         report.scope
     };
