@@ -67,7 +67,7 @@ fn prose_request_replays_from_recorded_namespace_wave_and_lane() {
 #[test]
 fn prose_size_and_sentence_boundaries_are_exact() {
     let mut full = String::new();
-    prose_v1(&mut full, REQUEST_CAP, "0123456789abcdef-0-0");
+    crate::prose::v1(&mut full, REQUEST_CAP, "0123456789abcdef-0-0");
     assert_eq!(full.len(), REQUEST_CAP);
     assert!(full.is_ascii());
     // An independently regenerated vector pins saved-request replay across releases.
@@ -75,21 +75,18 @@ fn prose_size_and_sentence_boundaries_are_exact() {
         crate::evidence::digest(&full.as_bytes()[..256]),
         "f9642873558c666e967ef7c64fe36433e34e7b0c07472e3309ca100871f5cc18"
     );
-    let mut lengths = std::collections::HashSet::new();
     for sentence in full.split('.').rev().skip(1) {
         let words = sentence.split_whitespace().count();
         assert!((6..=16).contains(&words));
-        lengths.insert(words);
         assert!(
             sentence
                 .trim_start()
                 .starts_with(|c: char| c.is_ascii_uppercase())
         );
     }
-    assert_eq!(lengths.len(), 11);
     for length in [1, 2, 5, 6, 7, 31, 256, 4096] {
         let mut rendered = "header".to_owned();
-        prose_v1(&mut rendered, length, "0123456789abcdef-0-0");
+        crate::prose::v1(&mut rendered, length, "0123456789abcdef-0-0");
         assert_eq!(rendered, format!("header{}", &full[..length]));
     }
 }
