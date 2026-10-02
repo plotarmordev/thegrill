@@ -77,7 +77,9 @@ impl Server {
                                 .set_write_timeout(Some(Duration::from_secs(5)))
                                 .unwrap();
                             stream.set_nodelay(true).unwrap();
-                            let request = read_request(&mut stream);
+                            let Some(request) = read_request(&mut stream) else {
+                                return;
+                            };
                             send.try_send(request.clone()).unwrap();
                             let index = count.fetch_add(1, Ordering::SeqCst);
                             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -144,7 +146,9 @@ impl Drop for Server {
         }
     }
 }
-fn read_request(stream: &mut TcpStream) -> Value {
+/// Reads one collector request; `None` for a foreign local client that reached
+/// this ephemeral port (a host process polling a port it used to own).
+fn read_request(stream: &mut TcpStream) -> Option<Value> {
     let mut bytes = Vec::new();
     let mut byte = [0];
     while !bytes.ends_with(b"\r\n\r\n") {
@@ -153,6 +157,9 @@ fn read_request(stream: &mut TcpStream) -> Value {
         assert!(bytes.len() < 64 * 1024);
     }
     let headers = String::from_utf8(bytes).unwrap();
+    if !headers.starts_with("POST ") {
+        return None;
+    }
     let length: usize = headers
         .lines()
         .find_map(|line| {
@@ -164,7 +171,7 @@ fn read_request(stream: &mut TcpStream) -> Value {
     assert!(length <= 2 * 1024 * 1024);
     let mut body = vec![0; length];
     stream.read_exact(&mut body).unwrap();
-    serde_json::from_slice(&body).unwrap()
+    Some(serde_json::from_slice(&body).unwrap())
 }
 fn header(stream: &mut TcpStream, kind: &str) {
     write!(
@@ -2131,7 +2138,7 @@ fn connection_is_reused_when_the_server_keeps_it_alive() {
             let request = if i == 0 {
                 first.clone()
             } else {
-                read_request(&mut socket)
+                read_request(&mut socket).unwrap()
             };
             assert_eq!(request["model"], "fixture-model");
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":8}}\n\ndata: [DONE]\n\n";
