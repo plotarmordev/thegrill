@@ -208,7 +208,7 @@ source and verification actually performed. Hosted fixture success does not
 qualify a live backend or authorize collecting model evidence.
 
 The complete redistribution ledger and notice payload are fixed reviewed inputs,
-not an unresolved placeholder or an inference from a root MIT label.
+not an unresolved placeholder or an inference from the root license label.
 `licenses/THIRD-PARTY-NOTICES.txt` preserves the locked Cargo/native license
 texts, including AWS-LC, deduplicating only byte-identical text with all source
 attributions retained. The complete pinned Rust standard-library distribution
