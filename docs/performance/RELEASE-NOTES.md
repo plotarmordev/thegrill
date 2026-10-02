@@ -1,5 +1,14 @@
 # Performance release notes
 
+## Unreleased
+
+- Add `sparkdash-decode-v2` and its portable copy
+  [`sparkdash-decode-portable-v2`](README.md#portable-sparkdash-copies). They
+  follow sparkDash 1.8.7, which replaced the repetitive `clamp_NN` code prompt
+  with a real Python task; every other prompt, cell, trial and limit is unchanged.
+  The v1 workloads stay as they were, and their code cells are not comparable
+  to v2's.
+
 ## Version 0.4.0 — cross-platform deployment comparison and portable workloads
 
 - Add the [portable sparkDash copies](README.md#portable-sparkdash-copies):

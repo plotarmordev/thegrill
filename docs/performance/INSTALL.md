@@ -230,6 +230,7 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `prefill-ladder-96k-selection-v1.json` | [Prefill at ~2K/8K/32K/96K](README.md#long-context-decode-and-prefill), portable controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
 | `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
+| `sparkdash-decode-portable-selection-v2.json` | [sparkDash 1.8.7+ decode prompts](README.md#portable-sparkdash-copies) (real code task), portable controls |
 | `sparkdash-prefill-portable-selection-v1.json` | [sparkDash prefill sizes](README.md#portable-sparkdash-copies), portable controls |
 
 For a current source build, pass
