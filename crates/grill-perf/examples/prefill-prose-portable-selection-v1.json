@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "prefill-prose-portable-v1",
+  "workload": "prefill-prose-portable-v1.json",
+  "source_sha256": "58b5f4f9bacfd786650f8fdabd925c3083481ba9343636eb471265de81260e38",
+  "workload_sha256": "90761e48de96a6b4f040287f51daa3a56229644385fca4e0d82310190d0fbed0",
+  "scope": "Generated-prose-v1 prefill at nominal 4k/8k/16k/32k sizes, C1; character-sized random words, output cap 8, thinking off, cache observed. Descriptive per-cell observations; never pooled with repeated-unit results. Actual prompt tokens come from usage.",
+  "operation_scope": "unknown"
+}

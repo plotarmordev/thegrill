@@ -167,9 +167,15 @@ fn admit<'a>(plan: &Plan, plans: impl Iterator<Item = &'a Plan>) -> Result<()> {
     }
     let workload = &plan.workload;
     if workload.cases.iter().any(|case| {
-        case.fill.is_some() && case.messages.iter().any(|m| m.content.contains("{salt}"))
+        case.fill.as_ref().is_some_and(|fill| {
+            matches!(fill, Fill::GeneratedProse { .. })
+                || case.messages.iter().any(|m| m.content.contains("{salt}"))
+        })
     }) {
-        return Err("output identity requires prompts without per-capture {salt} text".into());
+        return Err(
+            "output identity requires prompts without per-capture {salt} text or generated prose"
+                .into(),
+        );
     }
     let mut lanes = 0;
     for spec in plan.waves.iter().filter(|s| s.phase == Phase::Measured) {

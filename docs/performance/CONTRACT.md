@@ -148,6 +148,26 @@ Without `fill`, both placeholders are ordinary text. A random 64-hex
 `cache_namespace` exists exactly when cache is not `observe` or any case has
 fill; text salts differ per attempt even under `observe`.
 
+Alternatively, `fill: {"kind":"generated-prose-v1","characters":16280}` selects
+synthetic random-word prose. `characters` is positive and bounded by the request
+byte cap; the same placeholder rules apply. The compiled ordered list contains
+472 common English words authored for this generator, all ASCII. Each sentence
+draws a length of 6 to 16 words inclusive, selects words with replacement, capitalizes its
+first letter, and ends with a period. Words and sentences use single spaces;
+the stream is truncated at exactly `characters`, possibly within its last word.
+The word order and generator are immutable under this kind.
+
+The seed is the first eight bytes, interpreted little-endian, of
+`SHA256("grill-perf/generated-prose-v1\0" || text_salt)`, where `\0` denotes a
+single zero byte and `text_salt` is the existing rendered salt above. SplitMix64
+draws the sentence length first (`6 + draw % 11`), then each word
+(`draw % word_count`). No new seed or wall-clock field is needed: saved
+`cache_namespace`, wave index and lane regenerate the body even without a
+`{salt}` placeholder. The generated alphabet needs no JSON escaping and each
+character occupies one byte. Different request identities vary bodies, not
+only headers; neither pseudorandom text nor a salted prefix proves a cold cache.
+The old repeated-unit typed serialization, rendering and identities are unchanged.
+
 Each cell names a case, concurrency, warmup trial count and measured trial count.
 For a trial, each lane receives the same case with its attempt's text salt. When a seed is declared,
 its lane seed is `seed + trial*64 + lane`. Warmup and measured trials are separate
@@ -156,7 +176,7 @@ phases; seeds are paired but stochastic responses need not be identical.
 Bounds: at most 128 cases, 64 cells, 64 concurrent requests, 100 measured and 20
 warmup trials per cell, 1,024 total waves and 10,000 attempts. Case messages are
 bounded to 128 KiB declared decoded content. Declared content bytes plus
-`unit.len()*repeat` must fit 2 MiB, as must each serialized request including
+the fill byte count must fit 2 MiB, as must each serialized request including
 JSON escaping and controls. Output budgets are 1..32,768 tokens.
 IDs are unique short ASCII identifiers.
 
@@ -179,7 +199,7 @@ latency. No retry, hidden override or buffer expansion accompanies the ceiling.
 Admission checks the wave-buffer allowance against concurrency times
 `2*response_bytes + 6*256KiB + 512KiB + fill_bytes` for streaming, or
 `6*response_bytes + 512KiB + fill_bytes` for nonstreaming, where `fill_bytes` is
-the cell's case `unit.len()*repeat` (zero when absent). The latter budgets
+the cell's case `unit.len()*repeat` or generated-prose `characters` (zero when absent). The latter budgets
 body-sized JSON scratch and decoded fields rather than assuming frame-sized parsing.
 Each request body, JSON-string-escaped as it is embedded in the reservation receipt
 and rendered at the admission bound widths, times concurrency must not exceed
@@ -596,8 +616,9 @@ capture roots; captures pair acquisition `i` of A with acquisition `i` of B.
 Each run and capture is fully verified by the ordinary loaders first.
 Admission requires, else exit 1: equal normalized workloads (`workload_sha256`,
 which also fixes the waves and lanes), `temperature_milli` 0 on every measured
-lane (absent means the provider default and is refused), no `{salt}` text in a
-filled case (its prompt differs per capture), and at least one measured lane.
+lane (absent means the provider default and is refused), no generated-prose fill
+or `{salt}` text in a filled case (its prompt differs per capture), and at least
+one measured lane.
 Endpoint, model, deployment declaration and collector may differ.
 
 For each measured lane (warmups excluded) the retained response, rechecked

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "name": "prefill-prose-portable-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 8, "mode": "cap" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "chat-template-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 600000,
+    "idle_ms": 600000,
+    "response_bytes": 65536,
+    "wave_buffer_bytes": 4194304
+  },
+  "cases": [
+    {
+      "id": "prefill-4k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "kind": "generated-prose-v1", "characters": 16280 }
+    },
+    {
+      "id": "prefill-8k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "kind": "generated-prose-v1", "characters": 32664 }
+    },
+    {
+      "id": "prefill-16k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "kind": "generated-prose-v1", "characters": 65432 }
+    },
+    {
+      "id": "prefill-32k",
+      "messages": [
+        { "role": "user", "content": "[prefill-bench {salt}]\nIgnore the filler below. Reply with the single word OK.\n{fill}\nReply OK." }
+      ],
+      "fill": { "kind": "generated-prose-v1", "characters": 130968 }
+    }
+  ],
+  "cells": [
+    { "id": "prefill-4k-1", "case": "prefill-4k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-8k-1", "case": "prefill-8k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-16k-1", "case": "prefill-16k", "concurrency": 1, "warmup_trials": 1, "trials": 3 },
+    { "id": "prefill-32k-1", "case": "prefill-32k", "concurrency": 1, "warmup_trials": 1, "trials": 3 }
+  ]
+}

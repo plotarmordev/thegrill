@@ -871,6 +871,30 @@ than unequal; the count-to-200 prompt can end before 400 tokens with tokenizers
 that merge whole numbers. Prefill caps output at 8 tokens: its rate depends only
 on the prompt and the time to first token.
 
+### Generated-prose prefill
+
+The [`prefill-prose-portable-v1` selection](../../crates/grill-perf/examples/prefill-prose-portable-selection-v1.json)
+is a separate companion to the portable sparkDash prefill copy, not a revision.
+It keeps the same cells, trials, limits and portable controls: output cap 8,
+thinking off and `cache: observe`. Its nominal 4k/8k/16k/32k cells use exactly
+16,280/32,664/65,432/130,968 fill characters, matching the copy's filler byte
+lengths, not promising equal token counts. Use reported prompt-token usage.
+
+`fill: {"kind":"generated-prose-v1","characters":16280}` draws random words
+from our compiled, fixed English list, with varying sentence lengths and
+punctuation. It reuses the recorded per-request text salt to generate a distinct
+body as well as a salted header; saved evidence regenerates the exact bytes.
+The [fill contract](CONTRACT.md) defines its versioned generator and bounds.
+This is synthetic random-word prose, not a natural-language corpus or proof of
+typical routing, table coverage, zero cached tokens or cold storage.
+
+Run each selection separately against the same unchanged server, then compare
+corresponding cells and their actual prompt-token counts. Never pool prose and
+repeated-unit results; their workload identities are incompatible. Selected
+preflight and reports show `generated-prose-v1`, `repeated-unit` or `none` fill
+kinds, including mixed selections. Existing sparkDash workload bytes and pins
+remain unchanged. This selection requires a current source build until released.
+
 ### Offline run preflight
 
 Use `preflight` to admit the workload together with the inputs intended for
@@ -899,7 +923,8 @@ a successful check does not bypass `run` admission.
 The ladder's response cap is 65,536 bytes, independent of request size.
 For streaming, the admitted per-wave allowance is
 `concurrency * (2*response_bytes + 6*256KiB + 512KiB + fill_bytes)`,
-where `fill_bytes = unit.len()*repeat`. At concurrency 1 the non-fill
+where `fill_bytes = unit.len()*repeat` for repeated units or `characters` for
+generated prose. At concurrency 1 the non-fill
 allowance is 2,228,224 bytes:
 
 | Approximate target | `" the"` repeats | Fill bytes | Required wave allowance |

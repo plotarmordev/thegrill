@@ -48,6 +48,8 @@ WORKLOADS = (
     "prefill-ladder-v1.json",
     "prefill-ladder-96k-selection-v1.json",
     "prefill-ladder-96k-v1.json",
+    "prefill-prose-portable-selection-v1.json",
+    "prefill-prose-portable-v1.json",
     "quick.json",
     "realistic-decode-selection-v1.json",
     "realistic-decode-v1.json",

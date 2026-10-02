@@ -359,7 +359,8 @@ fn admit(o: &CommonArgs) -> Result<Admitted> {
     // the widest index, but lane 0 renders one digit narrower than lanes 10..63 in
     // each of the cache salt and the text salt, so an interior body can exceed a
     // corner sample by two bytes. Bound with that slack rather than serializing
-    // every repeated prompt.
+    // every prompt. Generated prose is ASCII without JSON escapes and has an
+    // identity-independent length, so these bounds also cover every prose body.
     // Identical output controls give warmup the same encoded bound as measured.
     for cell in workload.cells.iter().filter(|_| workload.version != 6) {
         for phase in [Phase::Measured, Phase::Warmup] {

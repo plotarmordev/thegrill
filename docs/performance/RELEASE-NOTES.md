@@ -8,6 +8,12 @@
   with a real Python task; every other prompt, cell, trial and limit is unchanged.
   The v1 workloads stay as they were, and their code cells are not comparable
   to v2's.
+- Add deterministic `generated-prose-v1` fill and the
+  [portable prose prefill selection](README.md#generated-prose-prefill) for
+  cell-by-cell comparison with repeated-unit prefill (#97). Recorded request
+  salts regenerate varied bodies; selected reports name their fill kinds.
+  Existing workload bytes and identities remain unchanged; prose and filler
+  results are never pooled.
 
 ## Version 0.4.0 — cross-platform deployment comparison and portable workloads
 
