@@ -9,6 +9,7 @@ mod microbench;
 mod model;
 mod outputs;
 mod policy;
+mod prose;
 mod resources;
 mod retention;
 mod run;

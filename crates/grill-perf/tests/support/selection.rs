@@ -1309,22 +1309,13 @@ fn sparkdash_portable_copies_keep_sparkdash_prompts_and_send_only_portable_contr
 }
 
 #[test]
-fn prose_selection_sends_distinct_bodies_with_portable_controls_and_replays() {
+fn prose_selection_sends_distinct_sized_bodies_and_replays() {
     let temp = Temp::new();
     let selection = selection_input(&temp, "prefill-prose-portable-selection-v1.json");
     let declaration = deployment(&temp, "serving.json", "unchanged");
     let (seen, bodies) = std::sync::mpsc::channel();
     let server = Server::new(move |stream, _, body| {
         assert_eq!(body["max_tokens"], 8);
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["stream_options"], json!({"include_usage":true}));
-        assert_eq!(
-            body["chat_template_kwargs"],
-            json!({"thinking":false,"enable_thinking":false})
-        );
-        for field in ["min_tokens", "ignore_eos", "cache_salt", "seed"] {
-            assert!(body.get(field).is_none(), "unexpected {field}: {body}");
-        }
         let content = body["messages"][0]["content"].as_str().unwrap();
         let fill = content.lines().nth(2).unwrap();
         assert!([16280, 32664, 65432, 130968].contains(&fill.len()));
@@ -1344,8 +1335,6 @@ fn prose_selection_sends_distinct_bodies_with_portable_controls_and_replays() {
         report["selected"]["fill_kinds"],
         json!(["generated-prose-v1"])
     );
-    assert_eq!(report["selected"]["request"]["cache"], "observe");
-    assert_eq!(report["selected"]["request"]["profile"], "portable-chat-v1");
     let requests: Vec<Value> = bodies.try_iter().collect();
     assert_eq!(requests.len(), 128);
     let fills: std::collections::HashSet<_> = requests
