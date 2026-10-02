@@ -1,5 +1,10 @@
 # Performance release notes
 
+## Unreleased
+
+- The project is now licensed under the Apache License 2.0 instead of MIT.
+  Published releases up to and including v0.5.0 remain under MIT.
+
 ## Version 0.5.0 — current sparkDash decode prompts and varied-text prefill
 
 - Add `sparkdash-decode-v2` and its portable copy

@@ -1,6 +1,7 @@
 The Grill
 Copyright (c) 2026 plotarmordev
-Project code and documentation: MIT; see LICENSE.
+Project code and documentation: Apache License 2.0; see LICENSE.
+Releases up to and including v0.5.0 were published under the MIT license.
 
 The bundled sparkdash-decode-v1.json and sparkdash-prefill-v1.json
 workloads preserve the sparkDash attribution documented in

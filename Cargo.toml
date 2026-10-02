@@ -14,7 +14,7 @@ too_many_lines = "warn"
 name = "grill"
 version = "0.5.0"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 
 [lints]

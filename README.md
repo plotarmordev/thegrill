@@ -138,6 +138,6 @@ Inspection and regrading use saved files. They do not call the model again. Wron
 
 Use a new output directory for each run. Results contain prompts and model responses, so review them before sharing.
 
-[Contributing](CONTRIBUTING.md) · [Code organization](docs/REPOSITORY.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Contributing](CONTRIBUTING.md) · [Code organization](docs/REPOSITORY.md) · [Security](SECURITY.md) · [Apache 2.0 license](LICENSE)
 
-MIT covers this project's code and documentation. Benchmark data and model weights keep their own licenses.
+Apache License 2.0 covers this project's code and documentation; releases up to v0.5.0 were published under MIT. Benchmark data and model weights keep their own licenses.
