@@ -228,7 +228,7 @@ Choose only the intended path; there is no resolver or automatic compatibility r
 | `long-context-decode-selection-v1.json` | [Decode after ~32K/48K/96K prompts](README.md#long-context-decode-and-prefill), portable controls |
 | `portable-chat-selection-v1.json` | Portable C1 cap observation; no backend-specific controls |
 | `prefill-ladder-96k-selection-v1.json` | [Prefill at ~2K/8K/32K/96K](README.md#long-context-decode-and-prefill), portable controls |
-| `prefill-prose-portable-selection-v1.json` | [Generated-prose prefill](README.md#generated-prose-prefill), nominal 4k/8k/16k/32k, portable controls; source build until released |
+| `prefill-prose-portable-selection-v1.json` | [Generated-prose prefill](README.md#generated-prose-prefill), nominal 4k/8k/16k/32k, portable controls |
 | `realistic-decode-selection-v1.json` | [Coding questions and file edits](README.md#realistic-decode), C1, portable controls |
 | `sparkdash-decode-portable-selection-v1.json` | [sparkDash decode prompts](README.md#portable-sparkdash-copies), portable controls |
 | `sparkdash-decode-portable-selection-v2.json` | [sparkDash 1.8.7+ decode prompts](README.md#portable-sparkdash-copies) (real code task), portable controls |

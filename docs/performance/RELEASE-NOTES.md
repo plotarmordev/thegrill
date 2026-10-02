@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.5.0 — current sparkDash decode prompts and varied-text prefill
 
 - Add `sparkdash-decode-v2` and its portable copy
   [`sparkdash-decode-portable-v2`](README.md#portable-sparkdash-copies). They
@@ -14,6 +14,23 @@
   salts regenerate varied bodies; selected reports name their fill kinds.
   Existing workload bytes and identities remain unchanged; prose and filler
   results are never pooled.
+
+Verification and limits of this version:
+
+- Hosted CI covers the Linux x86_64 and aarch64 build, format, tests, clippy,
+  release staging and installed-archive smoke, and the `grill-perf` build,
+  tests and clippy on macOS. Release archives are Linux only; on macOS, build
+  from a git clone at a clean commit so `--version` records the source.
+- Live run of the new selections on GLM-5.3-Flash EXL3 served by TensorFold
+  across two DGX Sparks (client on the serving host): `sparkdash-decode-portable-v2`
+  completed 576 of 576 requests, every lane reaching its 400-token cap with no
+  reasoning tokens, including the new code prompt and the count prompt.
+  `prefill-prose-portable-v1` and `sparkdash-prefill-portable-v1` each completed
+  128 of 128 requests with every measured trial eligible and no cached prompt
+  tokens; prose prefilled 8-12% slower than the `" the"` filler at the same
+  nominal sizes, with about 19% fewer prompt tokens for the same characters.
+  One model and engine; not a general claim about other backends.
+- The new selections have not been run on Apple Silicon servers yet.
 
 ## Version 0.4.0 — cross-platform deployment comparison and portable workloads
 
