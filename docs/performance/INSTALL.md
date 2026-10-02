@@ -6,12 +6,13 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.4.0** experimental release,
-which adds cross-platform deployment comparison, portable workloads and macOS
-memory observation. Use its exact version/target, checksum and build receipt;
-never substitute a moving branch or local staging hashes. Retain earlier
-published releases and their original pins for historical studies. Installing
-v0.4.0 does not reinterpret old receipts or qualify new backend claims.
+The download commands below select the published **v0.5.0** experimental release,
+which adds sparkDash 1.8.7 decode prompts and a varied-text prefill workload on top
+of v0.4.0's cross-platform deployment comparison and portable workloads. Use its
+exact version/target, checksum and build receipt; never substitute a moving branch
+or local staging hashes. Retain earlier published releases and their original pins
+for historical studies. Installing v0.5.0 does not reinterpret old receipts or
+qualify new backend claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -28,8 +29,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.4.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.4.0),
-from reviewed source `097faada8c62f38c3d925acec3530c99a07f20c0`.
+The published prerelease is [**v0.5.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0),
+from reviewed source `b00e6cff01650f54e1b76f56bb886af34d0cf640`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -51,8 +52,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.4.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.4.0
+VERSION=0.5.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.5.0
 ```
 
 ```sh
