@@ -71,6 +71,10 @@ impl AuthServer {
                             assert!(headers.len() < 64 * 1024);
                         }
                         let headers = String::from_utf8(headers).unwrap();
+                        // A foreign local client can reach this ephemeral port; ignore it.
+                        if !headers.starts_with("POST ") {
+                            continue;
+                        }
                         assert!(headers.lines().any(|line| line.eq_ignore_ascii_case(
                             "authorization: Bearer selection-fixture-secret"
                         )));

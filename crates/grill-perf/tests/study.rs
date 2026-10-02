@@ -80,6 +80,10 @@ impl Server {
                             assert!(headers.len() < 64 * 1024);
                         }
                         let headers = String::from_utf8(headers).unwrap();
+                        // A foreign local client can reach this ephemeral port; ignore it.
+                        if !headers.starts_with("POST ") {
+                            continue;
+                        }
                         let length = headers
                             .lines()
                             .find_map(|line| {

@@ -96,6 +96,10 @@ fn bounded_capture_preserves_invalid_prefix_facts_but_not_missing_usage_guesses(
                     request.push(byte[0]);
                 }
                 let headers_text = String::from_utf8(request).unwrap();
+                // A foreign local client can reach this ephemeral port; ignore it.
+                if !headers_text.starts_with("POST ") {
+                    continue;
+                }
                 let length: usize = headers_text
                     .lines()
                     .find_map(|line| {
