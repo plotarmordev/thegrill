@@ -22,8 +22,8 @@ verify a pinned artifact before unpacking, supply the actual server inputs once,
 capture a baseline, optionally capture an unchanged control, change serving state
 yourself, check, and replay the report offline.
 
-The latest published pre-release is [v0.4.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.4.0),
-with cross-platform deployment comparison and portable workloads. Earlier
+The latest published pre-release is [v0.5.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0),
+with current sparkDash decode prompts and varied-text prefill. Earlier
 releases stay available for historical studies; do not assume an older binary
 contains newer source features.
 The published performance archive contains `bin/grill-perf`, pinned `workloads/`
