@@ -893,7 +893,7 @@ corresponding cells and their actual prompt-token counts. Never pool prose and
 repeated-unit results; their workload identities are incompatible. Selected
 preflight and reports show `generated-prose-v1`, `repeated-unit` or `none` fill
 kinds, including mixed selections. Existing sparkDash workload bytes and pins
-remain unchanged. This selection requires a current source build until released.
+remain unchanged.
 
 ### Offline run preflight
 
