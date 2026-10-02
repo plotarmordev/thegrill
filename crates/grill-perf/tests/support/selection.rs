@@ -1240,6 +1240,10 @@ fn sparkdash_portable_copies_keep_sparkdash_prompts_and_send_only_portable_contr
             "sparkdash-decode-portable-v1.json",
         ),
         (
+            "sparkdash-decode-v2.json",
+            "sparkdash-decode-portable-v2.json",
+        ),
+        (
             "sparkdash-prefill-v1.json",
             "sparkdash-prefill-portable-v1.json",
         ),
@@ -1259,6 +1263,12 @@ fn sparkdash_portable_copies_keep_sparkdash_prompts_and_send_only_portable_contr
             400,
             576,
             "decode",
+        ),
+        (
+            "sparkdash-decode-portable-selection-v2.json",
+            400,
+            576,
+            "decode-v2",
         ),
         (
             "sparkdash-prefill-portable-selection-v1.json",

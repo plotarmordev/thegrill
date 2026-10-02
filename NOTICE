@@ -11,6 +11,10 @@ The glm- and deepseek-labelled routine-decode-v3, routine-prefill-v3 and
 mixed-prefill-decode-v4 workloads also reuse those attributed prompts.
 Their selected cases, request budgets, cache controls and schedules differ;
 they are not byte-equivalent replacements for the original workloads.
+The sparkdash-decode-portable-v1.json and sparkdash-prefill-portable-v1.json
+copies keep those prompts with portable request controls.
+sparkdash-decode-v2.json and sparkdash-decode-portable-v2.json replace only
+the code prompt with the one sparkDash uses since its release 1.8.7.
 Upstream project: https://github.com/MiaAI-Lab/sparkDash
 Upstream MIT license: licenses/sparkDash-LICENSE, copied from
 https://raw.githubusercontent.com/MiaAI-Lab/sparkDash/f25b542038e76e542b3892e2209893b9eb27a0d8/LICENSE

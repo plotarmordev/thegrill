@@ -811,6 +811,10 @@ All warmup waves finish before any measured wave begins.
 It needs a vLLM-compatible server whose chat template honors `chat_template_kwargs.thinking`; check `first_generated_channel` is `answer` (and `reasoning_tokens` where the server reports it) in the receipts, since the tool does not reject reasoning output.
 sparkDash appends a per-stream suffix to prompts above concurrency 1; this workload sends identical prompts, so cache mode `observe` permits prefix sharing across lanes. Use `reported-prefix-zero` when provider-reported zero-prefix evidence is required.
 
+[`sparkdash-decode-v2.json`](../../crates/grill-perf/examples/sparkdash-decode-v2.json) follows sparkDash's prompts since its release 1.8.7 (pinned at [`b4228a33`](https://github.com/MiaAI-Lab/sparkDash/blob/b4228a330a7877dcb5a30516500d57e26affa45a/src/shared/llmPrompts.js)).
+Only the code prompt changes: sparkDash replaced the 50 identical `clamp_NN` helpers, which drafts predict almost perfectly, with a real Python task (`binary_search`).
+Everything else, including the deviations above, matches v1. sparkDash also gives each concurrent code stream a different task and warms the code type up on a separate prompt; v2 runs code at concurrency 1 and warms up on the measured prompt. Results are not comparable to v1's code cell.
+
 [`sparkdash-prefill-v1.json`](../../crates/grill-perf/examples/sparkdash-prefill-v1.json) follows [MiaAI-Lab's sparkDash PrefillBench protocol](https://github.com/MiaAI-Lab/sparkDash/blob/main/server/collectors/PrefillBench.js):
 salted header, repeated `" the"` filler and `Reply OK.` footer, thinking off,
 temperature zero, top_p one, concurrency 1, and the default 4k/8k/16k/32k sizes.
@@ -852,12 +856,15 @@ thinking-control compliance and live prefill rates remain unverified.
 
 ### Portable sparkDash copies
 
-The [`sparkdash-decode-portable-v1`](../../crates/grill-perf/examples/sparkdash-decode-portable-selection-v1.json)
+The [`sparkdash-decode-portable-v1`](../../crates/grill-perf/examples/sparkdash-decode-portable-selection-v1.json),
+[`sparkdash-decode-portable-v2`](../../crates/grill-perf/examples/sparkdash-decode-portable-selection-v2.json)
 and [`sparkdash-prefill-portable-v1`](../../crates/grill-perf/examples/sparkdash-prefill-portable-selection-v1.json)
-selections run the two sparkDash workloads above on any Chat Completions server,
+selections run the sparkDash workloads above on any Chat Completions server,
 including MLX servers on Apple Silicon. Prompts, sizes, cells, trials and limits
-are byte-identical; only the request controls change, to the `portable-chat-v1`
-profile with the `chat-template-thinking-v1` control off. Decode uses a 400-token
+are byte-identical to `sparkdash-decode-v1`, `sparkdash-decode-v2` and
+`sparkdash-prefill-v1`; only the request controls change, to the `portable-chat-v1`
+profile with the `chat-template-thinking-v1` control off. Use the decode v2 copy to
+match current sparkDash. Decode uses a 400-token
 [`cap-reached`](#exact-output-and-cache-observations) output instead of forcing
 exactly 400 tokens, so a reply that ends early makes its lane ineligible rather
 than unequal; the count-to-200 prompt can end before 400 tokens with tokenizers
