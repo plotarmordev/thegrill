@@ -158,6 +158,17 @@ fn sampled_salted_or_different_workloads_are_refused() {
 }
 
 #[test]
+fn generated_prose_without_header_salt_cannot_claim_output_identity() {
+    let temp = Temp::new();
+    let server = Server::new(story(unchanged));
+    let mut work = workload(1, 0, 1);
+    work["cases"][0]["messages"][0]["content"] = json!("{fill}");
+    work["cases"][0]["fill"] = json!({"kind":"generated-prose-v1","characters":256});
+    successful(&run(&temp, &server, "prose", &work));
+    refused(&outputs(&temp, "prose", "prose"), "generated prose");
+}
+
+#[test]
 fn incomplete_lane_is_unavailable_never_identical() {
     let temp = Temp::new();
     let whole = Server::new(story(unchanged));

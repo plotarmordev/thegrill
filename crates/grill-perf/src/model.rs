@@ -159,10 +159,45 @@ pub struct Case {
     pub step: Option<crate::sequence::Step>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Fill {
-    pub unit: String,
-    pub repeat: u32,
+#[serde(untagged, deny_unknown_fields)]
+pub enum Fill {
+    RepeatedUnit { unit: String, repeat: u32 },
+    GeneratedProse { kind: ProseKind, characters: u32 },
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ProseKind {
+    #[serde(rename = "generated-prose-v1")]
+    V1,
+}
+impl Fill {
+    fn valid(&self) -> bool {
+        match self {
+            Self::RepeatedUnit { unit, repeat } => {
+                !unit.is_empty() && unit.len() <= 64 && (1..=1_000_000).contains(repeat)
+            }
+            Self::GeneratedProse { characters, .. } => {
+                (1..=REQUEST_CAP).contains(&(*characters as usize))
+            }
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        match self {
+            Self::RepeatedUnit { unit, repeat } => unit.len() * *repeat as usize,
+            // The versioned word list, spaces and punctuation are all ASCII.
+            Self::GeneratedProse { characters, .. } => *characters as usize,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RepeatedUnit { .. } => "repeated-unit",
+            Self::GeneratedProse {
+                kind: ProseKind::V1,
+                ..
+            } => "generated-prose-v1",
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -214,6 +249,17 @@ pub(crate) fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
     T::deserialize(deserializer).map(Some)
 }
 impl Workload {
+    pub fn fill_kinds(&self) -> Vec<&'static str> {
+        let mut kinds = Vec::new();
+        for case in &self.cases {
+            let kind = case.fill.as_ref().map_or("none", Fill::kind);
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
+    }
+
     pub fn salted(&self) -> bool {
         crate::acquisition::conversation(self) || self.cases.iter().any(|case| case.fill.is_some())
     }
@@ -286,9 +332,7 @@ impl Workload {
                 return Err(format!("case {} exceeds message bounds", case.id));
             }
             if let Some(fill) = &case.fill {
-                if fill.unit.is_empty()
-                    || fill.unit.len() > 64
-                    || !(1..=1_000_000).contains(&fill.repeat)
+                if !fill.valid()
                     || case
                         .messages
                         .iter()
@@ -307,8 +351,7 @@ impl Workload {
                         case.id
                     ));
                 }
-                if case.messages.iter().map(|m| m.content.len()).sum::<usize>()
-                    + fill.unit.len() * fill.repeat as usize
+                if case.messages.iter().map(|m| m.content.len()).sum::<usize>() + fill.bytes()
                     > REQUEST_CAP
                 {
                     return Err(format!(
@@ -377,10 +420,7 @@ impl Workload {
             if r.cache == Cache::ReportedPrefixHit && cell.warmup_trials == 0 {
                 return Err("reported-prefix-hit requires explicit warmup priming".into());
             }
-            let fill_bytes = case
-                .fill
-                .as_ref()
-                .map_or(0, |fill| fill.unit.len() * fill.repeat as usize);
+            let fill_bytes = case.fill.as_ref().map_or(0, Fill::bytes);
             // Streaming semantics are frame-bounded; nonstreaming decoding is body-bounded.
             let per_request = if r.stream {
                 2 * l.response_bytes + 6 * FRAME_CAP + 512 * 1024

@@ -167,10 +167,7 @@ pub fn validate(workload: &Workload) -> Result<()> {
                     }
                 }
             }
-            let fill = case
-                .fill
-                .as_ref()
-                .map_or(0, |f| f.unit.len() * f.repeat as usize);
+            let fill = case.fill.as_ref().map_or(0, Fill::bytes);
             let per_lane = if settings.stream {
                 2 * workload.limits.response_bytes + 6 * FRAME_CAP + 512 * 1024
             } else {

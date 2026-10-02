@@ -302,6 +302,7 @@ pub struct SelectedReport {
     pub request: RequestSettings,
     pub limits: Limits,
     pub cells: Vec<Cell>,
+    pub fill_kinds: Vec<&'static str>,
     pub baseline_acquisitions: Vec<AcquisitionReport>,
     pub candidate_acquisitions: Vec<AcquisitionReport>,
     pub baseline_timing: CaptureTiming,
@@ -568,6 +569,7 @@ fn load(root: &Path) -> Result<Verified> {
         Some(SelectedReport {
             manifest: selection,
             manifest_sha256: hash.clone(),
+            fill_kinds: workload.fill_kinds(),
             request: workload.request,
             limits: workload.limits,
             cells: workload.cells,
@@ -1072,6 +1074,10 @@ fn preflight(
         controls
     );
     if let Some(selected) = selected {
+        text.push_str(&format!(
+            "Fill kinds: {}\n",
+            workload.fill_kinds().join(", ")
+        ));
         text.push_str(&format!(
             "Operation scope: {:?}; source {}; normalized workload {}\n",
             selected.operation_scope, selected.source_sha256, selected.workload_sha256
@@ -1752,6 +1758,7 @@ pub fn human(report: &Report) -> String {
     }
     text.push('\n');
     if let Some(selected) = &report.selected {
+        text.push_str(&format!("Fill kinds: {}\n", selected.fill_kinds.join(", ")));
         text.push_str(&format!(
             "Selection {}: {}; operation scope {:?} (operator declaration)\n{}\n",
             selected.manifest.id,
