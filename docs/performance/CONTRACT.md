@@ -152,7 +152,7 @@ Alternatively, `fill: {"kind":"generated-prose-v1","characters":16280}` selects
 synthetic random-word prose. `characters` is positive and bounded by the request
 byte cap; the same placeholder rules apply. The compiled ordered list contains
 472 common English words authored for this generator, all ASCII. Each sentence
-draws a length from 6..16 words, selects words with replacement, capitalizes its
+draws a length of 6 to 16 words inclusive, selects words with replacement, capitalizes its
 first letter, and ends with a period. Words and sentences use single spaces;
 the stream is truncated at exactly `characters`, possibly within its last word.
 The word order and generator are immutable under this kind.
