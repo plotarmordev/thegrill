@@ -236,8 +236,6 @@ def main():
     require(cargo.startswith(f"cargo {TOOLCHAIN} "), "unexpected Cargo release")
     tool_hashes = {name: digest(Path(run(["rustup", "which", "--toolchain", TOOLCHAIN, name], root, env)))
                    for name in ("rustc", "cargo")}
-    native_tools = {name: run([name, "--version"], root, env).splitlines()[0]
-                    for name in ("cc", "c++", "ld", "cmake")}
     tree = run(["git", "rev-parse", "HEAD^{tree}"], root)
     entries = run(["git", "ls-tree", "-r", "HEAD"], root).splitlines()
     require(all(line.startswith(("100644 blob ", "100755 blob ")) for line in entries),
