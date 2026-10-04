@@ -38,15 +38,25 @@ records the published download location without changing those released bytes.
 
 Choose `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` to match `uname -m`.
 The supported baseline is native Ubuntu 24.04 / glibc 2.39; older libc and other
-runtimes are not qualified by that statement. Installed use needs no Rust or
-checkout. A readable system CA store (Ubuntu `ca-certificates`) is required for
-client initialization, including loopback HTTP; do not disable TLS checks.
-The shell examples use `curl`, `sha256sum`, `tar`, and `jq`.
+runtimes are not qualified by that statement. On Apple Silicon macOS, choose
+`aarch64-apple-darwin`: the staged binaries pin `MACOSX_DEPLOYMENT_TARGET=11.0`
+(the Rust toolchain's own floor for this target), while the installed smoke ran
+on the hosted macOS 15 staging runner only. A macOS archive ships from the next
+release; until one is published, use the [source fallback](#upgrade-rollback-and-source-fallback).
+Installed use needs no Rust or checkout. On Linux a readable system CA store
+(Ubuntu `ca-certificates`) is required for client initialization, including
+loopback HTTP; do not disable TLS checks.
+On macOS the client reads the native system trust store (Security.framework);
+no file bundle is configured. The shell examples use `curl`, `sha256sum`, `tar`, and `jq`
+(`shasum -a 256 --check` reads the same sidecar on macOS).
 An `Exec format error` means the archive/CPU choice is wrong: obtain the native
 target rather than treating emulation as qualification. A missing `GLIBC_*`
 version means the runtime is below the supported baseline: use a qualified OS
 or the source-build fallback on the intended host, not copied libc files or a
-TLS-verification workaround.
+TLS-verification workaround. The unsigned macOS binary triggers Gatekeeper only
+when the download carries a quarantine attribute; see the
+[release procedure](../RELEASES.md#verification-and-public-safe-output) for the
+`xattr -d com.apple.quarantine` note.
 
 For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
@@ -191,9 +201,9 @@ runtime, model build and settings together; see the
 
 Both collectors must be built from the same clean git commit, so
 `"$GRILL_PERF" --version` prints the same `(source <commit>)` on each host;
-`unrecorded` is refused. There is no macOS release archive: on the Mac, build
-from a `git clone` checked out at that commit, as in
-[source fallback](#upgrade-rollback-and-source-fallback). Use the same
+`unrecorded` is refused. The macOS release archive ships from the next release;
+until then, build the Mac collector from a `git clone` checked out at that
+commit, as in [source fallback](#upgrade-rollback-and-source-fallback). Use the same
 `--client-placement` on both sides and at least 60 seconds between captures.
 
 ```sh
@@ -275,8 +285,9 @@ export GRILL_PERF="$SOURCE/target/release/grill-perf" &&
 
 It prints `grill-perf <version> (source <commit>)` only when the build inputs
 in the git checkout match that commit, and otherwise `(source unrecorded)`.
-macOS has no release archive: build from a git clone at a clean commit to
-record the source; a build from a source tarball reports `unrecorded`.
+The macOS release archive ships from the next release; until then build from a
+git clone at a clean commit to record the source; a build from a source tarball
+reports `unrecorded`.
 Source builds of the portable serving workflow need Linux or Apple Silicon
 macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, Linux
 `/proc`/cgroup/NVML resource sources and external-program microbench capture

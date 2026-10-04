@@ -20,7 +20,7 @@ Both tools run on your machine and connect to a server you already run. No proje
 | Platform | How to install | What works |
 |---|---|---|
 | Linux x86_64 and aarch64 (Ubuntu 24.04) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0), no Rust needed | Everything in `grill-perf` (opt-in Python producers need their own runtime) |
-| Apple Silicon macOS | Build from source (below) | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
+| Apple Silicon macOS | Release archive from the next release (unsigned; no notarization); source build until then (below) | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
 
 `grill-perf` talks to any OpenAI-compatible Chat Completions server that reports
 streaming token usage. It has been run against vLLM, TensorFold (on NVIDIA and on
