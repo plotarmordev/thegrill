@@ -91,10 +91,10 @@ jobs:
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$ASSET" \
             --output "$RUNNER_TEMP/gitleaks/$ASSET"
-          if command -v sha256sum >/dev/null 2>&1; then
+          if [ "$TARGET" != aarch64-apple-darwin ]; then
             printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET" | sha256sum --check --strict
           else
-            # macOS runners may ship BSD userland only; python3 hashes the same bytes.
+            # macOS ships a BSD sha256sum without --strict; python3 hashes the same bytes.
             python3 -c 'import hashlib, sys; raise SystemExit("gitleaks checksum mismatch" if hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest() != sys.argv[1] else None)' \
               "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET"
           fi
