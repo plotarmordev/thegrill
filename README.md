@@ -15,87 +15,111 @@ A serving setup is the engine plus its settings, such as vLLM with a quantized m
 
 Both tools run on your machine and connect to a server you already run. No project account or results upload is required. **This is experimental software.**
 
-## Get started
+## Works on
 
-For serving-speed checks, follow **[Install and first capture](docs/performance/INSTALL.md)**:
-verify a pinned artifact before unpacking, supply the actual server inputs once,
-capture a baseline, optionally capture an unchanged control, change serving state
-yourself, check, and replay the report offline.
+| Platform | How to install | What works |
+|---|---|---|
+| Linux x86_64 and aarch64 (Ubuntu 24.04) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0), no Rust needed | Everything in `grill-perf` (opt-in Python producers need their own runtime) |
+| Apple Silicon macOS | Build from source (below) | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
 
-The latest published pre-release is [v0.5.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0),
-with current sparkDash decode prompts and varied-text prefill. Earlier
-releases stay available for historical studies; do not assume an older binary
-contains newer source features.
-The published performance archive contains `bin/grill-perf`, pinned `workloads/`
-and offline performance guides. Published binaries require Linux and no Rust or
-TheGrill checkout. A Rust 1.98 source build additionally supports portable
-serving captures on Apple Silicon macOS; Linux-native resource and external
-program collectors remain unavailable there. Opt-in Python producers require
-their explicitly reviewed Python/backend runtime; the archive does not install
-those dependencies.
+`grill-perf` talks to any OpenAI-compatible Chat Completions server that reports
+streaming token usage. It has been run against vLLM, TensorFold (on NVIDIA and on
+Apple Silicon) and oMLX. It never starts, configures or restarts your server.
+
+The latest pre-release is [v0.5.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0).
+Earlier releases stay available; an older binary does not contain newer features.
+
+## Quick start
+
+**Linux:** download and verify the release archive as described in
+[Install and first capture](docs/performance/INSTALL.md#obtain-verify-unpack), then
+set `GRILL_PERF` to its `bin/grill-perf`.
+
+**macOS:** build from a clean clone so the binary records its source commit
+(needs Rust/Cargo 1.98, C/C++ tools and CMake):
+
+```sh
+git clone https://github.com/plotarmordev/thegrill.git && cd thegrill
+git checkout v0.5.0
+cargo build --release --locked -p grill-perf
+export GRILL_PERF="$PWD/target/release/grill-perf"
+"$GRILL_PERF" --version   # grill-perf 0.5.0 (source b00e6cff...)
+```
+
+**Then, on either platform,** describe your server once and capture a baseline
+next to it:
+
+```sh
+jq -n --arg m "your/model@revision" --arg r "engine and version" \
+  --arg h "device" --arg s "serving flags" \
+  '{model_revision:$m, runtime:$r, hardware:$h, settings:$s}' > serving.json
+"$GRILL_PERF" baseline --workload portable-v1 --client-placement same-host \
+  --endpoint http://127.0.0.1:8000/v1/chat/completions --local-http \
+  --model your-model --deployment serving.json --out results/before
+```
+
+Change your server yourself, then `check` and `compare` the saved runs. The full
+walk-through, including an unchanged control run, is in
+[Install and first capture](docs/performance/INSTALL.md#baseline-optional-control-change-check).
+
+## Example: the same model on a Mac and on a DGX Spark
+
+Qwen3.8-Flash-Next, the same 4-bit MLX checkpoint (`Vontra/...-MLX-4bit-MTP@dadefa80`),
+served by TensorFold 0.6.0 on each machine, measured with the same `grill-perf`
+source build, client on the serving host
+([A/B/A2 deployment comparison](docs/performance/INSTALL.md#compare-two-deployments-aba2)):
+
+| | DGX Spark (GB10) | Mac Studio (M5 Ultra) |
+|---|---|---|
+| `portable-v1`, one request at a time | 118 tok/s | 246 tok/s |
+| Verdict | | **MEASURED FASTER**, +108.7% (95% range +107.9% to +109.6%) |
+| Repeat of the Spark run (drift control) | -0.2% | |
+| sparkDash decode, 4 requests at once (descriptive) | 350 tok/s total | 354 tok/s total |
+| sparkDash prefill, 4K-32K (descriptive) | 2,340-2,450 tok/s | 2,870-2,960 tok/s |
+
+This compares whole deployments, not chips: the Mac's TensorFold build rejected
+two settings the Spark used (int8 KV cache and an MTP confidence threshold), and
+the counting prompt favours speculative decoding. Verdicts cover the built-in
+single-request workload; selected workloads such as the sparkDash copies are
+descriptive side-by-side results (the Mac's sparkDash runs completed 3 of 8 rounds).
 
 ## Speed benchmarks
 
-Use **`grill-perf`** against a server you already run. The
-[authoritative first-run workflow](docs/performance/INSTALL.md#baseline-optional-control-change-check)
-needs no statistical policy file. `check` inherits the verified baseline's
-endpoint, model selector, workload and credential-environment name; deployment
-identities remain explicit operator declarations, not attested server facts.
+Use **`grill-perf`** against a server you already run. `check` reuses the
+baseline's endpoint, model, workload and credential-variable name. Deployment
+details are what you declare, not something the tool verifies.
 
-The default is the short structured **C1** comparison. For explicitly selected,
-descriptive-only concurrent or conversation observations, use the same CLI with
-[packaged selection paths](docs/performance/INSTALL.md#optional-selections-and-failures).
-[Recipe embedding](docs/performance/RECIPES.md) supplies data, not a model-specific
-wrapper or registry. To compare two whole deployments, such as one model on a
-Mac and on an NVIDIA host, use the
-[A/B/A2 deployment comparison](docs/performance/INSTALL.md#compare-two-deployments-aba2).
+**Workloads.** The default is a short structured single-request (C1) check;
+`portable-v1` is the same idea for servers that do not support exact-length
+controls, such as MLX servers. Selected workloads, all descriptive, include:
 
-| Display label | Existing JSON `result` code | Meaning |
+- `sparkdash-decode-portable-v2` and `sparkdash-prefill-portable-v1`: the
+  [sparkDash](https://github.com/MiaAI-Lab/sparkDash) tests, matching sparkDash 1.8.7;
+- `prefill-prose-portable-v1`: the same prefill sizes with varied text instead of
+  one repeated word;
+- realistic coding and edit prompts, a C1-C8 concurrency ladder, long-context
+  decode and prefill, and conversation history checks.
+
+See the [selection list](docs/performance/INSTALL.md#optional-selections-and-failures)
+and [recipe embedding](docs/performance/RECIPES.md). Contributors making
+performance claims start from the [shared claim map](docs/performance/SHARED-RECIPES.md)
+and [report template](docs/performance/SHARED-REPORT-TEMPLATE.md).
+
+**Results.**
+
+| Display label | JSON `result` code | Meaning |
 |---|---|---|
-| **MEASURED FASTER** | `IMPROVED` | The comparison model supports higher measured throughput between these capture periods |
-| **MEASURED SLOWER** | `REGRESSED` | It supports lower measured throughput between these periods |
-| **COMPLETE - DESCRIPTIVE ONLY** | `DESCRIPTIVE` | An explicitly selected comparison completed successfully; no faster/slower, equivalence or no-regression verdict |
-| **INCONCLUSIVE** | `INCONCLUSIVE` | No direction is established, or evidence is insufficient; this does not mean equivalent performance |
-| **VERDICT PENDING** | `PENDING` | A deployment candidate is captured; its verdict needs the unchanged reference |
-| **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report explains why and retains the available evidence |
+| **MEASURED FASTER** | `IMPROVED` | Higher measured throughput between these capture periods |
+| **MEASURED SLOWER** | `REGRESSED` | Lower measured throughput between these periods |
+| **COMPLETE - DESCRIPTIVE ONLY** | `DESCRIPTIVE` | A selected comparison completed; no faster/slower verdict |
+| **INCONCLUSIVE** | `INCONCLUSIVE` | No direction established, or not enough evidence; not the same as "equal" |
+| **VERDICT PENDING** | `PENDING` | A deployment candidate is captured; the verdict needs the unchanged reference run |
+| **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report says why |
 
-Baseline readiness is not a comparison verdict. Exit success is not a universal
-no-regression certificate: read the result and its displayed scope. Historical
-reports, stored result codes and comparison meanings are not reinterpreted.
-
-The observed percentage is separate from its model-based uncertainty range.
-Sequential captures cannot isolate the serving change from time, load or cache
-effects. A measured direction establishes neither causality nor practical
-significance, and there is no guaranteed precision or detection of a 5% change.
-
-The [scope and budget reference](docs/performance/README.md#default-scope-and-budget)
-defines the default workload. Preflight prints scope and the complete allowance
-before traffic. For slower servers, choose a finite `--seconds` allowance
-prospectively; exhaustion is not automatically server failure. There are no
-automatic retries or replacement samples. Reports and raw evidence stay local;
-`compare` verifies saved captures without network calls.
-
-### Contributor claims beyond the default C1 check
-
-Use the **[shared claim map and recipe profiles](docs/performance/SHARED-RECIPES.md)**
-and **[single report template](docs/performance/SHARED-REPORT-TEMPLATE.md)** as the
-entrypoint for contributor performance evidence. Select the relevant routine,
-stress or domain scope before collection; do not run the entire matrix
-automatically. The map separates first-output/completion, fairness, mixed
-interference, accounting, tools/history, resources, retention/capacity,
-startup/reload and kernel/fabric evidence.
-
-The default CLI remains the bounded C1 assessment above. Advanced `run`, `pause`,
-`resume`, raw-run `compare` and captured-policy `decide` keep their separate
-meanings; domain collectors do not substitute for serving or quality checks.
-The recipes retain their [sparkDash](https://github.com/MiaAI-Lab/sparkDash)
-attribution, and historical evidence is not reinterpreted.
-
-Report source implementation, CPU-protocol verification, real-adapter exercise
-and live-backend qualification separately for the exact artifact and selected
-scope. Fixture success is not model/cache/tokenizer proof; missing evidence and
-INCONCLUSIVE results stay visible. Broader mandatory PR adoption remains subject
-to completed coverage review and explicit maintainer scope/exception agreement.
+A direction is not a cause: sequential runs cannot separate your change from time,
+load or cache effects, and there is no guaranteed precision. Runs have a fixed
+time and request budget with no automatic retries; reports and raw evidence stay
+on your machine, and `compare` re-checks saved runs without network calls.
 
 [Full performance guide and measurement limits](docs/performance/README.md).
 

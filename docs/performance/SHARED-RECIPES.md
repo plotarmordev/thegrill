@@ -5,6 +5,30 @@ For recipe-facing baseline/change/check integration, use the
 is separate from the historical bundle described below; no existing bundle
 entry, workload byte or advanced-policy result is reinterpreted.
 
+## Contributor claims beyond the default C1 check
+
+Use this shared claim map and recipe profiles and the
+**[single report template](SHARED-REPORT-TEMPLATE.md)** as the
+entrypoint for contributor performance evidence. Select the relevant routine,
+stress or domain scope before collection; do not run the entire matrix
+automatically. The map separates first-output/completion, fairness, mixed
+interference, accounting, tools/history, resources, retention/capacity,
+startup/reload and kernel/fabric evidence.
+
+The default CLI remains the bounded C1 assessment. Advanced `run`, `pause`,
+`resume`, raw-run `compare` and captured-policy `decide` keep their separate
+meanings; domain collectors do not substitute for serving or quality checks.
+The recipes retain their [sparkDash](https://github.com/MiaAI-Lab/sparkDash)
+attribution, and historical evidence is not reinterpreted.
+
+Report source implementation, CPU-protocol verification, real-adapter exercise
+and live-backend qualification separately for the exact artifact and selected
+scope. Fixture success is not model/cache/tokenizer proof; missing evidence and
+INCONCLUSIVE results stay visible. Broader mandatory PR adoption remains subject
+to completed coverage review and explicit maintainer scope/exception agreement.
+
+## Recipe bundle and selections
+
 The small selected concurrency examples preserve the recipe control distinction:
 `concurrency-selection-v1.json` requests `chat_template_kwargs.thinking: false`;
 `concurrency-enable-thinking-selection-v1.json` requests
