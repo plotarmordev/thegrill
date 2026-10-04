@@ -1,9 +1,12 @@
 Third-party notices for grill-perf
 
-Locked input: Cargo.lock SHA-256 6f1b08507c8b5647abcb3ac72886316de725d011baf373a4ca22082557f9ef3f
-Targets: x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu
-This conservative inventory includes the 103 normal-edge third-party Cargo packages
+Locked input: Cargo.lock SHA-256 1b0b960ad4fc4523d69b8ab092550a517ea751bd0fe93a5826a9989ccb4782f8
+Targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu and aarch64-apple-darwin
+This conservative inventory includes the 107 normal-edge third-party Cargo packages
 (including host proc-macro packages), plus the named native fiat-crypto notice.
+The darwin target replaces the Linux file trust-store crates (openssl-probe,
+rustls-native-certs) with the Apple crates listed below; the union over all
+release targets is listed.
 Build-only crypto components are distinguished in the included aws-lc-sys license.
 Each distinct license file is reproduced verbatim once; every source sharing those
 exact bytes is listed above it. No license text or copyright line is normalized.
@@ -1535,6 +1538,39 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+==============================================================================
+SHA-256: 62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3
+Sources:
+  core-foundation 0.10.1 / LICENSE-MIT (SPDX: MIT OR Apache-2.0)
+  core-foundation-sys 0.8.7 / LICENSE-MIT (SPDX: MIT OR Apache-2.0)
+
+Copyright (c) 2012-2013 Mozilla Foundation
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
 
 ==============================================================================
 SHA-256: 6226d0632e2e1a80c23597e964da9812ae193c535fe058154afb034e94167aa5
@@ -3261,6 +3297,34 @@ DEALINGS IN THE SOFTWARE.
 
 
 ==============================================================================
+SHA-256: 91e934255ba3b2f21103d68c5581c23ef34aa95c4628e4405b8c901935e11c69
+Sources:
+  security-framework 3.7.0 / LICENSE-MIT (SPDX: MIT OR Apache-2.0)
+  security-framework-sys 2.17.0 / LICENSE-MIT (SPDX: MIT OR Apache-2.0)
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Steven Fackler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+==============================================================================
 SHA-256: 98181e7249d0c01737645ec982499ce99a0f07eb8f7d625b8840d799d10dbc01
 Sources:
   block-buffer 0.12.1 / LICENSE-MIT (SPDX: MIT OR Apache-2.0)
@@ -3325,6 +3389,8 @@ Sources:
   base64 0.22.1 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   bitflags 2.13.1 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   cfg-if 1.0.4 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
+  core-foundation 0.10.1 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
+  core-foundation-sys 0.8.7 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   displaydoc 0.2.7 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   errno 0.3.14 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   form_urlencoded 1.2.2 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
@@ -3339,6 +3405,8 @@ Sources:
   percent-encoding 2.3.2 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   rustls 0.23.43 / LICENSE-APACHE (SPDX: Apache-2.0 OR ISC OR MIT)
   rustls-native-certs 0.8.4 / LICENSE-APACHE (SPDX: Apache-2.0 OR ISC OR MIT)
+  security-framework 3.7.0 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
+  security-framework-sys 2.17.0 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   signal-hook-registry 1.4.8 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   smallvec 1.16.0 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
   socket2 0.6.5 / LICENSE-APACHE (SPDX: MIT OR Apache-2.0)
