@@ -6,7 +6,7 @@
     "crates/grill-sse/Cargo.toml": "5f6d34630cd32f54aae216f1b5996886e4865343a3d1421e4053ba9c21ccabb1"
   },
   "notice_sha256": {
-    "licenses/THIRD-PARTY-NOTICES.txt": "56da8cf1f6664840a4d0d089f7f698f5f17cf6b91c5ffbb52977f9ffe31d08a1",
+    "licenses/THIRD-PARTY-NOTICES.txt": "3a77f190376962212d9dea0e2e7dfd4bd8c04cd2ca74846d661c28060f56cb86",
     "licenses/rust-standard-library/COPYRIGHT-library.html": "68129500b616d5838629e68f55ff3aed5e096dacf60ce9eb41bbe599a563afa6",
     "licenses/rust-standard-library/licenses/Apache-2.0.txt": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
     "licenses/rust-standard-library/licenses/BSD-2-Clause.txt": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
@@ -19,6 +19,7 @@
   "scope": "Pinned conservative Cargo/native notices and unmodified Rust standard-library distribution notices; re-review this ledger when lockfile or toolchain changes.",
   "targets": [
     "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu"
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin"
   ]
 }

@@ -4,6 +4,18 @@
 
 - The project is now licensed under the Apache License 2.0 instead of MIT.
   Published releases up to and including v0.5.0 remain under MIT.
+- Prepare an unsigned Apple Silicon macOS release target, `aarch64-apple-darwin`,
+  alongside the two Linux targets: the release pipeline now stages on a hosted
+  `macos-15` arm64 runner with Rust 1.98.0, pins `MACOSX_DEPLOYMENT_TARGET=11.0`
+  (the toolchain's own floor; installed smoke ran on macOS 15 only), and runs an
+  installed smoke without Docker there — checksum-before-unpack, corrupt-download
+  rejection, payload hashes, Mach-O identity, `--version`, `--help` and bundled
+  bundle verification — recording exactly those checks. The redistribution
+  notices add the darwin trust-store crates (`core-foundation`,
+  `core-foundation-sys`, `security-framework`, `security-framework-sys`). Linux
+  staging, payloads and the container-isolated Linux smoke are unchanged; the
+  macOS archive itself is not published yet, so build from source until the next
+  release. See [release procedure](../RELEASES.md).
 
 ## Version 0.5.0 — current sparkDash decode prompts and varied-text prefill
 

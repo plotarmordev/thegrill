@@ -40,6 +40,12 @@ Use a clean native Ubuntu 24.04 host with glibc 2.39, Python supporting `tomllib
 and safe tar extraction, Git, Rust/Cargo 1.98.0, a C/C++ toolchain and CMake.
 Install the exact Rust toolchain before staging. Native x86 uses
 `x86_64-unknown-linux-gnu`; native ARM uses `aarch64-unknown-linux-gnu`.
+The `aarch64-apple-darwin` target instead requires a native macOS arm64 host
+(the hosted `macos-15` runner): the script checks Darwin/arm64 and records the
+`sw_vers` product version, and the build pins `MACOSX_DEPLOYMENT_TARGET=11.0`,
+the deployment floor rustc 1.98 itself uses for this target, in the receipt's
+runtime block instead of Ubuntu/glibc assumptions. Binaries are unsigned and
+un-notarized: no Apple Developer ID or signing secret exists in CI.
 No cross-build or emulator run qualifies a native platform. The script checks
 host OS/libc/architecture and Rust host identity, but these checks are not an
 independent attestation of the machine.
@@ -113,8 +119,11 @@ bit-for-bit reproducible build, a signature or execution attestation.
 ## Verification and public-safe output
 
 The `Stage release` workflow uses only `contents: read` on pull requests, manual
-dispatch and calls from the publication workflow. Native hosted `ubuntu-24.04`
-and `ubuntu-24.04-arm` runners execute these existing checks before staging:
+dispatch and calls from the publication workflow. Native hosted `ubuntu-24.04`,
+`ubuntu-24.04-arm` and `macos-15` runners execute these existing checks before
+staging. The Linux runners run the full workspace set below; `macos-15` runs the
+`build`/`test`/`clippy` commands scoped to `-p grill-perf`, as the CI
+`macos-performance` job already does (`fmt` stays covered by the Linux runners):
 
 ```sh
 cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
@@ -141,7 +150,7 @@ python3 tools/smoke-installed.py \
 ```
 
 The helper verifies the checksum before unpacking or executing the archive.
-It uses the native Ubuntu 24.04/glibc 2.39 runtime image
+On Linux it uses the native Ubuntu 24.04/glibc 2.39 runtime image
 `ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254`
 without Rust or a source checkout. A native system CA bundle is mounted read-only
 at the standard trust-store location; its digest and source are recorded in the
@@ -151,6 +160,15 @@ uses host networking; help/inspection and offline replay use network isolation.
 All commands run outside the extraction directory. Negative cases cover corrupt archives,
 wrong architecture/runtime assumptions and invalid evidence. No serving, model,
 GPU or billing operation is part of this workflow.
+
+macOS hosted runners have no Docker, so the `aarch64-apple-darwin` smoke cannot
+use that container isolation: after the same checksum-before-unpack verification
+and corrupt-download rejection, it runs the platform-independent installed
+checks directly on the runner — `--version`/source identity, `--help`, bundled
+`bundle verify`/`bundle inspect` — and records exactly that check list in its
+summary. It proves installed offline behaviour on the staging macOS version
+only; it is not the clean-runtime, fixture-protocol or offline-replay
+qualification the Linux Docker path performs.
 
 Upload only the archive, checksum, build receipt and public-safe smoke summary.
 The workflow renames `summary.json` to `grill-perf-VERSION-TARGET.smoke.json`;
@@ -168,13 +186,14 @@ ignored local files never enter that snapshot; the stager separately requires
 the exact clean reviewed checkout.
 
 The workflow downloads ordinary native Gitleaks `8.30.1` binaries over HTTPS,
-mapping x86_64 to upstream `linux_x64` and aarch64 to `linux_arm64`. The archive
-SHA-256 pins were checked against both the upstream release asset metadata and
-its checksum manifest:
+mapping x86_64 to upstream `linux_x64`, aarch64 Linux to `linux_arm64`, and
+arm64 macOS to `darwin_arm64`. The archive SHA-256 pins were checked against
+both the upstream release asset metadata and its checksum manifest:
 
 ```text
 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz
 e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080  gitleaks_8.30.1_linux_arm64.tar.gz
+b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5  gitleaks_8.30.1_darwin_arm64.tar.gz
 ```
 
 The digest is verified before extracting or executing the scanner. Its explicit
@@ -199,6 +218,16 @@ turn off TLS verification to work around a download failure. A corrupt download
 must be discarded before execution; obtain the checksum from a trusted reviewed
 channel. Checksums alone do not authenticate a compromised distribution channel.
 
+The `aarch64-apple-darwin` archive is unsigned and not notarized. Files fetched
+with command-line downloaders such as `curl` or `gh release download` carry no
+macOS quarantine attribute, so Gatekeeper does not intervene on first run; if a
+browser or another LaunchServices-integrated downloader adds
+`com.apple.quarantine`, Gatekeeper refuses the unsigned binary ("developer
+cannot be verified" or "damaged"). After verifying the checksum from the
+reviewed channel, remove the attribute explicitly
+(`xattr -d com.apple.quarantine <path>`) or allow the binary in System Settings;
+never disable Gatekeeper globally.
+
 ## Publication gate and immutable failure handling
 
 Before requesting approval, review the source diff, public inputs, payload
@@ -211,8 +240,14 @@ The complete redistribution ledger and notice payload are fixed reviewed inputs,
 not an unresolved placeholder or an inference from the root license label.
 `licenses/THIRD-PARTY-NOTICES.txt` preserves the locked Cargo/native license
 texts, including AWS-LC, deduplicating only byte-identical text with all source
-attributions retained. The complete pinned Rust standard-library distribution
-notices are included conservatively. `licenses/NOTICE-INPUTS.json` binds the
+attributions retained; it lists the union over all release targets, so the
+Linux trust-store crates and the darwin Apple crates (`core-foundation`,
+`core-foundation-sys`, `security-framework`, `security-framework-sys`) all
+appear. The complete pinned Rust standard-library distribution
+notices are included conservatively; that pinned `library/` notice set is
+target-independent — its dependency table already spans every std target — so
+the darwin build requires no separate standard-library notices.
+`licenses/NOTICE-INPUTS.json` binds the
 lockfile, dependency/feature manifests, Rust source/toolchain and every required
 notice payload digest. Staging checks the exact required notice set and refuses
 stale, missing or changed inputs; dependency or toolchain updates require renewed

@@ -28,8 +28,16 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            rust-components: rustfmt, clippy
+            workspace-checks: true
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            rust-components: rustfmt, clippy
+            workspace-checks: true
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            rust-components: clippy
+            workspace-checks: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
@@ -69,19 +77,27 @@ jobs:
           set -euo pipefail
           case "$(uname -m):$TARGET" in
             x86_64:x86_64-unknown-linux-gnu)
-              ARCH=x64
+              ASSET=gitleaks_8.30.1_linux_x64.tar.gz
               SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
             aarch64:aarch64-unknown-linux-gnu)
-              ARCH=arm64
+              ASSET=gitleaks_8.30.1_linux_arm64.tar.gz
               SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
+            arm64:aarch64-apple-darwin)
+              ASSET=gitleaks_8.30.1_darwin_arm64.tar.gz
+              SHA256=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
             *) echo 'Native scanner architecture mismatch' >&2; exit 1 ;;
           esac
           mkdir "$RUNNER_TEMP/gitleaks"
-          ASSET="gitleaks_8.30.1_linux_$ARCH.tar.gz"
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/$ASSET" \
             --output "$RUNNER_TEMP/gitleaks/$ASSET"
-          printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET" | sha256sum --check --strict
+          if [ "$TARGET" != aarch64-apple-darwin ]; then
+            printf '%s  %s\n' "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET" | sha256sum --check --strict
+          else
+            # macOS ships a BSD sha256sum without --strict; python3 hashes the same bytes.
+            python3 -c 'import hashlib, sys; raise SystemExit("gitleaks checksum mismatch" if hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest() != sys.argv[1] else None)' \
+              "$SHA256" "$RUNNER_TEMP/gitleaks/$ASSET"
+          fi
           tar -xzf "$RUNNER_TEMP/gitleaks/$ASSET" -C "$RUNNER_TEMP/gitleaks" gitleaks
           test "$("$RUNNER_TEMP/gitleaks/gitleaks" version)" = '8.30.1'
           # Explicit defaults prevent source-local config, ignore files or comments from hiding findings.
@@ -127,20 +143,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: 1.98.0
-          components: rustfmt, clippy
+          components: ${{ matrix.rust-components }}
       - name: Existing checks using synthetic and loopback fixtures
         run: |
           set -euo pipefail
           # This override applies only to fixture builds, never the exact-source release stager.
-          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
-          cargo +1.98.0 fmt --all --check
-          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
-          cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
+          if [ "${{ matrix.workspace-checks }}" = "true" ]; then
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
+            cargo +1.98.0 fmt --all --check
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
+          else
+            # macOS builds the portable grill-perf slice only, as in the CI macos-performance job.
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build -p grill-perf --locked
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked -- --test-threads=1
+            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy -p grill-perf --locked --all-targets -- -D warnings
+          fi
       - name: Stage exact clean source
         run: |
           set -euo pipefail
           python3 tools/stage-release.py --source "$SOURCE" --target "$TARGET" --out "$RUNNER_TEMP/staged"
-      - name: Verify installed archive in native clean runtime
+      - name: Verify installed archive on the native runtime
         run: |
           set -euo pipefail
           STEM="grill-perf-$VERSION-$TARGET"
@@ -157,6 +180,7 @@ jobs:
           import hashlib
           import json
           import os
+          import re
           import runpy
           import shutil
           import subprocess
@@ -181,13 +205,27 @@ jobs:
                   'cargo_lock_sha256', 'toolchain', 'build', 'runtime', 'archive', 'checksum', 'binary',
                   'payload', 'files_sha256', 'publication_blockers', 'redistribution_notices', 'packaging'},
                   'Unexpected build receipt fields')
+          darwin = os.environ['TARGET'] == 'aarch64-apple-darwin'
+          runtime_fields = ({'os', 'version', 'architecture', 'isolation',
+                             'rust_available', 'source_checkout_available'} if darwin else
+                            {'image', 'architecture', 'glibc', 'rust_available',
+                             'source_checkout_available', 'ca_bundle_source', 'ca_bundle_sha256'})
           require(set(summary) == {'schema_version', 'status', 'release_version', 'source_commit', 'target',
                   'archive_sha256', 'binary_sha256', 'runtime', 'checks', 'scenarios', 'claim'}
-                  and set(summary['runtime']) == {'image', 'architecture', 'glibc',
-                  'rust_available', 'source_checkout_available', 'ca_bundle_source', 'ca_bundle_sha256'}
+                  and set(summary['runtime']) == runtime_fields
                   and all(set(scenario) == {'id', 'baseline_result', 'control_result',
                   'candidate_result', 'request_count'} for scenario in summary['scenarios']),
                   'Only the public smoke summary schema may be uploaded')
+          if darwin:
+              # The macOS summary must state exactly the offline checks it performed; the
+              # container-isolated fixture scope exists only on the Linux Docker path.
+              require(set(summary['checks']) == {'checksum_before_execution', 'corrupt_download_rejected',
+                      'payload_hashes', 'macho_architecture', 'native_host_guard', 'version',
+                      'help', 'bundle_verify', 'bundle_inspect'}
+                      and summary['runtime']['os'] == 'macOS'
+                      and summary['runtime']['architecture'] == 'arm64'
+                      and summary['runtime']['isolation'] == 'none; macOS hosted runners provide no Docker',
+                      'The macOS smoke summary must state exactly its native offline checks')
           require(summary['status'] == 'passed' and receipt['publication_blockers'] == [],
                   'Qualification or redistribution gate is unresolved')
           for key, expected in [('source_commit', os.environ['SOURCE']),
@@ -224,8 +262,14 @@ jobs:
               shutil.copyfile(staged / name, scan / name)
           # Binary files can be skipped by text scanners; scan their printable strings too.
           with (scan / 'binary-strings.txt').open('wb') as printable:
-              subprocess.run(['strings', '--all', '--bytes=8', str(scan / stem / 'bin/grill-perf')],
-                             stdout=printable, check=True)
+              if darwin:
+                  # macOS ships BSD strings without GNU long options; extract the same
+                  # printable runs here instead of depending on a brew-installed variant.
+                  for extracted in re.findall(rb'[ -~]{8,}', (scan / stem / 'bin/grill-perf').read_bytes()):
+                      printable.write(extracted + b'\n')
+              else:
+                  subprocess.run(['strings', '--all', '--bytes=8', str(scan / stem / 'bin/grill-perf')],
+                                 stdout=printable, check=True)
           PY
           "$RUNNER_TEMP/gitleaks/gitleaks" dir "$RUNNER_TEMP/release-output-scan" \
             --config "$RUNNER_TEMP/gitleaks/config.toml" \

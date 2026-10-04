@@ -79,6 +79,10 @@ jobs:
         with:
           name: staged-aarch64-unknown-linux-gnu
           path: staged/aarch64-unknown-linux-gnu
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: staged-aarch64-apple-darwin
+          path: staged/aarch64-apple-darwin
       - name: Verify identities and publish without replacement
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,7 +129,8 @@ jobs:
 
           def validate_assets():
               assets = []
-              for target in ('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu'):
+              for target in ('x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
+                             'aarch64-apple-darwin'):
                   stem = f'grill-perf-{version}-{target}'
                   directory = Path('staged') / target
                   names = [f'{stem}{suffix}' for suffix in ('.tar.gz', '.tar.gz.sha256', '.receipt.json', '.smoke.json')]
@@ -147,13 +152,29 @@ jobs:
                           and smoke['target'] == target and smoke['archive_sha256'] == archive_hash
                           and smoke['binary_sha256'] == receipt['binary']['sha256'], 'Installed smoke identity mismatch')
                   runtime = smoke['runtime']
-                  require(runtime['image'] == 'ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254'
-                          and runtime['architecture'] == target.split('-')[0] and runtime['glibc'] == 'glibc 2.39'
-                          and runtime['rust_available'] is False and runtime['source_checkout_available'] is False
-                          and runtime.get('ca_bundle_source') == 'read-only native system trust store'
-                          and isinstance(runtime.get('ca_bundle_sha256'), str)
-                          and re.fullmatch(r'[0-9a-f]{64}', runtime['ca_bundle_sha256']),
-                          'Installed smoke runtime mismatch')
+                  darwin = target == 'aarch64-apple-darwin'
+                  expected_fields = ({'os', 'version', 'architecture', 'isolation',
+                                      'rust_available', 'source_checkout_available'} if darwin else
+                                     {'image', 'architecture', 'glibc', 'rust_available',
+                                      'source_checkout_available', 'ca_bundle_source', 'ca_bundle_sha256'})
+                  require(set(runtime) == expected_fields, 'Installed smoke runtime fields mismatch')
+                  if darwin:
+                      # The macOS smoke runs on the hosted runner itself: no container image,
+                      # glibc baseline or mounted CA bundle applies to it.
+                      require(runtime['os'] == 'macOS' and runtime['architecture'] == 'arm64'
+                              and re.fullmatch(r'[0-9]+(\.[0-9]+)+', runtime['version'])
+                              and runtime['isolation'] == 'none; macOS hosted runners provide no Docker'
+                              and isinstance(runtime['rust_available'], bool)
+                              and isinstance(runtime['source_checkout_available'], bool),
+                              'Installed smoke runtime mismatch')
+                  else:
+                      require(runtime['image'] == 'ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254'
+                              and runtime['architecture'] == target.split('-')[0] and runtime['glibc'] == 'glibc 2.39'
+                              and runtime['rust_available'] is False and runtime['source_checkout_available'] is False
+                              and runtime.get('ca_bundle_source') == 'read-only native system trust store'
+                              and isinstance(runtime.get('ca_bundle_sha256'), str)
+                              and re.fullmatch(r'[0-9a-f]{64}', runtime['ca_bundle_sha256']),
+                              'Installed smoke runtime mismatch')
                   assets.extend(directory / name for name in names)
               return assets
 
