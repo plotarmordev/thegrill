@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import runpy
 import shutil
 import subprocess
@@ -16,12 +17,14 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 IMAGE = "ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
-TARGETS = {"x86_64-unknown-linux-gnu": "x86_64", "aarch64-unknown-linux-gnu": "aarch64"}
 TOKEN = "installed-cpu-fixture-token"
 # The staging allowlist is the single payload contract; loading it does not build.
 STAGED = runpy.run_path(str(Path(__file__).with_name("stage-release.py")))
 PAYLOAD = set(STAGED["PAYLOAD"]) | {"bin/grill-perf"}
 EXECUTABLES = STAGED["EXECUTABLES"]
+# The stager owns the supported target set and its native machine names.
+TARGETS = STAGED["TARGETS"]
+DARWIN = STAGED["DARWIN"]
 
 
 def require(condition, message):
@@ -185,6 +188,26 @@ class Installed:
         return json.loads((self.evidence / name / "report.json").read_text())
 
 
+class NativeInstalled:
+    """Direct execution on the staging host; macOS hosted runners provide no Docker."""
+
+    def __init__(self, root, evidence):
+        self.root, self.evidence = root, evidence
+        self.index = 0
+        # Runner session variables and credentials never reach the installed binary.
+        self.env = {key: os.environ[key] for key in ("HOME", "PATH", "TMPDIR") if key in os.environ}
+        self.env.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
+
+    def run(self, arguments):
+        result = subprocess.run([str(self.root / "bin/grill-perf")] + arguments,
+                                capture_output=True, text=True, timeout=150,
+                                cwd=self.evidence, env=self.env)
+        self.index += 1
+        (self.evidence / f"command-{self.index:02}.stdout").write_text(result.stdout)
+        (self.evidence / f"command-{self.index:02}.stderr").write_text(result.stderr)
+        return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
@@ -194,7 +217,8 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--out", type=Path, required=True)
     options = parser.parse_args()
-    require(platform.system() == "Linux" and platform.machine() == TARGETS[options.target],
+    require(platform.system() == ("Darwin" if options.target == DARWIN else "Linux")
+            and platform.machine() == TARGETS[options.target],
             "native target mismatch: no emulation/cross-execution qualification")
     root_name = f"grill-perf-{options.version}-{options.target}"
     require(options.archive.name == root_name + ".tar.gz", "archive version/target filename mismatch")
@@ -212,10 +236,16 @@ def main():
     binary_hash = digest(root / "bin/grill-perf")
     require(binary_hash == receipt["binary"]["sha256"], "installed binary hash mismatch")
     with (root / "bin/grill-perf").open("rb") as binary:
-        elf = binary.read(20)
-    expected_machine = 62 if options.target == "x86_64-unknown-linux-gnu" else 183
-    require(elf[:6] == b"\x7fELF\x02\x01" and int.from_bytes(elf[18:20], "little") == expected_machine,
-            "binary ELF architecture differs from the declared native target")
+        header = binary.read(20)
+    if options.target == DARWIN:
+        require(header[:4] == b"\xcf\xfa\xed\xfe"
+                and int.from_bytes(header[4:8], "little") == 0x0100000C,
+                "binary Mach-O architecture differs from the declared native target")
+    else:
+        expected_machine = 62 if options.target == "x86_64-unknown-linux-gnu" else 183
+        require(header[:6] == b"\x7fELF\x02\x01"
+                and int.from_bytes(header[18:20], "little") == expected_machine,
+                "binary ELF architecture differs from the declared native target")
     corrupted = options.out / options.archive.name
     shutil.copyfile(options.archive, corrupted)
     with corrupted.open("r+b") as changed:
@@ -229,6 +259,42 @@ def main():
     else:
         raise RuntimeError("corrupted download was not rejected before execution")
     corrupted.unlink()
+    if options.target == DARWIN:
+        # macOS hosted runners have no Docker: the installed archive is exercised directly
+        # on the staging host with the platform-independent checks only. Every check below
+        # the container path (clean runtime, fixture scenarios, offline replay) depends on
+        # Linux container features and is deliberately not claimed here.
+        product = subprocess.check_output(["sw_vers", "-productVersion"], text=True).strip()
+        require(re.fullmatch(r"[0-9]+(\.[0-9]+)+", product), "unexpected macOS product version")
+        installed = NativeInstalled(root, evidence)
+        checks = ["checksum_before_execution", "corrupt_download_rejected", "payload_hashes",
+                  "macho_architecture", "native_host_guard"]
+        version_result = installed.run(["--version"])
+        require(version_result.returncode == 0 and version_result.stdout.strip()
+                == f"grill-perf {options.version} (source {receipt['source_commit']})",
+                "installed binary version mismatch")
+        require(installed.run(["--help"]).returncode == 0, "installed help failed")
+        require(installed.run(["bundle", "verify", str(root / "workloads/recipes-v1.json"),
+                               "--json"]).returncode == 0,
+                "installed historical bundle verification failed")
+        require(installed.run(["bundle", "inspect", str(root / "workloads/concurrency-v1.json")]).returncode == 0,
+                "installed workload inspection failed")
+        checks += ["version", "help", "bundle_verify", "bundle_inspect"]
+        summary = {"schema_version": 1, "status": "passed", "release_version": options.version,
+                   "source_commit": receipt["source_commit"], "target": options.target,
+                   "archive_sha256": archive_hash, "binary_sha256": binary_hash,
+                   "runtime": {"os": "macOS", "version": product,
+                               "architecture": TARGETS[options.target],
+                               "isolation": "none; macOS hosted runners provide no Docker",
+                               "rust_available": shutil.which("cargo") is not None,
+                               "source_checkout_available":
+                                   (Path(__file__).resolve().parents[1] / "Cargo.toml").is_file()},
+                   "checks": checks, "scenarios": [],
+                   "claim": "native installed offline verification without container isolation; "
+                            "not a clean-runtime or backend qualification"}
+        (options.out / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(summary, sort_keys=True))
+        return
     docker_context = os.environ.get("DOCKER_CONTEXT")
     docker_host = os.environ.get("DOCKER_HOST")
     if docker_context or docker_host is None:

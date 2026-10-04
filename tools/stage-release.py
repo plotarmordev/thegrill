@@ -17,9 +17,14 @@ import tomllib
 
 
 TOOLCHAIN = "1.98.0"
+DARWIN = "aarch64-apple-darwin"
+# rustc 1.98's aarch64-apple-darwin object floor is macOS 11.0 (LC_BUILD_VERSION
+# minos); pin it so runner SDK default drift cannot move the binary's minimum macOS.
+DEPLOYMENT_TARGET = "11.0"
 TARGETS = {
     "x86_64-unknown-linux-gnu": "x86_64",
     "aarch64-unknown-linux-gnu": "aarch64",
+    DARWIN: "arm64",
 }
 WORKLOADS = (
     "baseline-v1.json",
@@ -170,7 +175,8 @@ def build_environment(root):
                             "PKG_CONFIG", "LD_"))
                 or key in {"CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "CPPFLAGS",
                            "LDFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH",
-                           "CPLUS_INCLUDE_PATH", "MAKEFLAGS", "SOURCE_DATE_EPOCH"}):
+                           "CPLUS_INCLUDE_PATH", "MAKEFLAGS", "SOURCE_DATE_EPOCH",
+                           "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR"}):
             overrides.append(key)
     require(not overrides, "unsupported build override variables: " + ", ".join(sorted(overrides)))
     cargo_home = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")).resolve()
@@ -199,13 +205,30 @@ def main():
             "staging script must belong to the source repository root")
     clean_source(root, args.source)
     env = build_environment(root)
-    require(platform.system() == "Linux" and platform.machine() == TARGETS[args.target],
-            "target must match this native Linux host; cross-builds and emulation are not qualification")
-    release = platform.freedesktop_os_release()
-    require(release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04",
-            "build host must be Ubuntu 24.04")
-    libc = run(["getconf", "GNU_LIBC_VERSION"], root, env)
-    require(libc == "glibc 2.39", "build host must use the glibc 2.39 baseline")
+    darwin = args.target == DARWIN
+    require(platform.system() == ("Darwin" if darwin else "Linux")
+            and platform.machine() == TARGETS[args.target],
+            "target must match this native host; cross-builds and emulation are not qualification")
+    if darwin:
+        runtime = {"os": "macOS", "version": run(["sw_vers", "-productVersion"], root, env),
+                   "architecture": platform.machine(), "native_build": True,
+                   "macos_deployment_target": DEPLOYMENT_TARGET,
+                   "installed_smoke": "required separately; not attested by this receipt"}
+        # Apple ld has no stable standalone version flag; cc already records the toolchain.
+        native_tools = {name: run([name, "--version"], root, env).splitlines()[0]
+                        for name in ("cc", "c++", "cmake")}
+    else:
+        release = platform.freedesktop_os_release()
+        require(release.get("ID") == "ubuntu" and release.get("VERSION_ID") == "24.04",
+                "build host must be Ubuntu 24.04")
+        libc = run(["getconf", "GNU_LIBC_VERSION"], root, env)
+        require(libc == "glibc 2.39", "build host must use the glibc 2.39 baseline")
+        runtime = {"os": "Ubuntu", "version": "24.04", "libc": libc,
+                   "architecture": platform.machine(), "native_build": True,
+                   "system_ca_store_required": True,
+                   "installed_smoke": "required separately; not attested by this receipt"}
+        native_tools = {name: run([name, "--version"], root, env).splitlines()[0]
+                        for name in ("cc", "c++", "ld", "cmake")}
     rustc = run(["rustc", f"+{TOOLCHAIN}", "-vV"], root, env)
     cargo = run(["cargo", f"+{TOOLCHAIN}", "--version"], root, env)
     require(f"release: {TOOLCHAIN}" in rustc.splitlines(), "unexpected Rust compiler release")
@@ -269,6 +292,8 @@ def main():
                 "a required allowlisted release input is missing or not an ordinary file")
         source_hashes = {name: digest(path) for name, path in files.items()}
         env.update(CARGO_TARGET_DIR=str(work / "target"), GRILL_PERF_SOURCE_COMMIT=args.source)
+        if darwin:
+            env.update(MACOSX_DEPLOYMENT_TARGET=DEPLOYMENT_TARGET)
         subprocess.run(command, cwd=source, env=env, check=True)
         binary = work / "target" / args.target / "release" / "grill-perf"
         require(run([str(binary), "--version"], work, env) == f"grill-perf {version} (source {args.source})",
@@ -305,10 +330,7 @@ def main():
                           "executable_sha256": tool_hashes, "native_tools": native_tools},
             "build": {"command": command, "profile": "release", "incremental": False,
                       "fresh_target_directory": True, "build_overrides": False},
-            "runtime": {"os": "Ubuntu", "version": "24.04", "libc": libc,
-                        "architecture": platform.machine(), "native_build": True,
-                        "system_ca_store_required": True,
-                        "installed_smoke": "required separately; not attested by this receipt"},
+            "runtime": runtime,
             "archive": {"file": archive.name, "sha256": archive_hash, "bytes": archive.stat().st_size},
             "checksum": {"file": checksum.name, "sha256": digest(checksum)},
             "binary": payload["bin/grill-perf"], "payload": payload,

@@ -22,7 +22,8 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/publish-rele
 SOURCE = "a" * 40
 VERSION = "0.7.0"
 REPOSITORY = "fixture/publication-boundaries"
-TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
+DARWIN = "aarch64-apple-darwin"
+TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", DARWIN)
 IMAGE = "ubuntu@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
 
 
@@ -204,12 +205,18 @@ class ReleaseBoundaries(unittest.TestCase):
                        "archive": {"file": archive.name, "sha256": archive_hash},
                        "checksum": {"sha256": hashlib.sha256(checksum.read_bytes()).hexdigest()},
                        "binary": {"sha256": binary_hash}, "publication_blockers": []}
+            if target == DARWIN:
+                runtime = {"os": "macOS", "version": "15.4", "architecture": "arm64",
+                           "isolation": "none; macOS hosted runners provide no Docker",
+                           "rust_available": True, "source_checkout_available": True}
+            else:
+                runtime = {"image": IMAGE, "architecture": target.split("-")[0], "glibc": "glibc 2.39",
+                           "rust_available": False, "source_checkout_available": False,
+                           "ca_bundle_source": "read-only native system trust store",
+                           "ca_bundle_sha256": "c" * 64}
             smoke = {"schema_version": 1, "status": "passed", "release_version": VERSION,
                      "source_commit": SOURCE, "target": target, "archive_sha256": archive_hash,
-                     "binary_sha256": binary_hash,
-                     "runtime": {"image": IMAGE, "architecture": target.split("-")[0], "glibc": "glibc 2.39",
-                                 "rust_available": False, "source_checkout_available": False,
-                                 "ca_bundle_source": "read-only native system trust store", "ca_bundle_sha256": "c" * 64}}
+                     "binary_sha256": binary_hash, "runtime": runtime}
             receipt_path, smoke_path = directory / f"{stem}.receipt.json", directory / f"{stem}.smoke.json"
             receipt_path.write_text(json.dumps(receipt))
             smoke_path.write_text(json.dumps(smoke))
@@ -290,20 +297,25 @@ class ReleaseBoundaries(unittest.TestCase):
                 path.write_bytes(original)
 
     def test_stale_or_mismatched_receipt_and_smoke_refuse_before_api(self):
-        mutations = {
-            "receipt": (("schema", "unknown"), ("release_version", "0.8.0"), ("source_commit", "b" * 40),
-                        ("target", "wrong-target"), ("archive.sha256", "0" * 64), ("archive.file", "wrong.tar.gz"),
-                        ("checksum.sha256", "0" * 64), ("binary.sha256", "0" * 64),
-                        ("publication_blockers", ["unreviewed payload"])),
-            "smoke": (("schema_version", 99), ("status", "failed"), ("release_version", "0.8.0"),
-                      ("source_commit", "b" * 40), ("target", "wrong-target"), ("archive_sha256", "0" * 64),
-                      ("binary_sha256", "0" * 64), ("runtime.image", "ubuntu:latest"),
-                      ("runtime.architecture", "wrong-architecture"), ("runtime.glibc", "glibc 2.40"),
-                      ("runtime.rust_available", True), ("runtime.source_checkout_available", True),
-                      ("runtime.ca_bundle_source", "unknown"), ("runtime.ca_bundle_sha256", "invalid")),
-        }
+        receipt_cases = (("schema", "unknown"), ("release_version", "0.8.0"), ("source_commit", "b" * 40),
+                         ("target", "wrong-target"), ("archive.sha256", "0" * 64),
+                         ("archive.file", "wrong.tar.gz"), ("checksum.sha256", "0" * 64),
+                         ("binary.sha256", "0" * 64), ("publication_blockers", ["unreviewed payload"]))
+        identity_cases = (("schema_version", 99), ("status", "failed"), ("release_version", "0.8.0"),
+                          ("source_commit", "b" * 40), ("target", "wrong-target"),
+                          ("archive_sha256", "0" * 64), ("binary_sha256", "0" * 64))
+        # Runtime fields are family-specific: an unexpected field or a wrong native claim refuses.
+        darwin_cases = (("runtime.os", "Ubuntu"), ("runtime.version", "fifteen"),
+                        ("runtime.architecture", "x86_64"), ("runtime.isolation", "container"),
+                        ("runtime.rust_available", "maybe"), ("runtime.source_checkout_available", 0),
+                        ("runtime.image", "ubuntu:latest"), ("runtime.glibc", "glibc 2.40"))
+        linux_cases = (("runtime.image", "ubuntu:latest"), ("runtime.architecture", "wrong-architecture"),
+                       ("runtime.glibc", "glibc 2.40"), ("runtime.rust_available", True),
+                       ("runtime.source_checkout_available", True), ("runtime.ca_bundle_source", "unknown"),
+                       ("runtime.ca_bundle_sha256", "invalid"))
         for target in TARGETS:
-            for kind, cases in mutations.items():
+            smoke_cases = identity_cases + (darwin_cases if target == DARWIN else linux_cases)
+            for kind, cases in (("receipt", receipt_cases), ("smoke", smoke_cases)):
                 path = self.paths[target][kind]
                 original = path.read_text()
                 for field, value in cases:
@@ -318,6 +330,22 @@ class ReleaseBoundaries(unittest.TestCase):
                         self.assert_stops_before_publication()
                         self.assertEqual(self.api.calls, [])
                     path.write_text(original)
+
+    def test_cross_platform_runtime_claims_are_refused_before_api(self):
+        # A Linux-runtime summary may not claim the darwin target, nor the reverse.
+        runtimes = {target: json.loads(self.paths[target]["smoke"].read_text())["runtime"]
+                    for target in TARGETS}
+        for target in TARGETS:
+            path = self.paths[target]["smoke"]
+            original = path.read_text()
+            donor = runtimes[DARWIN] if target != DARWIN else runtimes[TARGETS[0]]
+            with self.subTest(target=target):
+                document = json.loads(original)
+                document["runtime"] = donor
+                path.write_text(json.dumps(document))
+                self.assert_stops_before_publication()
+                self.assertEqual(self.api.calls, [])
+            path.write_text(original)
 
     def test_extra_missing_and_symlinked_artifacts_refuse_before_api(self):
         directory = self.paths[TARGETS[1]]["archive"].parent
