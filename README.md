@@ -50,6 +50,7 @@ export GRILL_PERF="$PWD/target/release/grill-perf"
 next to it:
 
 ```sh
+mkdir -p results
 jq -n --arg m "your/model@revision" --arg r "engine and version" \
   --arg h "device" --arg s "serving flags" \
   '{model_revision:$m, runtime:$r, hardware:$h, settings:$s}' > serving.json
