@@ -132,6 +132,35 @@ jq -n \
   > serving-before.json
 ```
 
+### Remote loopback servers through SSH
+
+If an authorized remote server only listens on loopback, a separately managed SSH
+forward can keep that listener private. In one terminal on the collector host,
+keep the forward in the foreground (replace the SSH destination and remote port):
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 127.0.0.1:18081:127.0.0.1:8000 user@model-host
+```
+
+In the capture terminal, use
+`--endpoint http://127.0.0.1:18081/v1/chat/completions --local-http`
+and **`--client-placement network`**, not `same-host`. The loopback URL names the
+local end of a network tunnel, not the serving host. Latency and throughput still
+include the network/SSH path and both hosts' scheduling effects; do not treat
+them as same-host observations. Supply the serving deployment declaration and,
+if required, `--auth-env NAME` as described above; SSH authentication does not
+replace the model server's authentication.
+
+Keep the tunnel endpoint and its remote destination unchanged for baseline and
+`check --change none`. Check inherits the saved endpoint, so reopening a forward
+later must use the same local port and the same verified remote deployment. If
+that port is occupied, fail rather than attach the capture to an unknown listener
+or edit saved evidence. A later control also includes elapsed-time drift; an
+unchanged declaration is not proof that serving state stayed unchanged. Stop the
+owned foreground SSH process with Ctrl-C after capture. The Grill does not create
+or manage the tunnel.
+
 <a id="baseline-optional-control-change-check"></a>
 
 ## Baseline → optional control → change → check
