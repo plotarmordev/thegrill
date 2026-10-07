@@ -762,10 +762,10 @@ their separately authorized evidence and independent review.
 
 ## Build and use
 
-Portable serving collection supports Linux and Apple Silicon macOS source builds
-with Rust/Cargo 1.98 and the native build tools required by rustls/AWS-LC.
-Published archives, the Linux `/proc`/cgroup/NVML resource sources and the
-external-program collector remain Linux-only. On macOS, `baseline`, `check`,
+Portable serving collection runs on Linux and Apple Silicon macOS: release
+archives exist for both from v0.6.0, and source builds need Rust/Cargo 1.98 and
+the native build tools required by rustls/AWS-LC. The Linux `/proc`/cgroup/NVML
+resource sources and the external-program collector remain Linux-only. On macOS, `baseline`, `check`,
 ordinary `run`/lifecycle, offline comparison, and bundle inspection are
 supported; resource capture and attachments observe only the
 [macOS resource sources](RESOURCES.md#macos-sources), and Linux sources fail closed.

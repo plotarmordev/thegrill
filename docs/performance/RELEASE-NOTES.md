@@ -1,21 +1,35 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.6.0 — Apple Silicon release archive and Apache License 2.0
 
 - The project is now licensed under the Apache License 2.0 instead of MIT.
   Published releases up to and including v0.5.0 remain under MIT.
-- Prepare an unsigned Apple Silicon macOS release target, `aarch64-apple-darwin`,
-  alongside the two Linux targets: the release pipeline now stages on a hosted
-  `macos-15` arm64 runner with Rust 1.98.0, pins `MACOSX_DEPLOYMENT_TARGET=11.0`
-  (the toolchain's own floor; installed smoke ran on macOS 15 only), and runs an
-  installed smoke without Docker there — checksum-before-unpack, corrupt-download
+- Publish an unsigned Apple Silicon macOS archive, `aarch64-apple-darwin`,
+  alongside the two Linux targets. It is staged on a hosted `macos-15` arm64
+  runner with Rust 1.98.0 and pins `MACOSX_DEPLOYMENT_TARGET=11.0` (the
+  toolchain's own floor; the installed smoke ran on macOS 15 only). The macOS
+  installed smoke runs without Docker — checksum-before-unpack, corrupt-download
   rejection, payload hashes, Mach-O identity, `--version`, `--help` and bundled
-  bundle verification — recording exactly those checks. The redistribution
-  notices add the darwin trust-store crates (`core-foundation`,
+  bundle verification — and records exactly those checks; it is weaker than the
+  container-isolated Linux smoke. The binary is not notarized: a browser download
+  needs `xattr -d com.apple.quarantine` (see [release procedure](../RELEASES.md)).
+  The redistribution notices add the darwin trust-store crates (`core-foundation`,
   `core-foundation-sys`, `security-framework`, `security-framework-sys`). Linux
-  staging, payloads and the container-isolated Linux smoke are unchanged; the
-  macOS archive itself is not published yet, so build from source until the next
-  release. See [release procedure](../RELEASES.md).
+  staging, payloads and the Linux smoke are unchanged.
+- Document capture through a separately managed SSH forward to a remote
+  loopback-only server: `--client-placement network` despite the loopback URL,
+  and the same tunnel endpoint for an unchanged control (#107, contributed).
+- Test fixture servers ignore foreign local connections, which made one test
+  fail intermittently on a shared host (#104). No runtime behaviour changed.
+
+Verification and limits of this version:
+
+- Hosted CI covers the Linux x86_64 and aarch64 build, format, tests, clippy,
+  release staging and installed-archive smoke, and the macOS 15 arm64
+  `grill-perf` build, tests, clippy, release staging and installed smoke.
+- The macOS archive's `grill-perf` has not been run against a live server as a
+  release artifact; source builds of the same code ran live on an Apple M5 Ultra
+  for the deployment comparisons in the README.
 
 ## Version 0.5.0 — current sparkDash decode prompts and varied-text prefill
 
