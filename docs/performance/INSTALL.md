@@ -6,13 +6,13 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.5.0** experimental release,
-which adds sparkDash 1.8.7 decode prompts and a varied-text prefill workload on top
-of v0.4.0's cross-platform deployment comparison and portable workloads. Use its
-exact version/target, checksum and build receipt; never substitute a moving branch
-or local staging hashes. Retain earlier published releases and their original pins
-for historical studies. Installing v0.5.0 does not reinterpret old receipts or
-qualify new backend claims.
+The download commands below select the published **v0.6.0** experimental release,
+the first with an Apple Silicon macOS archive next to the two Linux archives; its
+measurement behaviour is unchanged from v0.5.0. Use its exact version/target,
+checksum and build receipt; never substitute a moving branch or local staging
+hashes. Retain earlier published releases and their original pins for historical
+studies. Installing v0.6.0 does not reinterpret old receipts or qualify new
+backend claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -29,8 +29,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.5.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0),
-from reviewed source `b00e6cff01650f54e1b76f56bb886af34d0cf640`.
+The published prerelease is [**v0.6.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0),
+from reviewed source `8ab41f34808825566c46c2d5cd52197a565a29ee`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -47,8 +47,7 @@ Installed use needs no Rust or checkout. On Linux a readable system CA store
 (Ubuntu `ca-certificates`) is required for client initialization, including
 loopback HTTP; do not disable TLS checks.
 On macOS the client reads the native system trust store (Security.framework);
-no file bundle is configured. The shell examples use `curl`, `sha256sum`, `tar`, and `jq`
-(`shasum -a 256 --check` reads the same sidecar on macOS).
+no file bundle is configured. The shell examples use `curl`, `sha256sum`, `tar`, and `jq`.
 An `Exec format error` means the archive/CPU choice is wrong: obtain the native
 target rather than treating emulation as qualification. A missing `GLIBC_*`
 version means the runtime is below the supported baseline: use a qualified OS
@@ -62,13 +61,13 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.5.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.5.0
+VERSION=0.6.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.6.0
 ```
 
 ```sh
 : "${VERSION:?exact published or reviewed version}"
-: "${TARGET:?native Linux target triple}"
+: "${TARGET:?native target triple}"
 : "${ARTIFACT_BASE_URL:?actual trusted HTTPS artifact directory}"
 STEM="grill-perf-${VERSION}-${TARGET}"
 curl --fail --location --proto '=https' --proto-redir '=https' \
@@ -80,7 +79,8 @@ curl --fail --location --proto '=https' --proto-redir '=https' \
 ```
 
 For files supplied locally, set `VERSION`, `TARGET` and `STEM` the same way and
-skip downloading. **Verify before unpacking or executing**, and stop on failure:
+skip downloading. **Verify before unpacking or executing**, and stop on failure.
+On macOS, replace `sha256sum --check --strict` with `shasum -a 256 --check`:
 
 ```sh
 test ! -e "$STEM" &&

@@ -19,34 +19,25 @@ Both tools run on your machine and connect to a server you already run. No proje
 
 | Platform | How to install | What works |
 |---|---|---|
-| Linux x86_64 and aarch64 (Ubuntu 24.04) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0), no Rust needed | Everything in `grill-perf` (opt-in Python producers need their own runtime) |
-| Apple Silicon macOS | Release archive from the next release (unsigned; no notarization); source build until then (below) | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
+| Linux x86_64 and aarch64 (Ubuntu 24.04) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0), no Rust needed | Everything in `grill-perf` (opt-in Python producers need their own runtime) |
+| Apple Silicon macOS (11+) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0), no Rust needed; unsigned, not notarized | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
 
 `grill-perf` talks to any OpenAI-compatible Chat Completions server that reports
 streaming token usage. It has been run against vLLM, TensorFold (on NVIDIA and on
 Apple Silicon) and oMLX. It never starts, configures or restarts your server.
 
-The latest pre-release is [v0.5.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.5.0).
+The latest pre-release is [v0.6.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0).
 Earlier releases stay available; an older binary does not contain newer features.
 
 ## Quick start
 
-**Linux:** download and verify the release archive as described in
+Download and verify the release archive for your platform as described in
 [Install and first capture](docs/performance/INSTALL.md#obtain-verify-unpack), then
-set `GRILL_PERF` to its `bin/grill-perf`.
+set `GRILL_PERF` to its `bin/grill-perf`. On a Mac, download with `curl` as shown
+there; a file saved by a browser is blocked by Gatekeeper until you run
+`xattr -d com.apple.quarantine` on it.
 
-**macOS:** build from a clean clone so the binary records its source commit
-(needs Rust/Cargo 1.98, C/C++ tools and CMake):
-
-```sh
-git clone https://github.com/plotarmordev/thegrill.git && cd thegrill
-git checkout v0.5.0
-cargo build --release --locked -p grill-perf
-export GRILL_PERF="$PWD/target/release/grill-perf"
-"$GRILL_PERF" --version   # grill-perf 0.5.0 (source b00e6cff...)
-```
-
-**Then, on either platform,** describe your server once and capture a baseline
+**Then** describe your server once and capture a baseline
 next to it:
 
 ```sh
