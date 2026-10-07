@@ -1,8 +1,8 @@
 {
-  "cargo_lock_sha256": "1b0b960ad4fc4523d69b8ab092550a517ea751bd0fe93a5826a9989ccb4782f8",
+  "cargo_lock_sha256": "c46ecc171b31fd6229d26527f2df581c62d15914a3f392b5654d83ce784d11e2",
   "manifest_sha256": {
-    "Cargo.toml": "68c75dbd7265102677a6c523b91169b691b82c6b678527d267e06998d53b5c1d",
-    "crates/grill-perf/Cargo.toml": "25ec37eef01b2eee9968647c7eb00ea831dafcae1337f635dfe3ce3e3796e5c5",
+    "Cargo.toml": "146d751a29f95ab67cae81333e4d2160a78c703aa8790f02484d140c0d993db1",
+    "crates/grill-perf/Cargo.toml": "48057bfe65496d1841724833a82c24d44cfb0ec66f70d5f65bf8c0406a2624b0",
     "crates/grill-sse/Cargo.toml": "5f6d34630cd32f54aae216f1b5996886e4865343a3d1421e4053ba9c21ccabb1"
   },
   "notice_sha256": {

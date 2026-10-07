@@ -39,10 +39,10 @@ records the published download location without changing those released bytes.
 Choose `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` to match `uname -m`.
 The supported baseline is native Ubuntu 24.04 / glibc 2.39; older libc and other
 runtimes are not qualified by that statement. On Apple Silicon macOS, choose
-`aarch64-apple-darwin`: the staged binaries pin `MACOSX_DEPLOYMENT_TARGET=11.0`
-(the Rust toolchain's own floor for this target), while the installed smoke ran
-on the hosted macOS 15 staging runner only. A macOS archive ships from the next
-release; until one is published, use the [source fallback](#upgrade-rollback-and-source-fallback).
+`aarch64-apple-darwin` (published from v0.6.0): the binary pins
+`MACOSX_DEPLOYMENT_TARGET=11.0` (the Rust toolchain's own floor for this target),
+while the installed smoke ran on the hosted macOS 15 staging runner only. For
+earlier versions on a Mac, use the [source fallback](#upgrade-rollback-and-source-fallback).
 Installed use needs no Rust or checkout. On Linux a readable system CA store
 (Ubuntu `ca-certificates`) is required for client initialization, including
 loopback HTTP; do not disable TLS checks.
@@ -230,9 +230,9 @@ runtime, model build and settings together; see the
 
 Both collectors must be built from the same clean git commit, so
 `"$GRILL_PERF" --version` prints the same `(source <commit>)` on each host;
-`unrecorded` is refused. The macOS release archive ships from the next release;
-until then, build the Mac collector from a `git clone` checked out at that
-commit, as in [source fallback](#upgrade-rollback-and-source-fallback). Use the same
+`unrecorded` is refused. Release archives from v0.6.0 record their source commit
+for both Linux and Apple Silicon; a source build must come from a `git clone`
+checked out at that commit, as in [source fallback](#upgrade-rollback-and-source-fallback). Use the same
 `--client-placement` on both sides and at least 60 seconds between captures.
 
 ```sh
@@ -314,8 +314,8 @@ export GRILL_PERF="$SOURCE/target/release/grill-perf" &&
 
 It prints `grill-perf <version> (source <commit>)` only when the build inputs
 in the git checkout match that commit, and otherwise `(source unrecorded)`.
-The macOS release archive ships from the next release; until then build from a
-git clone at a clean commit to record the source; a build from a source tarball
+On macOS, release archives exist from v0.6.0; for a source build, use a git
+clone at a clean commit to record the source; a build from a source tarball
 reports `unrecorded`.
 Source builds of the portable serving workflow need Linux or Apple Silicon
 macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, Linux
