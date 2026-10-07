@@ -318,9 +318,9 @@ On macOS, release archives exist from v0.6.0; for a source build, use a git
 clone at a clean commit to record the source; a build from a source tarball
 reports `unrecorded`.
 Source builds of the portable serving workflow need Linux or Apple Silicon
-macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Published archives, Linux
-`/proc`/cgroup/NVML resource sources and external-program microbench capture
-remain Linux-only; macOS uses [its own resource sources](RESOURCES.md#macos-sources).
+macOS, Rust/Cargo 1.98.0, C/C++ tools and CMake. Linux `/proc`/cgroup/NVML
+resource sources and external-program microbench capture remain Linux-only;
+macOS uses [its own resource sources](RESOURCES.md#macos-sources).
 Use explicit selection paths under `$SOURCE/crates/grill-perf/examples/` instead
 of packaged `workloads/`. Record build flags and actual hashes; a local build is not
 proof of native installed-artifact verification or live backend qualification.
