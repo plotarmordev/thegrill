@@ -906,7 +906,7 @@ async fn exchange(
     let mut response = match client.execute(request).await {
         Ok(response) => response,
         Err(error) => {
-            *failure = Some((Status::TransportError, transport_detail(&error)));
+            *failure = Some((Status::TransportError, wire::error_kind(&error).into()));
             return;
         }
     };
@@ -926,7 +926,7 @@ async fn exchange(
     loop {
         match response.chunk().await {
             Err(error) => {
-                *failure = Some((Status::TransportError, transport_detail(&error)));
+                *failure = Some((Status::TransportError, wire::error_kind(&error).into()));
                 return;
             }
             Ok(None) => return,
@@ -944,22 +944,6 @@ async fn exchange(
             }
         }
     }
-}
-
-fn transport_detail(error: &reqwest::Error) -> String {
-    if error.is_connect() {
-        "connection failed".into()
-    } else if error.is_timeout() {
-        "transport timeout".into()
-    } else if error.is_body() {
-        "body transfer failed".into()
-    } else {
-        "transport request failed".into()
-    }
-}
-
-fn offset_us(origin: Instant) -> u64 {
-    origin.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 async fn dispatch_burst(burst: &Burst<'_>, origin: Instant) -> Result<Vec<Option<Raw>>> {
@@ -994,7 +978,7 @@ async fn dispatch_burst(burst: &Burst<'_>, origin: Instant) -> Result<Vec<Option
                     let mut failure = None;
                     let mut body = Vec::new();
                     let start = Instant::now();
-                    let dispatch_offset_us = offset_us(origin);
+                    let dispatch_offset_us = wire::us(origin);
                     let outcome = tokio::time::timeout(
                         request_deadline,
                         exchange(client, request, cap, &mut http_status, &mut failure, &mut body),
@@ -1129,7 +1113,7 @@ fn assemble(
 
 async fn run_burst(burst: &Burst<'_>, origin: Instant, base_ordinal: u32) -> Result<BurstResult> {
     let raws = dispatch_burst(burst, origin).await?;
-    let makespan_us = offset_us(origin);
+    let makespan_us = wire::us(origin);
     assemble(burst, raws, base_ordinal, makespan_us)
 }
 

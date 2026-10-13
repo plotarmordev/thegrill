@@ -7,6 +7,12 @@ quality, or claim capacity. It measures **per-request latency** and **per-burst
 request/decision rates** only; a response that reports generated tokens is a
 retained failure, never a throughput measurement.
 
+The request body carries no `model` selector, `images` are sent as declared
+`data:` URLs, and `usage.output_tokens` must be exactly zero. A server that needs
+a model name in the body, accepts only bare base64 images, or counts internal
+scoring tokens as output (Ollama's `/v1/systemone` does all three) is outside
+this version.
+
 This subcommand is a **local unreleased extension**. The package version is
 reported as usual, but every receipt and inspection also records
 `support: local-unreleased-extension-not-released-v0.6-support` with the collector
@@ -59,7 +65,8 @@ object keyed by question ID with `type` (`noul`, `choice`, `score`),
 non-empty object whose values are strings or `null`; `score` needs 2–10 ordered
 strings; `noul` accepts two true/false descriptions or omits `criteria`.
 `images` holds up to 16 `data:` URLs of at most 4 MiB each. The rendered corpus is
-bounded to 256 MiB and any single encoded request to 2 MiB.
+bounded to 256 MiB and any single encoded request to 2 MiB; the plan file itself
+is read up to 4 MiB, which is the binding limit for embedded images in practice.
 
 A `cell` is `{id, requests, concurrency, warmup_bursts, measured_bursts}`: the
 named distinct requests dispatched together, how many may be in flight (1–64, no
@@ -95,8 +102,9 @@ Each answer must satisfy its declared type: a `noul` answer carries `noul`; a
 `choice` answer carries `choice` (one of the declared criteria) and
 `probabilities` over exactly the declared criteria keys; a `score` answer carries
 `score` inside the declared level range and `probabilities` over exactly the keys
-`"0"`–`"n-1"`. Every probability must be a finite number in `[0, 1]`, and a
-declared `type` echo must match.
+`"0"`–`"n-1"`. `choice` and `score` answers also carry `confidence`. Every
+probability and `confidence` must be a finite number in `[0, 1]` (a missing
+`confidence` is `invalid_probability:ID`), and a declared `type` echo must match.
 
 The attempt fails closed, recording one or more reason codes, on a malformed or
 unparseable body (`malformed_response`), a missing or invalid `usage`

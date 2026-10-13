@@ -213,6 +213,32 @@ fn rejects_probabilities_outside_the_unit_interval() {
 }
 
 #[test]
+fn choice_and_score_answers_require_confidence() {
+    let request = decl(vec![("label", choice()), ("level", score())]);
+    let (status, errors) = violation(
+        &request,
+        &body(serde_json::json!({
+            "answers": {
+                "label": {
+                    "type": "choice",
+                    "choice": "alpha",
+                    "probabilities": {"alpha": 0.9, "beta": 0.1},
+                },
+                "level": {
+                    "type": "score",
+                    "score": 1.0,
+                    "probabilities": {"0": 0.2, "1": 0.4, "2": 0.4},
+                },
+            },
+            "usage": {"output_tokens": 0},
+        })),
+    );
+    assert_eq!(status, Status::Unsupported);
+    assert!(errors.contains(&"invalid_probability:label".to_string()));
+    assert!(errors.contains(&"invalid_probability:level".to_string()));
+}
+
+#[test]
 fn rejects_distribution_and_choice_mismatches() {
     let request = decl(vec![("label", choice())]);
     let (_, errors) = violation(

@@ -265,7 +265,7 @@ pub fn request(
         .build()
         .map_err(|_| "request construction failed".into())
 }
-fn error_kind(error: &reqwest::Error) -> &'static str {
+pub(crate) fn error_kind(error: &reqwest::Error) -> &'static str {
     if error.is_connect() {
         "connection failed"
     } else if error.is_timeout() {
