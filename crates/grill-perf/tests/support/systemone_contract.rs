@@ -133,7 +133,11 @@ fn body_carries_null_state_and_data_url_images() {
 
 #[test]
 fn accepts_every_declared_question_type() {
-    let request = decl(vec![("asked", noul()), ("label", choice()), ("level", score())]);
+    let request = decl(vec![
+        ("asked", noul()),
+        ("label", choice()),
+        ("level", score()),
+    ]);
     let answers = validate_response(
         &request,
         &body(serde_json::json!({

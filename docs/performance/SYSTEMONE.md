@@ -146,8 +146,10 @@ failed captures), distinct capture evidence, an unchanged reference arm sharing
 one clock, endpoint and deployment between `a` and `a2`, and a candidate arm whose
 endpoint or deployment differs from the reference. A repeated slot, a capture
 from another plan, or a reused directory is rejected before any gate arithmetic.
-A change in the reported `input_tokens` for one declared state between
-acquisitions is drift, and yields `INCONCLUSIVE` rather than a comparison.
+A change in the reported `input_tokens` for one declared state between acquisitions adds an
+`INCONCLUSIVE` reason. A regression or error still dominates under the outcome precedence above;
+individual gate results do not remove this qualification. Different shared-prefix accounting
+conventions can trigger it even for identical request bytes; retained usage is never rewritten.
 
 Each gate pools the candidate arm's measured samples and compares them against
 the observed reference envelope of `a` joined with `a2` using the declared
