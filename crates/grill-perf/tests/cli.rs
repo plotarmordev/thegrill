@@ -4007,3 +4007,5 @@ mod output_tests;
 #[cfg(target_os = "linux")]
 #[path = "support/serving_resources.rs"]
 mod serving_resource_tests;
+#[path = "support/systemone.rs"]
+mod systemone_tests;
