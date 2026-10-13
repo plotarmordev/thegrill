@@ -409,7 +409,13 @@ fn compare_reports_a_declared_change_under_the_observed_envelope() {
         immediate(request)
     });
     let fast = DecisionServer::new(immediate);
-    let plan = fixtures(&temp, "compare", &plan_json());
+    // Hosted macOS runners oversleep the 40 ms fixture delay by up to ~150 ms, so a
+    // tight reference-spread bound tests the host timer, not the comparison.
+    let mut wide = plan_json();
+    for gate in wide["gates"].as_array_mut().unwrap() {
+        gate["max_reference_spread_bps"] = json!(1000000);
+    }
+    let plan = fixtures(&temp, "compare", &wide);
     successful(&capture_server(&temp, &slow, &plan, 0, "a"));
     successful(&capture(&temp, &fast.endpoint, &plan, 1, "b"));
     successful(&capture_server(&temp, &slow, &plan, 2, "a2"));
