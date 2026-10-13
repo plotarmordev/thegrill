@@ -1421,6 +1421,17 @@ The source-pinned backend eviction hook is distinct from provider-reported misse
 or preemptions. No automatic stress search, reset, retry or operator recovery exists;
 largest successful tested cell is not safe universal capacity or live qualification.
 
+## System One decision captures
+
+[`systemone capture/inspect/compare`](SYSTEMONE.md) adds a separate version-1
+domain path for servers that answer declared questions over a state in one
+forward pass and report zero generated tokens. It retains per-request latency and
+per-burst request/decision rates, replays retained request and response bytes
+offline, and compares A/B/A2 under declared observed-envelope bounds. It never
+derives generated-token throughput: a response reporting generated tokens is a
+retained failure. The subcommand is a local unreleased extension; every receipt
+names it as such, and a released v0.6.0 artifact does not contain it.
+
 ## Deployment declarations and privacy
 
 `--deployment FILE` optionally records a closed JSON object with nullable

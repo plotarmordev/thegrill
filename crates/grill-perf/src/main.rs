@@ -19,6 +19,7 @@ mod sequence;
 mod serving_resources;
 mod startup;
 mod study;
+mod systemone;
 mod wire;
 
 use clap::{Parser, Subcommand};
@@ -41,6 +42,11 @@ enum Command {
     Capacity {
         #[command(subcommand)]
         command: capacity::Command,
+    },
+    /// Capture, replay and compare the System One decision protocol (local unreleased extension).
+    Systemone {
+        #[command(subcommand)]
+        command: systemone::Command,
     },
     /// Explicit bounded host resource observation and offline domain evidence.
     Resource {
@@ -144,6 +150,7 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
+        Command::Systemone { command } => systemone::execute(command),
         Command::Resource { command } => resources::execute(command),
         Command::Startup { command } => startup::execute(command),
         Command::Capacity { command } => capacity::execute(command),
