@@ -4,156 +4,103 @@
 
 # The Grill
 
-**Measure how fast a serving setup runs an LLM, then compare setups.**
+**Did your change make your LLM server faster? The Grill measures it and tells you.**
 
-A serving setup is the engine plus its settings, such as vLLM with a quantized model at a given context length. Run the same test on each setup, then compare the saved results.
+Run a short test against the model server you already have. Change something:
+the engine, a flag, the model build, the machine. Run it again and get a plain answer:
+**measured faster**, **measured slower**, or **inconclusive**. Everything runs and stays
+on your machine.
 
-| I want to... | Use | What you get |
-|---|---|---|
-| Check whether a serving setup is faster | [Speed benchmarks](#speed-benchmarks)<br>`grill-perf` ![Ready to try](https://img.shields.io/badge/ready_to_try-0969da?style=flat-square) | Time per request group, combined tokens per second, comparison of saved runs |
-| Check whether a model answers tasks correctly | [Quality evaluation](#quality-evaluation-wip)<br>`grill` ![Work in progress](https://img.shields.io/badge/work_in_progress-a16207?style=flat-square) | Graded answers, with wrong, refused, cut-off, and missing results kept separate |
+It works with any OpenAI-compatible server that reports token usage while streaming,
+and has been used with vLLM, TensorFold and oMLX on Linux and Apple Silicon Macs.
+**It is early, experimental software.**
 
-Both tools run on your machine and connect to a server you already run. No project account or results upload is required. **This is experimental software.**
+## Try it
 
-## Works on
-
-| Platform | How to install | What works |
-|---|---|---|
-| Linux x86_64 and aarch64 (Ubuntu 24.04) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0), no Rust needed | Everything in `grill-perf` (opt-in Python producers need their own runtime) |
-| Apple Silicon macOS (11+) | [Release archive](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0), no Rust needed; unsigned, not notarized | Serving speed and deployment comparison; macOS memory observation. Linux resource and external-program collectors are not available |
-
-`grill-perf` talks to any OpenAI-compatible Chat Completions server that reports
-streaming token usage. It has been run against vLLM, TensorFold (on NVIDIA and on
-Apple Silicon) and oMLX. It never starts, configures or restarts your server.
-
-The latest pre-release is [v0.6.0](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0).
-Earlier releases stay available; an older binary does not contain newer features.
-
-## Quick start
-
-Download and verify the release archive for your platform as described in
-[Install and first capture](docs/performance/INSTALL.md#obtain-verify-unpack), then
-set `GRILL_PERF` to its `bin/grill-perf`. On a Mac, download with `curl` as shown
-there; a file saved by a browser is blocked by Gatekeeper until you run
-`xattr -d com.apple.quarantine` on it.
-
-**Then** describe your server once and capture a baseline
-next to it:
+Download the [latest release](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0)
+for your machine (no Rust needed):
 
 ```sh
-mkdir -p results
-jq -n --arg m "your/model@revision" --arg r "engine and version" \
-  --arg h "device" --arg s "serving flags" \
-  '{model_revision:$m, runtime:$r, hardware:$h, settings:$s}' > serving.json
-"$GRILL_PERF" baseline --workload portable-v1 --client-placement same-host \
+NAME=grill-perf-0.6.0-aarch64-unknown-linux-gnu  # or ...-x86_64-unknown-linux-gnu, ...-aarch64-apple-darwin
+URL=https://github.com/plotarmordev/thegrill/releases/download/v0.6.0
+curl -fL -O "$URL/$NAME.tar.gz" -O "$URL/$NAME.tar.gz.sha256"
+sha256sum -c "$NAME.tar.gz.sha256" && tar -xzf "$NAME.tar.gz"  # on a Mac: shasum -a 256 -c
+GRILL="$PWD/$NAME/bin/grill-perf"
+```
+
+Describe your setup in a few words, then measure it:
+
+```sh
+echo '{"model_revision":"my-model","runtime":"vLLM 0.11","hardware":"1x H100","settings":"defaults"}' > serving.json
+"$GRILL" baseline --workload portable-v1 --client-placement same-host \
   --endpoint http://127.0.0.1:8000/v1/chat/completions --local-http \
-  --model your-model --deployment serving.json --out results/before
+  --model my-model --deployment serving.json --out before
 ```
 
-Change your server yourself, then `check` and `compare` the saved runs. The full
-walk-through, including an unchanged control run, is in
-[Install and first capture](docs/performance/INSTALL.md#baseline-optional-control-change-check).
-
-## Example: the same model on a Mac and on a DGX Spark
-
-Qwen3.8-Flash-Next, the same 4-bit MLX checkpoint (`Vontra/...-MLX-4bit-MTP@dadefa80`),
-served by TensorFold 0.6.0 on each machine, measured with the same `grill-perf`
-source build, client on the serving host
-([A/B/A2 deployment comparison](docs/performance/INSTALL.md#compare-two-deployments-aba2)):
-
-| | DGX Spark (GB10) | Mac Studio (M5 Ultra) |
-|---|---|---|
-| `portable-v1`, one request at a time | 118 tok/s | 246 tok/s |
-| Verdict | | **MEASURED FASTER**, +108.7% (95% range +107.9% to +109.6%) |
-| Repeat of the Spark run (drift control) | -0.2% | |
-| sparkDash decode, 4 requests at once (descriptive) | 350 tok/s total | 354 tok/s total |
-| sparkDash prefill, 4K-32K (descriptive) | 2,340-2,450 tok/s | 2,870-2,960 tok/s |
-
-This compares whole deployments, not chips: the Mac's TensorFold build rejected
-two settings the Spark used (int8 KV cache and an MTP confidence threshold), and
-the counting prompt favours speculative decoding. Verdicts cover the built-in
-single-request workload; selected workloads such as the sparkDash copies are
-descriptive side-by-side results (the Mac's sparkDash runs completed 3 of 8 rounds).
-
-## Speed benchmarks
-
-Use **`grill-perf`** against a server you already run. `check` reuses the
-baseline's endpoint, model, workload and credential-variable name. Deployment
-details are what you declare, not something the tool verifies.
-
-**Workloads.** The default is a short structured single-request (C1) check;
-`portable-v1` is the same idea for servers that do not support exact-length
-controls, such as MLX servers. Selected workloads, all descriptive, include:
-
-- `sparkdash-decode-portable-v2` and `sparkdash-prefill-portable-v1`: the
-  [sparkDash](https://github.com/MiaAI-Lab/sparkDash) tests, matching sparkDash 1.8.7;
-- `prefill-prose-portable-v1`: the same prefill sizes with varied text instead of
-  one repeated word;
-- realistic coding and edit prompts, a C1-C8 concurrency ladder, long-context
-  decode and prefill, and conversation history checks.
-
-See the [selection list](docs/performance/INSTALL.md#optional-selections-and-failures)
-and [recipe embedding](docs/performance/RECIPES.md). Contributors making
-performance claims start from the [shared claim map](docs/performance/SHARED-RECIPES.md)
-and [report template](docs/performance/SHARED-REPORT-TEMPLATE.md).
-
-**Results.**
-
-| Display label | JSON `result` code | Meaning |
-|---|---|---|
-| **MEASURED FASTER** | `IMPROVED` | Higher measured throughput between these capture periods |
-| **MEASURED SLOWER** | `REGRESSED` | Lower measured throughput between these periods |
-| **COMPLETE - DESCRIPTIVE ONLY** | `DESCRIPTIVE` | A selected comparison completed; no faster/slower verdict |
-| **INCONCLUSIVE** | `INCONCLUSIVE` | No direction established, or not enough evidence; not the same as "equal" |
-| **VERDICT PENDING** | `PENDING` | A deployment candidate is captured; the verdict needs the unchanged reference run |
-| **INVALID** | `INVALID` | Response, identity or evidence checks failed; the report says why |
-
-A direction is not a cause: sequential runs cannot separate your change from time,
-load or cache effects, and there is no guaranteed precision. Runs have a fixed
-time and request budget with no automatic retries; reports and raw evidence stay
-on your machine, and `compare` re-checks saved runs without network calls.
-
-[Full performance guide and measurement limits](docs/performance/README.md).
-
-## Quality evaluation (WIP)
-
-Use **`grill`** to collect model answers and check them against task rules.
-
-**This part is a work in progress.** The included questions are synthetic examples, not a validated intelligence test. It currently supports text answers, not agents or code execution.
-
-Build this separate source-only CLI on Linux with Rust/Cargo 1.98, a C/C++
-toolchain and CMake; it is not shipped in the performance archive:
+Change your server yourself, update `settings` in `serving.json`, and measure again:
 
 ```sh
-git clone https://github.com/plotarmordev/thegrill.git
-cd thegrill
+"$GRILL" check before --change settings --deployment serving.json --out after
+```
+
+Each run takes a few minutes at most and prints the answer. Raw results stay in
+`before/` and `after/`. They contain your prompts and responses, so review them
+before sharing.
+
+| Answer | Meaning |
+|---|---|
+| **MEASURED FASTER** / **MEASURED SLOWER** | A clear difference between the two runs |
+| **INCONCLUSIVE** | Too close to call, or not enough evidence. Not the same as "equal" |
+| **INVALID** | Something in the run or the evidence failed a check; the report says what |
+
+A difference between two runs doesn't prove your change caused it: time, load and
+caches can move results too. An unchanged control run helps show how much.
+[Install and first capture](docs/performance/INSTALL.md) walks through control runs,
+remote servers and API keys.
+
+## Example: the same model on a DGX Spark and a Mac Studio
+
+The same 4-bit Qwen3.8-Flash-Next checkpoint, served by TensorFold 0.6.0 on each machine:
+
+| One request at a time | DGX Spark (GB10) | Mac Studio (M5 Ultra) |
+|---|---|---|
+| Output speed | 118 tok/s | 246 tok/s |
+| Answer | | **MEASURED FASTER**, +108.7% |
+| Repeat of the Spark run | -0.2% (stable) | |
+
+This compares two whole setups, not two chips: the Mac build couldn't use two of the
+Spark's settings, and the test's counting prompt suits speculative decoding.
+[How to compare two machines](docs/performance/INSTALL.md#compare-two-deployments-aba2).
+
+## More tests
+
+Besides the quick test above, `grill-perf` includes the
+[sparkDash](https://github.com/MiaAI-Lab/sparkDash) decode and prefill tests,
+long prompts, coding prompts, multi-request tests and conversation history checks.
+See the [list of tests](docs/performance/INSTALL.md#optional-selections-and-failures)
+and the [full speed guide](docs/performance/README.md).
+
+## Quality evaluation (work in progress)
+
+A second tool, `grill`, checks model answers against task rules. It is not ready
+yet: the included questions are synthetic examples, not a validated intelligence test.
+
+<details>
+<summary>Try it anyway (Linux, built from source)</summary>
+
+Needs Rust/Cargo 1.98, a C/C++ toolchain and CMake.
+
+```sh
+git clone https://github.com/plotarmordev/thegrill.git && cd thegrill
 cargo build -p grill --release --locked
-mkdir -p results
-```
-
-Start your server separately. Replace the endpoint and model selector below.
-For remote use, select HTTPS; local HTTP requires a literal loopback address.
-If authentication is required, supply the credential independently in your
-environment and add `--auth-env NAME` to `run`, never the key itself.
-
-```sh
 target/release/grill run examples/synthetic-pack.json \
   --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --token-cap 4096 --stream \
-  --out results/answers
-
-target/release/grill inspect results/answers --json
-target/release/grill regrade results/answers --out results/answers-regraded
+  --local-http --model your-model --token-cap 4096 --stream --out answers
+target/release/grill inspect answers --json
 ```
 
-Inspection and regrading use saved files. They do not call the model again. Wrong answers, refusals, cut-off responses, and missing results stay separate.
+[How quality evaluation works](docs/PROJECT.md)
 
-[Task formats and quality evaluation guide](docs/PROJECT.md)
+</details>
 
-## Keep your results safe
-
-Use a new output directory for each run. Results contain prompts and model responses, so review them before sharing.
-
-[Contributing](CONTRIBUTING.md) · [Code organization](docs/REPOSITORY.md) · [Security](SECURITY.md) · [Apache 2.0 license](LICENSE)
-
-Apache License 2.0 covers this project's code and documentation; releases up to v0.5.0 were published under MIT. Benchmark data and model weights keep their own licenses.
+[Contributing](CONTRIBUTING.md) · [Code organization](docs/REPOSITORY.md) · [Security](SECURITY.md) · [Apache 2.0 license](LICENSE) (releases up to v0.5.0 were MIT)
