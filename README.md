@@ -90,10 +90,11 @@ yet: the included questions are synthetic examples, not a validated intelligence
 
 ```text
 Build the quality tool `grill` from https://github.com/plotarmordev/thegrill from
-source, following its README and docs/PROJECT.md (Linux, Rust 1.98). Ask me for my
-server's chat completions URL and model name, run examples/synthetic-pack.json
-against it with streaming and a 4096-token cap, then inspect the results and explain
-which answers passed, failed, were refused or were cut off.
+source, following its README and docs/PROJECT.md (Linux, Rust 1.98, a C/C++
+toolchain and CMake). Ask me for my server's chat completions URL and model name,
+run examples/synthetic-pack.json against it with streaming and a 4096-token cap,
+then inspect the results and explain which answers passed, failed, were refused or
+were cut off. Don't touch my server, and don't share the results folder.
 ```
 
 [How quality evaluation works](docs/PROJECT.md)
