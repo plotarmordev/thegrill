@@ -8,44 +8,45 @@
 
 Run a short test against the model server you already have. Change something:
 the engine, a flag, the model build, the machine. Run it again and get a plain answer:
-**measured faster**, **measured slower**, or **inconclusive**. Everything runs and stays
-on your machine.
+**measured faster**, **measured slower**, or **inconclusive**.
 
-It works with any OpenAI-compatible server that reports token usage while streaming,
-and has been used with vLLM, TensorFold and oMLX on Linux and Apple Silicon Macs.
-**It is early, experimental software.**
+| I want to... | Use | What you get |
+|---|---|---|
+| Check whether a serving setup is faster | [Speed benchmarks](#speed-benchmarks)<br>`grill-perf` ![Ready to try](https://img.shields.io/badge/ready_to_try-0969da?style=flat-square) | A plain faster / slower / inconclusive answer, the measured change, and the saved evidence |
+| Check whether a model answers tasks correctly | [Quality evaluation](#quality-evaluation-wip)<br>`grill` ![Work in progress](https://img.shields.io/badge/work_in_progress-a16207?style=flat-square) | Graded answers, with wrong, refused, cut-off, and missing results kept separate |
 
-## Try it
+Both tools run on your machine and connect to a server you already run. No account,
+nothing uploaded. Works with any OpenAI-compatible server that reports token usage
+while streaming; used so far with vLLM, TensorFold and oMLX on Linux and Apple
+Silicon Macs. **This is early, experimental software.**
 
-Download the [latest release](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0)
-for your machine (no Rust needed):
+## Speed benchmarks
 
-```sh
-NAME=grill-perf-0.6.0-aarch64-unknown-linux-gnu  # or ...-x86_64-unknown-linux-gnu, ...-aarch64-apple-darwin
-URL=https://github.com/plotarmordev/thegrill/releases/download/v0.6.0
-curl -fL -O "$URL/$NAME.tar.gz" -O "$URL/$NAME.tar.gz.sha256"
-sha256sum -c "$NAME.tar.gz.sha256" && tar -xzf "$NAME.tar.gz"  # on a Mac: shasum -a 256 -c
-GRILL="$PWD/$NAME/bin/grill-perf"
+### Try it with your coding agent
+
+Paste this into Claude Code, Codex, Cursor or whichever agent you use, on the machine
+that runs your model server:
+
+```text
+Help me benchmark my LLM server with The Grill: https://github.com/plotarmordev/thegrill
+Read its README and docs/performance/INSTALL.md first, and follow them.
+
+1. Download the newest grill-perf release for this machine from
+   https://github.com/plotarmordev/thegrill/releases and verify its checksum.
+2. Ask me for my server's chat completions URL, the model name, the name of the
+   environment variable holding its API key (if it needs one), and my model
+   build, engine and version, hardware, and serving settings.
+3. Run a baseline with the portable-v1 workload.
+4. Stop and wait while I change my server. Ask me what I changed, record it, run
+   `check`, and tell me in plain words: measured faster, measured slower or
+   inconclusive, the measured change and tokens per second (from report.json),
+   and what it does and doesn't prove. (Exit code 2 is a normal answer, not a failure.)
+
+Don't start, stop or reconfigure my server yourself. Don't share or upload the
+results folders: they contain my prompts and responses.
 ```
 
-Describe your setup in a few words, then measure it:
-
-```sh
-echo '{"model_revision":"my-model","runtime":"vLLM 0.11","hardware":"1x H100","settings":"defaults"}' > serving.json
-"$GRILL" baseline --workload portable-v1 --client-placement same-host \
-  --endpoint http://127.0.0.1:8000/v1/chat/completions --local-http \
-  --model my-model --deployment serving.json --out before
-```
-
-Change your server yourself, update `settings` in `serving.json`, and measure again:
-
-```sh
-"$GRILL" check before --change settings --deployment serving.json --out after
-```
-
-Each run takes a few minutes at most and prints the answer. Raw results stay in
-`before/` and `after/`. They contain your prompts and responses, so review them
-before sharing.
+Each run takes a few minutes at most. The answers mean:
 
 | Answer | Meaning |
 |---|---|
@@ -54,11 +55,10 @@ before sharing.
 | **INVALID** | Something in the run or the evidence failed a check; the report says what |
 
 A difference between two runs doesn't prove your change caused it: time, load and
-caches can move results too. An unchanged control run helps show how much.
-[Install and first capture](docs/performance/INSTALL.md) walks through control runs,
-remote servers and API keys.
+caches can move results too. An unchanged control run shows how much. Prefer doing it
+by hand? [Install and first capture](docs/performance/INSTALL.md) has every step.
 
-## Example: the same model on a DGX Spark and a Mac Studio
+### Example: the same model on a DGX Spark and a Mac Studio
 
 The same 4-bit Qwen3.8-Flash-Next checkpoint, served by TensorFold 0.6.0 on each machine:
 
@@ -72,31 +72,28 @@ This compares two whole setups, not two chips: the Mac build couldn't use two of
 Spark's settings, and the test's counting prompt suits speculative decoding.
 [How to compare two machines](docs/performance/INSTALL.md#compare-two-deployments-aba2).
 
-## More tests
+### More tests
 
-Besides the quick test above, `grill-perf` includes the
+Besides the quick test, `grill-perf` includes the
 [sparkDash](https://github.com/MiaAI-Lab/sparkDash) decode and prefill tests,
 long prompts, coding prompts, multi-request tests and conversation history checks.
 See the [list of tests](docs/performance/INSTALL.md#optional-selections-and-failures)
 and the [full speed guide](docs/performance/README.md).
 
-## Quality evaluation (work in progress)
+## Quality evaluation (WIP)
 
 A second tool, `grill`, checks model answers against task rules. It is not ready
 yet: the included questions are synthetic examples, not a validated intelligence test.
 
 <details>
-<summary>Try it anyway (Linux, built from source)</summary>
+<summary>Try it anyway with your agent (Linux)</summary>
 
-Needs Rust/Cargo 1.98, a C/C++ toolchain and CMake.
-
-```sh
-git clone https://github.com/plotarmordev/thegrill.git && cd thegrill
-cargo build -p grill --release --locked
-target/release/grill run examples/synthetic-pack.json \
-  --endpoint http://127.0.0.1:8000/v1/chat/completions \
-  --local-http --model your-model --token-cap 4096 --stream --out answers
-target/release/grill inspect answers --json
+```text
+Build the quality tool `grill` from https://github.com/plotarmordev/thegrill from
+source, following its README and docs/PROJECT.md (Linux, Rust 1.98). Ask me for my
+server's chat completions URL and model name, run examples/synthetic-pack.json
+against it with streaming and a 4096-token cap, then inspect the results and explain
+which answers passed, failed, were refused or were cut off.
 ```
 
 [How quality evaluation works](docs/PROJECT.md)
