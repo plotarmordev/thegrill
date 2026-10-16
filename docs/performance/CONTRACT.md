@@ -585,9 +585,9 @@ binary fingerprint may differ and are recorded, not admitted on. Every other
 reports `PENDING` (exit 0); it has no verdict on its own.
 
 `compare A B --reference A2` gives the verdict for a deployment candidate or a
-built-in-workload single-field candidate (`model_revision`, `runtime`, `hardware`
-or `settings`), where A2 is an unchanged control (`check A --change none`) of A
-captured after B. By recorded timestamps, B must
+capture v3 built-in single-field candidate (`model_revision`, `runtime`,
+`hardware` or `settings`), where A2 is an unchanged control
+(`check A --change none`) of A captured after B. By recorded timestamps, B must
 start at least 60 s after A finished and A2 at least 60 s after B finished. With
 same-host placement on two client hosts this ordering relies on each client's
 clock. The unchanged C1 interval model is computed for A→B, A2→B and A→A2. The
@@ -596,18 +596,21 @@ same direction; otherwise it is `INCONCLUSIVE` with the reason "candidate is not
 directional against both baseline capture periods". A directional A→A2 adds the
 reason "baseline deployment shifted between capture periods" without gating the
 result. Without A2 a deployment pair is `INCONCLUSIVE` without an interval;
-single-field comparisons without a reference are unchanged. References for
-unchanged candidates or explicit selections remain `INVALID`.
+single-field comparisons without a reference keep their existing two-capture
+result. References for legacy captures, unchanged candidates or explicit
+selections remain `INVALID`.
 
-For deployment candidates the report kind is `performance-deployment-comparison-v1`;
-single-field candidates retain their existing report kind and scope.
-In both cases, top-level interval fields hold A→B; `deployment` holds each side's endpoint, model, declaration,
-collector identity, binary fingerprint, client placement and median reported
+For deployment candidates the report kind is
+`performance-deployment-comparison-v1`; single-field candidates retain their
+existing report kind and scope. In both cases, top-level interval fields hold
+A→B; `deployment` holds each side's endpoint, model, declaration, collector
+identity, binary fingerprint, client placement and median reported
 `usage.prompt_tokens` over measured requests, the reference path and identity,
 and the A2→B (`candidate_against_reference`) and A→A2
 (`reference_against_baseline`) intervals. Differing prompt-token medians add a
 reason, because the servers then do different prefill work. For deployment
-candidates the scope is a whole-deployment comparison of request throughput at C1 including prefill:
+candidates the scope is a whole-deployment comparison of request throughput at
+C1 including prefill:
 hardware, runtime, model build, settings, endpoint and placement are confounded,
 so no single factor such as a quantization format is attributed; only the
 baseline deployment has a drift control; and the synthetic count prompt lets

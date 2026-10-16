@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Allow unchanged-control references for single-field capture comparisons; see
+- Allow unchanged-control references for capture v3 single-field comparisons; see
   the [admission and report contract](CONTRACT.md#capture-v3-and-deployment-comparison).
 
 ## Version 0.6.0 — Apple Silicon release archive and Apache License 2.0

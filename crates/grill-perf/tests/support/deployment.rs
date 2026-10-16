@@ -453,6 +453,62 @@ fn single_field_reference_requires_ordered_unchanged_control() {
 }
 
 #[test]
+fn single_field_reference_rejects_legacy_capture_without_panicking() {
+    let temp = Temp::new();
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let before = deployment(&temp, "before.json", "before");
+    let after = deployment(&temp, "after.json", "after");
+    let output = command()
+        .args([
+            "baseline",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "fixture",
+        ])
+        .args([
+            "--workload",
+            "baseline-v1",
+            "--client-placement",
+            "same-host",
+        ])
+        .arg("--deployment")
+        .arg(&before)
+        .arg("--out")
+        .arg(temp.path("a"))
+        .args(["--local-http", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    as_v1(&temp.path("a"));
+    assert_ne!(
+        decoded(&check(&temp, "a", &after, "b"))["result"],
+        "INVALID"
+    );
+    assert_ne!(
+        decoded(&check_none(&temp, "a", &before, "a2"))["result"],
+        "INVALID"
+    );
+    schedule(&temp, STEADY.map(|us| us / 2), STEADY, [GAP_MS, GAP_MS]);
+    assert_eq!(
+        decoded(&compare_captures(&temp, "a", "b", None))["result"],
+        "IMPROVED"
+    );
+    let output = compare_captures(&temp, "a", "b", Some("a2"));
+    rejected(&output);
+    assert!(
+        decoded(&output)["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .unwrap()
+                .contains("capture reference requires a capture v3"))
+    );
+}
+
+#[test]
 fn deployment_verdict_needs_the_same_direction_against_both_baseline_periods() {
     let temp = Temp::new();
     triple(&temp);

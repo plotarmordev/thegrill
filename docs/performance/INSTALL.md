@@ -197,6 +197,11 @@ jq --arg settings "${CANDIDATE_SETTINGS_FINGERPRINT:?actual changed fingerprint}
 "$GRILL_PERF" compare results/before results/after --json
 ```
 
+For a capture v3 built-in single-field candidate, add `--reference results/a2`
+to `compare` after collecting a later unchanged control, with both the
+baseline-to-candidate and candidate-to-control gaps at least 60 s, following the
+[reference admission and verdict rules](CONTRACT.md#capture-v3-and-deployment-comparison).
+
 Use the corresponding `--change model_revision`, `runtime` or `hardware` for that
 single declared change. `check` inherits endpoint, model selector, loopback
 permission, workload/selection and credential-variable name from baseline.
@@ -204,7 +209,6 @@ Keep the same executable. A custom `--seconds` is **not inherited**: each captur
 has its own prospectively approved allowance (`1..3600`). Slower servers may need
 more time, but the tool never probes speed, expands budgets or retries until PASS.
 A budget stop is not automatically a broken server; retain the partial evidence.
-For a built-in-workload single-field candidate, add `--reference results/a2` to `compare` after collecting a later unchanged control, following the [reference admission and verdict rules](CONTRACT.md#capture-v3-and-deployment-comparison).
 
 | Display | JSON result / exit | Meaning |
 |---|---|---|

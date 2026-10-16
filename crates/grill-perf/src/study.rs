@@ -1451,7 +1451,7 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> R
         linked(&before, &after)?;
         if after.manifest.change == Some(Change::Deployment)
             || (reference.is_some()
-                && report.selected.is_none()
+                && after.manifest.workload.is_some()
                 && matches!(
                     after.manifest.change,
                     Some(
@@ -1466,8 +1466,7 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> R
         }
         if reference.is_some() {
             return Err(
-                "a capture reference requires a built-in single-field or deployment candidate"
-                    .into(),
+                "a capture reference requires a capture v3 built-in single-field or deployment candidate".into(),
             );
         }
         if !coverage(&mut report, &[&before, &after])? {
@@ -1660,11 +1659,11 @@ fn side(capture: &Verified) -> DeploymentSide {
         collector: manifest
             .collector
             .clone()
-            .expect("deployment pairs are admitted only as v3 captures"),
+            .expect("reference comparisons are admitted only as v3 captures"),
         collector_sha256: manifest.collector_sha256.clone(),
         client_placement: manifest
             .client_placement
-            .expect("deployment pairs are admitted only as v3 captures"),
+            .expect("reference comparisons are admitted only as v3 captures"),
         median_prompt_tokens: capture.median_prompt_tokens,
     }
 }
