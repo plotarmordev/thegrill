@@ -204,6 +204,7 @@ Keep the same executable. A custom `--seconds` is **not inherited**: each captur
 has its own prospectively approved allowance (`1..3600`). Slower servers may need
 more time, but the tool never probes speed, expands budgets or retries until PASS.
 A budget stop is not automatically a broken server; retain the partial evidence.
+For a built-in-workload single-field candidate, add `--reference results/a2` to `compare` after collecting a later unchanged control, following the [reference admission and verdict rules](CONTRACT.md#capture-v3-and-deployment-comparison).
 
 | Display | JSON result / exit | Meaning |
 |---|---|---|

@@ -1449,11 +1449,26 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> R
         }
         selected_report(&mut report, selected, before.manifest.workload);
         linked(&before, &after)?;
-        if after.manifest.change == Some(Change::Deployment) {
-            return deployment(&mut report, &before, &after, reference);
+        if after.manifest.change == Some(Change::Deployment)
+            || (reference.is_some()
+                && report.selected.is_none()
+                && matches!(
+                    after.manifest.change,
+                    Some(
+                        Change::ModelRevision
+                            | Change::Runtime
+                            | Change::Hardware
+                            | Change::Settings
+                    )
+                ))
+        {
+            return reference_comparison(&mut report, &before, &after, reference);
         }
         if reference.is_some() {
-            return Err("a capture reference applies only to a deployment candidate".into());
+            return Err(
+                "a capture reference requires a built-in single-field or deployment candidate"
+                    .into(),
+            );
         }
         if !coverage(&mut report, &[&before, &after])? {
             return Ok(());
@@ -1540,16 +1555,18 @@ fn coverage(report: &mut Report, captures: &[&Verified]) -> Result<bool> {
     Ok(true)
 }
 
-/// Whole-deployment comparison; its verdict needs the unchanged reference captured after the candidate.
-fn deployment(
+/// A reference-aware verdict needs the unchanged control captured after the candidate.
+fn reference_comparison(
     report: &mut Report,
     before: &Verified,
     after: &Verified,
     reference: Option<&Path>,
 ) -> Result<()> {
-    report.kind = "performance-deployment-comparison-v1";
-    report.scope = DEPLOYMENT_SCOPE;
-    report.model = None;
+    if after.manifest.change == Some(Change::Deployment) {
+        report.kind = "performance-deployment-comparison-v1";
+        report.scope = DEPLOYMENT_SCOPE;
+        report.model = None;
+    }
     let control = reference
         .map(|path| control(before, after, path))
         .transpose()?;
