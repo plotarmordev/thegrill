@@ -357,6 +357,157 @@ fn schedule(temp: &Temp, candidate: [u64; 8], control: [u64; 8], gaps: [u64; 2])
     retime(&temp.path("a2"), control, Some((&a, finish("b") + gaps[1])));
 }
 
+fn single_field_triple(temp: &Temp) {
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let before = deployment(temp, "before.json", "before");
+    let after = deployment(temp, "after.json", "after");
+    assert!(baseline(temp, &server, &before, "a").status.success());
+    assert_ne!(decoded(&check(temp, "a", &after, "b"))["result"], "INVALID");
+    assert_ne!(
+        decoded(&check_none(temp, "a", &before, "a2"))["result"],
+        "INVALID"
+    );
+}
+
+#[test]
+fn single_field_reference_improves_and_preserves_report_scope() {
+    let temp = Temp::new();
+    single_field_triple(&temp);
+    schedule(&temp, STEADY.map(|us| us / 2), STEADY, [GAP_MS, GAP_MS]);
+    let ordinary = compare_captures(&temp, "a", "b", None);
+    let output = compare_captures(&temp, "a", "b", Some("a2"));
+    let report = decoded(&output);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(report["result"], "IMPROVED", "{report}");
+    for field in ["kind", "scope", "result_scope", "model", "declared_change"] {
+        assert_eq!(report[field], decoded(&ordinary)[field], "{field}");
+    }
+    assert_eq!(report["declared_change"], "settings");
+    let detail = &report["deployment"];
+    assert_eq!(detail["reference_path"], json!(temp.path("a2")));
+    assert_eq!(
+        detail["reference_capture_sha256"],
+        file_hash(&temp.path("a2/capture.json"))
+    );
+    for field in ["candidate_against_reference", "reference_against_baseline"] {
+        assert!(detail[field]["model_based_interval_percent"].is_array());
+    }
+    assert_eq!(detail["candidate_against_reference"]["result"], "IMPROVED");
+    assert_eq!(
+        compare_captures(&temp, "a", "b", None).stdout,
+        ordinary.stdout
+    );
+}
+
+#[test]
+fn single_field_reference_disagreement_is_inconclusive() {
+    let temp = Temp::new();
+    single_field_triple(&temp);
+    schedule(
+        &temp,
+        STEADY.map(|us| us / 2),
+        STEADY.map(|us| us / 4),
+        [GAP_MS, GAP_MS],
+    );
+    let output = compare_captures(&temp, "a", "b", Some("a2"));
+    let report = decoded(&output);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(report["result"], "INCONCLUSIVE", "{report}");
+    assert_eq!(
+        report["deployment"]["candidate_against_reference"]["result"],
+        "REGRESSED"
+    );
+    let reasons = report["reasons"].as_array().unwrap();
+    assert!(reasons.contains(&json!(
+        "candidate is not directional against both baseline capture periods"
+    )));
+    assert!(reasons.contains(&json!(SHIFT)));
+}
+
+#[test]
+fn single_field_reference_requires_ordered_unchanged_control() {
+    let temp = Temp::new();
+    single_field_triple(&temp);
+    for gaps in [[GAP_MS, GAP_MS / 2], [GAP_MS / 2, GAP_MS]] {
+        schedule(&temp, STEADY.map(|us| us / 2), STEADY, gaps);
+        let output = compare_captures(&temp, "a", "b", Some("a2"));
+        rejected(&output);
+        assert!(
+            decoded(&output)["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason.as_str().unwrap().contains("captured in that order"))
+        );
+    }
+    schedule(&temp, STEADY.map(|us| us / 2), STEADY, [GAP_MS, GAP_MS]);
+    let output = compare_captures(&temp, "a", "b", Some("b"));
+    rejected(&output);
+    assert!(
+        decoded(&output)["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().contains("unchanged control"))
+    );
+}
+
+#[test]
+fn single_field_reference_rejects_legacy_capture_without_panicking() {
+    let temp = Temp::new();
+    let server = Server::new(|stream, _, _| response(stream, Some(400), false));
+    let before = deployment(&temp, "before.json", "before");
+    let after = deployment(&temp, "after.json", "after");
+    let output = command()
+        .args([
+            "baseline",
+            "--endpoint",
+            &server.endpoint,
+            "--model",
+            "fixture",
+        ])
+        .args([
+            "--workload",
+            "baseline-v1",
+            "--client-placement",
+            "same-host",
+        ])
+        .arg("--deployment")
+        .arg(&before)
+        .arg("--out")
+        .arg(temp.path("a"))
+        .args(["--local-http", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    as_v1(&temp.path("a"));
+    assert_ne!(
+        decoded(&check(&temp, "a", &after, "b"))["result"],
+        "INVALID"
+    );
+    assert_ne!(
+        decoded(&check_none(&temp, "a", &before, "a2"))["result"],
+        "INVALID"
+    );
+    schedule(&temp, STEADY.map(|us| us / 2), STEADY, [GAP_MS, GAP_MS]);
+    assert_eq!(
+        decoded(&compare_captures(&temp, "a", "b", None))["result"],
+        "IMPROVED"
+    );
+    let output = compare_captures(&temp, "a", "b", Some("a2"));
+    rejected(&output);
+    assert!(
+        decoded(&output)["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .unwrap()
+                .contains("capture reference requires a capture v3"))
+    );
+}
+
 #[test]
 fn deployment_verdict_needs_the_same_direction_against_both_baseline_periods() {
     let temp = Temp::new();

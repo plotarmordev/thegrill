@@ -76,6 +76,8 @@ Both collectors must be the same version built from the same recorded source
 commit; their binaries may differ. The [deployment comparison contract](CONTRACT.md#capture-v3-and-deployment-comparison)
 defines admission, the 60-second ordering, the verdict rule and what the
 whole-deployment scope does not support.
+`--reference` is also accepted for a capture v3 built-in single-field candidate;
+see the same contract for admission and report details.
 
 ### Output identity
 

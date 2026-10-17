@@ -1,5 +1,10 @@
 # Performance release notes
 
+## Unreleased
+
+- Allow unchanged-control references for capture v3 single-field comparisons; see
+  the [admission and report contract](CONTRACT.md#capture-v3-and-deployment-comparison).
+
 ## Version 0.6.0 — Apple Silicon release archive and Apache License 2.0
 
 - The project is now licensed under the Apache License 2.0 instead of MIT.

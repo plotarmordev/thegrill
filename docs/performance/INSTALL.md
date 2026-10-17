@@ -197,6 +197,11 @@ jq --arg settings "${CANDIDATE_SETTINGS_FINGERPRINT:?actual changed fingerprint}
 "$GRILL_PERF" compare results/before results/after --json
 ```
 
+For a capture v3 built-in single-field candidate, add `--reference results/a2`
+to `compare` after collecting a later unchanged control, with both the
+baseline-to-candidate and candidate-to-control gaps at least 60 s, following the
+[reference admission and verdict rules](CONTRACT.md#capture-v3-and-deployment-comparison).
+
 Use the corresponding `--change model_revision`, `runtime` or `hardware` for that
 single declared change. `check` inherits endpoint, model selector, loopback
 permission, workload/selection and credential-variable name from baseline.
