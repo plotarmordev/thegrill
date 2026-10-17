@@ -424,6 +424,10 @@ This matrix introduces no new workload variant. Any necessary change identified
 by a pilot requires an explicit new declaration and identity, not an edit to a
 frozen workload or a silently weakened protocol.
 
+The separate [concurrency built-ins](README.md#concurrency-built-ins) intentionally
+keep identical lanes and `cap-reached`; the prompt-variation, forced-output,
+timing-window and aggregation differences in this matrix still apply.
+
 ## Create and approve the policy before collection
 
 Choose the recipe and one workload first. A decode study and a prefill study are

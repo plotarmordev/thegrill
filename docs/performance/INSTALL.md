@@ -225,6 +225,39 @@ regression detection. `compare` replays offline without credentials/network and
 never rewrites saved evidence. Raw requests, responses and declarations stay
 private; share only a separately reviewed sanitized summary.
 
+### Concurrency claim
+
+The [concurrency built-ins](README.md#concurrency-built-ins) require a build
+containing the Unreleased changes; the published release above does not include
+them. Declare the level before collecting and choose each capture's allowance:
+
+| Workload | Requests / capture | Output tokens / capture | Minimum aggregate tok/s at 300 s | At 1200 s | At 3600 s |
+|---|---:|---:|---:|---:|---:|
+| `portable-c2-v1` | 64 | 25,600 | 85.3 | 21.3 | 7.1 |
+| `portable-c4-v1` | 128 | 51,200 | 170.7 | 42.7 | 14.2 |
+| `portable-c8-v1` | 256 | 102,400 | 341.3 | 85.3 | 28.4 |
+
+These floors divide the full output ceiling, including warmups, by the allowance;
+overhead requires extra headroom. **C8 at the 300 s default needs >341 aggregate
+tok/s**, not per-stream decode tok/s. Read the preflight minimum before traffic;
+set `--seconds` on every capture as described above. Exhaustion is INCONCLUSIVE,
+without replacement.
+
+```sh
+"$GRILL_PERF" baseline --workload portable-c8-v1 --seconds 1200 \
+  --endpoint "${ENDPOINT:?full resource URL}" --model "${MODEL:?explicit model selector}" \
+  --client-placement same-host --deployment serving-before.json --out results/c8-a
+```
+
+After the separately made settings change, collect the inherited workload with
+`check results/c8-a --change settings --deployment serving-after.json --seconds 1200
+--out results/c8-b`. Restore the baseline deployment and collect
+`check results/c8-a --change none --deployment serving-before.json --seconds 1200
+--out results/c8-a2`, observing the
+[ordering gaps](CONTRACT.md#capture-v3-and-deployment-comparison). Then run
+`compare results/c8-a results/c8-b --reference results/c8-a2`.
+Apply the [recipe acceptance rule](RECIPES.md#choose-explicit-packaged-workloads).
+
 ## Compare two deployments (A/B/A2)
 
 To compare whole deployments, for example the same model on an Apple Silicon

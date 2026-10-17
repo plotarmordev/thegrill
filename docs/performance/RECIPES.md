@@ -33,6 +33,18 @@ migration. Declarations are operator claims, not execution attestation.
 
 ## Choose explicit packaged workloads
 
+Recipe repositories can put this rule in their `CONTRIBUTING.md`:
+
+> Speed claims use The Grill, not a separate benchmark tool. Declare the claim's
+> concurrency before measuring. Single-request claims use `portable-v1`
+> (`baseline-v2` on vLLM). Concurrency claims use `portable-cN-v1` at the declared
+> level, with N chosen from the [available built-ins](README.md#concurrency-built-ins)
+> and an explicit [capture allowance](INSTALL.md#concurrency-claim). Accept a claim
+> only when `compare A B --reference A2` on that workload reports MEASURED FASTER.
+> Do not choose a level after seeing results. A ladder selection is descriptive
+> context, not a substitute verdict.
+
+
 Add `--selection "$SELECTION"` to the existing baseline command when a recipe
 needs descriptive selected scope. Choose the relevant path, not all alternatives:
 

@@ -352,6 +352,9 @@ fn copy_tree(source: &Path, target: &Path) {
 
 fn retime(root: &Path, elapsed: [u64; 8], baseline: Option<(&str, u64)>) {
     let mut capture = read_json(&root.join("capture.json"));
+    let lanes = read_json(&root.join("workload.json"))["cells"][0]["concurrency"]
+        .as_u64()
+        .unwrap();
     let mut started = capture["acquisitions"][0]["started_unix_ms"]
         .as_u64()
         .unwrap();
@@ -369,13 +372,17 @@ fn retime(root: &Path, elapsed: [u64; 8], baseline: Option<(&str, u64)>) {
             let mut receipt = read_json(&path);
             receipt["elapsed_us"] = json!(duration);
             receipt["dispatch_spread_us"] = json!(0);
-            receipt["achieved_completion_tokens_per_second"] =
-                json!(400.0 * 1_000_000.0 / duration as f64);
-            receipt["attempts"][0]["timing"] = json!({
-                "dispatch_offset_us":0,"headers_us":1,"first_body_us":2,
-                "first_generated_text_us":2,"first_generated_channel":"answer",
-                "first_answer_text_us":2,"last_generated_text_us":2,
-                "terminal_us":duration-1,"settle_us":duration,"capture_parse_us":0});
+            receipt["achieved_completion_tokens_per_second"] = json!(
+                400.0 * receipt["attempts"].as_array().unwrap().len() as f64 * 1_000_000.0
+                    / duration as f64
+            );
+            for attempt in receipt["attempts"].as_array_mut().unwrap() {
+                attempt["timing"] = json!({
+                    "dispatch_offset_us":0,"headers_us":1,"first_body_us":2,
+                    "first_generated_text_us":2,"first_generated_channel":"answer",
+                    "first_answer_text_us":2,"last_generated_text_us":2,
+                    "terminal_us":duration-1,"settle_us":duration,"capture_parse_us":0});
+            }
             write_json(&path, &receipt);
         }
         capture["acquisitions"][index]["plan_sha256"] = json!(seal_native(&acquisition));
@@ -385,7 +392,7 @@ fn retime(root: &Path, elapsed: [u64; 8], baseline: Option<(&str, u64)>) {
         started = finished + 1;
         capture["acquisitions"][index]["evidence_sha256"] = json!(native_hash(&acquisition));
         capture["acquisitions"][index]["median_achieved_completion_tokens_per_second"] =
-            json!(400.0 * 1_000_000.0 / duration as f64);
+            json!(400.0 * lanes as f64 * 1_000_000.0 / duration as f64);
     }
     write_json(&root.join("capture.json"), &capture);
 }

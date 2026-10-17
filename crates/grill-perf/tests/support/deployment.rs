@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "concurrency.rs"]
+mod concurrency;
+
 const SOURCE: &str = "0123456789abcdef0123456789abcdef01234567";
 const GAP_MS: u64 = 60_000;
 const STEADY: [u64; 8] = [

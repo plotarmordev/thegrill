@@ -566,12 +566,23 @@ New `baseline` captures are `performance-capture-v3`. Besides the v1/v2 fields
 they record `collector: {version, source_commit, target}` (the binary
 fingerprint stays in `collector_sha256`), the declared `client_placement`
 (`same-host` or `network`, from the required `baseline --client-placement`) and,
-without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`
-or `portable-v1`, from `baseline --workload`, default `baseline-v2`). The
+without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`,
+`portable-v1`, `portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1`, from
+`baseline --workload`, default `baseline-v2`). The
 loader verifies the retained workload bytes against that built-in and the
 collector version against every native plan; v1 captures hold `baseline-v1`.
 A `check` keeps its baseline's capture version, so v1 and v2 baselines check and
 compare as before. Older readers reject v3 captures and the `deployment` change.
+Readers predating the concurrency built-ins reject their unknown workload names.
+
+For built-ins above C1, report JSON adds `baseline_acquisition_cells` and
+`candidate_acquisition_cells`: one existing `CellSummary` per complete acquisition
+in order. Empty vectors are omitted. These contain descriptive per-stream decode,
+prefill and first-answer observations, not additional samples or verdict gates.
+Human reports show first-answer median and worst lane from those observations.
+The reference's own report holds its descriptive observations; `deployment`
+is unchanged. C1 report JSON and the `capture.json` schema remain unchanged.
+See [concurrency scope and limitations](README.md#concurrency-built-ins).
 
 `check A --change deployment` records a candidate B served by another
 deployment. `--endpoint`, `--model`, `--auth-env`, `--local-http` (with
@@ -590,7 +601,7 @@ capture v3 built-in single-field candidate (`model_revision`, `runtime`,
 (`check A --change none`) of A captured after B. By recorded timestamps, B must
 start at least 60 s after A finished and A2 at least 60 s after B finished. With
 same-host placement on two client hosts this ordering relies on each client's
-clock. The unchanged C1 interval model is computed for A→B, A2→B and A→A2. The
+clock. The unchanged acquisition-level interval model is computed for A→B, A2→B and A→A2. The
 result is `IMPROVED` or `REGRESSED` only when A→B and A2→B are directional in the
 same direction; otherwise it is `INCONCLUSIVE` with the reason "candidate is not
 directional against both baseline capture periods". A directional A→A2 adds the
@@ -612,7 +623,8 @@ and the A2→B (`candidate_against_reference`) and A→A2
 candidates, and is omitted for a single-field comparison without a reference.
 Differing prompt-token medians add a reason, because the servers then do
 different prefill work. For deployment candidates the scope is a
-whole-deployment comparison of request throughput at C1 including prefill:
+whole-deployment comparison of request throughput at C{n} including prefill,
+where n is the selected built-in's concurrency:
 hardware, runtime, model build, settings, endpoint and placement are confounded,
 so no single factor such as a quantization format is attributed; only the
 baseline deployment has a drift control; and the synthetic count prompt lets
