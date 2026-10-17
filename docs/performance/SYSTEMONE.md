@@ -13,11 +13,11 @@ a model name in the body, accepts only bare base64 images, or counts internal
 scoring tokens as output (Ollama's `/v1/systemone` does all three) is outside
 this version.
 
-This subcommand is a **local unreleased extension**. The package version is
-reported as usual, but every receipt and inspection also records
-`support: local-unreleased-extension-not-released-v0.6-support` with the collector
-version, source revision and executable digest. A released v0.6.0 artifact does
-not contain `systemone`.
+This subcommand is an **experimental extension**, first released in v0.7.0. The
+package version is reported as usual, and every receipt and inspection also
+records `support: experimental-extension-first-released-v0.7` with the collector
+version, source revision and executable digest. Releases up to v0.6.0 do not
+contain `systemone`.
 
 ## Commands
 

@@ -285,7 +285,7 @@ fn capture_records_latency_and_declared_decision_rates() {
     let report = stdout_json(&output);
     assert_eq!(
         report["support"],
-        json!("local-unreleased-extension-not-released-v0.6-support")
+        json!("experimental-extension-first-released-v0.7")
     );
     assert_eq!(
         report["collector"]["version"],

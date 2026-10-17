@@ -1,9 +1,36 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.7.0 — unchanged-control verdicts for single-field changes and System One captures
 
-- Allow unchanged-control references for capture v3 single-field comparisons; see
-  the [admission and report contract](CONTRACT.md#capture-v3-and-deployment-comparison).
+- `compare A B --reference A2` now also accepts a capture v3 built-in candidate
+  from `check A --change model_revision|runtime|hardware|settings`, with the
+  same three-way rule as deployment candidates: A2 is an unchanged control of A
+  captured after B, and `MEASURED FASTER`/`SLOWER` requires B to differ from both
+  A and A2 in the same direction. With one declared field changing and one
+  binary throughout already enforced, a recipe can require "same baseline, only
+  the change differs" as an admission rule. Comparisons without `--reference`,
+  deployment comparisons and legacy captures are unchanged; see the
+  [admission and report contract](CONTRACT.md#capture-v3-and-deployment-comparison).
+- Add the experimental [`systemone capture|inspect|compare`](SYSTEMONE.md)
+  path for servers that answer typed questions in one forward pass and report
+  zero generated tokens: per-request latency and per-burst request/decision
+  rates, exact retained bytes, offline verification and A/B/A2 comparison under
+  declared observed-envelope bounds. Receipts record
+  `support: experimental-extension-first-released-v0.7`. Servers that need a
+  model selector in the body, accept only bare base64 images or count internal
+  scoring tokens as output (such as Ollama's `/v1/systemone`) are outside this
+  version.
+
+Verification and limits of this version:
+
+- Hosted CI covers the Linux x86_64 and aarch64 build, format, tests, clippy,
+  release staging and installed-archive smoke, and the macOS 15 arm64
+  `grill-perf` build, tests, clippy, release staging and installed smoke.
+- The single-field reference path was smoke-tested end to end against a local
+  stand-in server (IMPROVED with A2 intervals; a two-field declaration
+  refused), not against a live model server as a release artifact.
+- `systemone` was used on local llama.cpp and TensorFold decision servers
+  before release; this release does not qualify any particular server.
 
 ## Version 0.6.0 — Apple Silicon release archive and Apache License 2.0
 

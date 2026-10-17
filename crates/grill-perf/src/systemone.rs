@@ -31,9 +31,9 @@ pub const PATH: &str = "/v1/systemone";
 pub const PLAN_KIND: &str = "systemone-plan-v1";
 pub const CAPTURE_KIND: &str = "systemone-capture-v1";
 pub const COMPARISON_KIND: &str = "systemone-comparison-v1";
-/// The package version is a released number, but this protocol path is not part
-/// of the released support; every receipt states that distinction.
-pub const SUPPORT: &str = "local-unreleased-extension-not-released-v0.6-support";
+/// Every receipt states that this protocol path is experimental and when it first
+/// shipped, independent of the package version that produced it.
+pub const SUPPORT: &str = "experimental-extension-first-released-v0.7";
 pub const CLAIM_CAPTURE: &str =
     "client-observed-system-one-decision-latency-and-burst-rates-not-attested-execution";
 pub const CLAIM_COMPARISON: &str =
