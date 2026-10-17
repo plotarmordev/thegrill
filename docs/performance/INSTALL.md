@@ -6,13 +6,13 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.6.0** experimental release,
-the first with an Apple Silicon macOS archive next to the two Linux archives; its
-measurement behaviour is unchanged from v0.5.0. Use its exact version/target,
-checksum and build receipt; never substitute a moving branch or local staging
-hashes. Retain earlier published releases and their original pins for historical
-studies. Installing v0.6.0 does not reinterpret old receipts or qualify new
-backend claims.
+The download commands below select the published **v0.7.0** experimental release.
+It adds the unchanged-control verdict for single-field changes and the
+experimental `systemone` path; existing measurements and their meaning are
+unchanged from v0.6.0. Use its exact version/target, checksum and build receipt;
+never substitute a moving branch or local staging hashes. Retain earlier
+published releases and their original pins for historical studies. Installing
+v0.7.0 does not reinterpret old receipts or qualify new backend claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -29,8 +29,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.6.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.6.0),
-from reviewed source `8ab41f34808825566c46c2d5cd52197a565a29ee`.
+The published prerelease is [**v0.7.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.7.0),
+from reviewed source `23476854d0b0552c5109daafc0d6debe626fa139`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -61,8 +61,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.6.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.6.0
+VERSION=0.7.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.7.0
 ```
 
 ```sh
