@@ -1431,8 +1431,8 @@ forward pass and report zero generated tokens. It retains per-request latency an
 per-burst request/decision rates, replays retained request and response bytes
 offline, and compares A/B/A2 under declared observed-envelope bounds. It never
 derives generated-token throughput: a response reporting generated tokens is a
-retained failure. The subcommand is a local unreleased extension; every receipt
-names it as such, and a released v0.6.0 artifact does not contain it.
+retained failure. The subcommand is experimental and first shipped in v0.7.0;
+every receipt names it as such.
 
 ## Deployment declarations and privacy
 

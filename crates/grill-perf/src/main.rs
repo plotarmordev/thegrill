@@ -43,7 +43,7 @@ enum Command {
         #[command(subcommand)]
         command: capacity::Command,
     },
-    /// Capture, replay and compare the System One decision protocol (local unreleased extension).
+    /// Capture, replay and compare the System One decision protocol (experimental).
     Systemone {
         #[command(subcommand)]
         command: systemone::Command,
