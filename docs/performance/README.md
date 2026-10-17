@@ -134,6 +134,8 @@ a valid use of the reported model interval.
 [`portable-c4-v1`](../../crates/grill-perf/examples/portable-c4-v1.json) and
 [`portable-c8-v1`](../../crates/grill-perf/examples/portable-c8-v1.json) are
 `portable-v1` with its one cell at concurrency 2, 4 or 8; they are not ladders.
+C16/C32 are feasible but unshipped: no reviewed server has demonstrated completion
+within the allowance, and collector overhead there is unmeasured.
 Every lane sends the same count prompt, with greedy sampling, thinking off, 400
 output tokens verified by [`cap-reached`](#exact-output-and-cache-observations)
 and the same acquisition schedule. Request limits are 600 seconds total and 300
@@ -172,10 +174,9 @@ schema. JSON result codes, numeric observations, interval calculations, threshol
 and exit statuses are unchanged. Existing stored `report.json` and `report.txt`
 files are never migrated or renamed. New text reports and human-readable
 `compare` output use the display labels, with the verified built-in or explicit
-selected scope immediately below the headline. If capture loading
-fails, scope is explicitly unavailable; it never falls back to the default
-workload. Machine consumers should continue to use the JSON codes, not parse
-the display text.
+selected scope immediately below the headline. If capture loading fails, scope is
+explicitly unavailable; it never falls back to the default workload. Machine
+consumers should continue to use the JSON codes, not parse the display text.
 
 Reports keep the observed percentage separate from the uncertainty range and
 explain that correlated or drifting measurements can make that range too narrow.
@@ -225,11 +226,11 @@ Concurrent lanes/waves are never counted as independent statistical samples.
 
 `baseline` exits 0 when ready, 2 when incomplete and 1 when invalid; its
 `baseline_ready` field describes capture readiness, not a comparison verdict.
-For built-in-workload `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
-or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
-treating exit 2 as a particular verdict. Complete explicit selected comparisons
-instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate. A complete
-`check --change deployment` returns `PENDING`/exit 0.
+For built-in-workload `check` and capture `compare`, exits are 0 for `IMPROVED`,
+2 for `REGRESSED` or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result
+rather than treating exit 2 as a particular verdict. Complete explicit selected
+comparisons instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate.
+A complete `check --change deployment` returns `PENDING`/exit 0.
 The advanced raw-run/policy commands below retain their distinct semantics.
 
 ## Explicit selected captures

@@ -572,9 +572,9 @@ without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`,
 workload bytes against that built-in and the collector version against every
 native plan; v1 captures hold `baseline-v1`.
 A `check` keeps its baseline's capture version, so v1 and v2 baselines check and
-compare as before. Older readers reject v3 captures and the `deployment` change.
-Older readers reject captures naming `portable-c2-v1`, `portable-c4-v1` or
-`portable-c8-v1`.
+compare as before. Readers predating capture v3 reject v3 captures and the
+`deployment` change; those predating the concurrency built-ins reject captures
+naming `portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1`.
 
 For built-ins above C1, report JSON adds `baseline_acquisition_cells` and
 `candidate_acquisition_cells`: one `CellSummary` per complete acquisition
@@ -608,11 +608,10 @@ and A→A2. The result is `IMPROVED` or `REGRESSED` only when A→B and A2→B a
 directional in the same direction; otherwise it is `INCONCLUSIVE` with the reason
 "candidate is not directional against both baseline capture periods".
 A directional A→A2 adds the reason "baseline deployment shifted between capture
-periods" without gating the result. Without A2 a deployment pair is
-`INCONCLUSIVE` without an interval;
-single-field comparisons without a reference keep their existing two-capture
-result. References for legacy captures, unchanged candidates or explicit
-selections remain `INVALID`.
+periods" without gating the result. Without A2 a deployment pair is `INCONCLUSIVE`
+without an interval; single-field comparisons without a reference keep their
+existing two-capture result. References for legacy captures, unchanged candidates
+or explicit selections remain `INVALID`.
 
 For deployment candidates the report kind is
 `performance-deployment-comparison-v1`; single-field candidates retain their

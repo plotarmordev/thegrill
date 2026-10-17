@@ -112,8 +112,8 @@ Every explicit selection is descriptive, including selected C1. A complete
 comparison reports **COMPLETE - DESCRIPTIVE ONLY** / `DESCRIPTIVE`, not a
 faster/slower, PASS, equivalence or noninferiority claim. The
 [first-run result table](INSTALL.md#baseline-optional-control-change-check)
-separates success, incomplete evidence and invalid input from default C1 measured
-directions. Exit success is not a universal no-regression certificate.
+separates success, incomplete evidence and invalid input from built-in-workload
+measured directions. Exit success is not a universal no-regression certificate.
 
 Keep acquisitions/cells separate; concurrent lanes are not independent samples.
 Native summaries retain missing usage, partial peers, request failures, timing,
