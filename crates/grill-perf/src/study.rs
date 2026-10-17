@@ -2187,7 +2187,10 @@ mod builtin_tests {
         let portable = selection::workload(Builtin::PortableV1.bytes()).unwrap();
         for builtin in Builtin::value_variants() {
             let workload = selection::workload(builtin.bytes()).unwrap();
-            assert_eq!(workload.name, builtin.to_possible_value().unwrap().get_name());
+            assert_eq!(
+                workload.name,
+                builtin.to_possible_value().unwrap().get_name()
+            );
             assert_eq!(serde_json::to_value(builtin).unwrap(), workload.name);
             assert_eq!(workload.cells.len(), 1);
             assert_eq!(workload.cases.len(), 1);
