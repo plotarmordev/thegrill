@@ -130,27 +130,31 @@ a valid use of the reported model interval.
 
 ### Concurrency built-ins
 
-`portable-c2-v1`, `portable-c4-v1` and `portable-c8-v1` are single-cell
-versions of `portable-v1` at their named concurrency, not ladders. They retain
-its identical count prompt in every lane, greedy sampling, thinking off and
-400 output tokens verified by `cap-reached`, with the same acquisition schedule.
-Their request limits are 600 seconds total and 300 seconds idle to allow queued
-lanes, still bounded by the remaining capture allowance; a hung lane can consume
-that allowance. Existing workload bytes are unchanged.
-Choose the level before measuring; see the
-[recipe claim rule](RECIPES.md#choose-explicit-packaged-workloads) and
-[allowances and command example](INSTALL.md#concurrency-claim).
+[`portable-c2-v1`](../../crates/grill-perf/examples/portable-c2-v1.json),
+[`portable-c4-v1`](../../crates/grill-perf/examples/portable-c4-v1.json) and
+[`portable-c8-v1`](../../crates/grill-perf/examples/portable-c8-v1.json) are
+`portable-v1` with its one cell at concurrency 2, 4 or 8; they are not ladders.
+Every lane sends the same count prompt, with greedy sampling, thinking off, 400
+output tokens verified by [`cap-reached`](#exact-output-and-cache-observations)
+and the same acquisition schedule. Request limits are 600 seconds total and 300
+seconds idle to allow lanes to wait behind busy server slots. They remain bounded
+by the capture allowance; a hung lane can consume up to 300 seconds of it.
+Claims follow the [speed claim rule](RECIPES.md#speed-claim-rule); allowances and
+commands are in [concurrency claim](INSTALL.md#concurrency-claim).
 
-Per-stream settlement/text-window decode, prefill and first-answer observations
-are descriptive, not verdict gates; see the optional
-[report fields](CONTRACT.md#capture-v3-and-deployment-comparison).
-Identical prompts permit prefix sharing; cached lanes have null prefill rates.
-This measures achieved fixed-wave throughput, not capacity or a tail SLO.
-Scheduler/KV-cache carryover can strengthen autocorrelation and make intervals
-too narrow; higher variance can instead make results inconclusive. There is no
-separate offline concurrency calibration. Batched kernels can change greedy text:
-use C1 `portable-v1` output pairs for a lossless claim, and concurrent `outputs`
-as additional descriptive evidence.
+This is achieved fixed-wave throughput at that level, not capacity or a tail SLO.
+The synthetic, predictable count prompt can favor speculative decoding in every
+lane. Identical prompts also allow prefix-cache sharing, which can shorten
+first-answer times; lanes reporting cached prompt tokens have null prefill rates.
+Per-stream settlement and text-window decode, prefill and first-answer observations
+are descriptive, not verdict gates
+([report fields](CONTRACT.md#capture-v3-and-deployment-comparison)).
+Scheduler and KV-cache state carried between waves can make intervals too narrow;
+higher variance can instead make results inconclusive. There is no separate offline
+concurrency calibration ([calibration](CALIBRATION.md)).
+Batched kernels can change greedy text between captures without any serving change.
+A lossless claim therefore needs `outputs` on a C1 `portable-v1` pair; a difference
+in a concurrent pair does not by itself show a lossy change.
 
 ### Results and evidence
 
@@ -158,7 +162,7 @@ as additional descriptive evidence.
 |---|---|---|
 | `MEASURED FASTER` | `IMPROVED` | The model-based uncertainty range lies above zero: higher measured throughput in these capture periods |
 | `MEASURED SLOWER` | `REGRESSED` | The interval lies below zero: lower measured throughput in these periods |
-| `COMPLETE - DESCRIPTIVE ONLY` | `DESCRIPTIVE` | Explicit selection completed successfully; no default-C1 direction, equivalence or no-regression verdict |
+| `COMPLETE - DESCRIPTIVE ONLY` | `DESCRIPTIVE` | Explicit selection completed successfully; no built-in-workload direction, equivalence or no-regression verdict |
 | `INCONCLUSIVE` | `INCONCLUSIVE` | No direction is established, variation cannot be estimated, or coverage is incomplete; this does not establish equivalence |
 | `VERDICT PENDING` | `PENDING` | A complete deployment candidate; the verdict needs the unchanged reference ([deployment comparison](#deployment-comparison)) |
 | `INVALID` | `INVALID` | Corrupt/incompatible evidence, unexplained declarations or an invalid response prevents assessment |
@@ -167,8 +171,8 @@ This is a presentation mapping for the capture workflow, not a new verdict
 schema. JSON result codes, numeric observations, interval calculations, thresholds
 and exit statuses are unchanged. Existing stored `report.json` and `report.txt`
 files are never migrated or renamed. New text reports and human-readable
-`compare` output use the display labels, with the verified default structured C1
-or explicit selected scope immediately below the headline. If capture loading
+`compare` output use the display labels, with the verified built-in or explicit
+selected scope immediately below the headline. If capture loading
 fails, scope is explicitly unavailable; it never falls back to the default
 workload. Machine consumers should continue to use the JSON codes, not parse
 the display text.
@@ -207,9 +211,9 @@ standard error `sqrt(var(a)/8+var(b)/8)` and the conservative df7 two-sided
 critical value `2.364624251`. The variances are not pooled. Eight complete
 acquisitions on each side are required. At zero estimated standard error, the
 observed difference remains visible but interval/confidence are withheld.
-For a concurrency built-in, each wave's aggregate is every lane's reported
-completion tokens over the wave makespan, including prefill, queueing and the
-slowest lane's tail; lanes are never samples.
+Above C1 the wave aggregate sums every lane over the whole wave
+([definition](#interpret-the-result)), so it includes queueing and the slowest
+lane's tail.
 
 This model assumes stable, independent acquisition-level variation and an
 adequate log-scale mean model. Fresh clients do not establish independence.
@@ -221,7 +225,7 @@ Concurrent lanes/waves are never counted as independent statistical samples.
 
 `baseline` exits 0 when ready, 2 when incomplete and 1 when invalid; its
 `baseline_ready` field describes capture readiness, not a comparison verdict.
-For default C1 `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
+For built-in-workload `check` and capture `compare`, exits are 0 for `IMPROVED`, 2 for `REGRESSED`
 or `INCONCLUSIVE`, and 1 for `INVALID`. Read the structured result rather than
 treating exit 2 as a particular verdict. Complete explicit selected comparisons
 instead return `DESCRIPTIVE`/exit 0, not a no-regression certificate. A complete

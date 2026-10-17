@@ -568,20 +568,22 @@ fingerprint stays in `collector_sha256`), the declared `client_placement`
 (`same-host` or `network`, from the required `baseline --client-placement`) and,
 without a selection, the built-in `workload` name (`baseline-v1`, `baseline-v2`,
 `portable-v1`, `portable-c2-v1`, `portable-c4-v1` or `portable-c8-v1`, from
-`baseline --workload`, default `baseline-v2`). The
-loader verifies the retained workload bytes against that built-in and the
-collector version against every native plan; v1 captures hold `baseline-v1`.
+`baseline --workload`, default `baseline-v2`). The loader verifies the retained
+workload bytes against that built-in and the collector version against every
+native plan; v1 captures hold `baseline-v1`.
 A `check` keeps its baseline's capture version, so v1 and v2 baselines check and
 compare as before. Older readers reject v3 captures and the `deployment` change.
-Readers predating the concurrency built-ins reject their unknown workload names.
+Older readers reject captures naming `portable-c2-v1`, `portable-c4-v1` or
+`portable-c8-v1`.
 
 For built-ins above C1, report JSON adds `baseline_acquisition_cells` and
-`candidate_acquisition_cells`: one existing `CellSummary` per complete acquisition
+`candidate_acquisition_cells`: one `CellSummary` per complete acquisition
 in order. Empty vectors are omitted. These contain descriptive per-stream decode,
 prefill and first-answer observations, not additional samples or verdict gates.
 Human reports show first-answer median and worst lane from those observations.
-The reference's own report holds its descriptive observations; `deployment`
-is unchanged. C1 report JSON and the `capture.json` schema remain unchanged.
+A reference-aware `compare` reports A and B only; A2's observations are in A2's
+own `report.json`, and the `deployment` object gains no field. C1 report JSON and
+the `capture.json` schema remain unchanged.
 See [concurrency scope and limitations](README.md#concurrency-built-ins).
 
 `check A --change deployment` records a candidate B served by another
@@ -601,12 +603,13 @@ capture v3 built-in single-field candidate (`model_revision`, `runtime`,
 (`check A --change none`) of A captured after B. By recorded timestamps, B must
 start at least 60 s after A finished and A2 at least 60 s after B finished. With
 same-host placement on two client hosts this ordering relies on each client's
-clock. The unchanged acquisition-level interval model is computed for A→B, A2→B and A→A2. The
-result is `IMPROVED` or `REGRESSED` only when A→B and A2→B are directional in the
-same direction; otherwise it is `INCONCLUSIVE` with the reason "candidate is not
-directional against both baseline capture periods". A directional A→A2 adds the
-reason "baseline deployment shifted between capture periods" without gating the
-result. Without A2 a deployment pair is `INCONCLUSIVE` without an interval;
+clock. The unchanged acquisition-level interval model is computed for A→B, A2→B
+and A→A2. The result is `IMPROVED` or `REGRESSED` only when A→B and A2→B are
+directional in the same direction; otherwise it is `INCONCLUSIVE` with the reason
+"candidate is not directional against both baseline capture periods".
+A directional A→A2 adds the reason "baseline deployment shifted between capture
+periods" without gating the result. Without A2 a deployment pair is
+`INCONCLUSIVE` without an interval;
 single-field comparisons without a reference keep their existing two-capture
 result. References for legacy captures, unchanged candidates or explicit
 selections remain `INVALID`.
@@ -623,12 +626,11 @@ and the A2→B (`candidate_against_reference`) and A→A2
 candidates, and is omitted for a single-field comparison without a reference.
 Differing prompt-token medians add a reason, because the servers then do
 different prefill work. For deployment candidates the scope is a
-whole-deployment comparison of request throughput at C{n} including prefill,
-where n is the selected built-in's concurrency:
-hardware, runtime, model build, settings, endpoint and placement are confounded,
-so no single factor such as a quantization format is attributed; only the
-baseline deployment has a drift control; and the synthetic count prompt lets
-speculative decoding on either side dominate.
+whole-deployment comparison of request throughput at the built-in's concurrency
+(C1, C2, C4 or C8) including prefill: hardware, runtime, model build, settings,
+endpoint and placement are confounded, so no single factor such as a quantization
+format is attributed; only the baseline deployment has a drift control; and the
+synthetic count prompt lets speculative decoding on either side dominate.
 
 ## Output identity
 
