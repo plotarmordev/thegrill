@@ -227,10 +227,9 @@ private; share only a separately reviewed sanitized summary.
 
 ### Concurrency claim
 
-The [concurrency built-ins](README.md#concurrency-built-ins) are
-[unreleased](RELEASE-NOTES.md#unreleased); use a
-[source build](#upgrade-rollback-and-source-fallback) that contains them.
-Choose each capture's allowance:
+The [concurrency built-ins](README.md#concurrency-built-ins) ship from
+[v0.8.0](RELEASE-NOTES.md#version-080--concurrency-verdicts). Choose each
+capture's allowance:
 
 | Workload | Requests / capture | Output tokens / capture | Aggregate reported output tokens/s needed at 300 s (default) | At 1200 s | At 3600 s |
 |---|---:|---:|---:|---:|---:|
