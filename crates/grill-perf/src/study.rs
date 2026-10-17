@@ -1975,6 +1975,7 @@ pub fn human(report: &Report) -> String {
                 a.request_ceiling, a.output_token_ceiling, a.allowance_seconds
             ));
             if let Some(rate) = a.minimum_full_capture_tokens_per_second {
+                // Every built-in has four waves per acquisition in one cell; its ceiling scales with lanes.
                 let aggregate = if report
                     .baseline_accounting
                     .as_ref()
@@ -2148,14 +2149,6 @@ fn deployment_text(deployment: &DeploymentReport) -> String {
     text
 }
 
-#[cfg(test)]
-#[path = "../tests/support/calibration.rs"]
-mod calibration;
-
-#[cfg(test)]
-#[path = "../tests/support/finalization.rs"]
-mod finalization;
-
 fn streams_text(label: &str, cells: &[evidence::CellSummary]) -> String {
     let mut text = String::new();
     for (index, cell) in cells.iter().enumerate() {
@@ -2178,6 +2171,14 @@ fn streams_text(label: &str, cells: &[evidence::CellSummary]) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/calibration.rs"]
+mod calibration;
+
+#[cfg(test)]
+#[path = "../tests/support/finalization.rs"]
+mod finalization;
+
+#[cfg(test)]
 mod builtin_tests {
     use super::*;
     use clap::ValueEnum;
@@ -2197,6 +2198,12 @@ mod builtin_tests {
             assert_eq!(workload.cells[0].concurrency, builtin.concurrency());
             assert_eq!(workload.cells[0].warmup_trials, 1);
             assert_eq!(workload.cells[0].trials, 3);
+            let scope = builtin.deployment_scope();
+            assert_eq!(scope.matches("at C").count(), 1);
+            assert!(scope.contains(&format!("at C{} including prefill", builtin.concurrency())));
+            if builtin.concurrency() == 1 {
+                assert_eq!(scope, DEPLOYMENT_SCOPE);
+            }
             if !matches!(builtin, Builtin::BaselineV1 | Builtin::BaselineV2) {
                 assert_eq!(workload.request, portable.request);
                 assert_eq!(workload.cases, portable.cases);

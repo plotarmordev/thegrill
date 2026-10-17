@@ -176,6 +176,20 @@ fn capture_v3_records_collector_placement_and_builtin_while_v1_still_checks() {
         fs::read(temp.path("default/workload.json")).unwrap(),
         fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/baseline-v2.json")).unwrap()
     );
+    for name in ["portable", "default"] {
+        let control_name = format!("{name}-control");
+        let control = decoded(&check_none(&temp, name, &declaration, &control_name));
+        let comparison = decoded(&compare_captures(&temp, name, &control_name, None));
+        for report in [
+            read_json(&temp.path(&format!("{name}/report.json"))),
+            control,
+            comparison,
+        ] {
+            assert_ne!(report["result"], "INVALID", "{report}");
+            assert!(report.get("baseline_acquisition_cells").is_none());
+            assert!(report.get("candidate_acquisition_cells").is_none());
+        }
+    }
 }
 
 #[test]

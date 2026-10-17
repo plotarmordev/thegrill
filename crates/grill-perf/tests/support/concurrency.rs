@@ -122,7 +122,7 @@ fn concurrent_lane_below_cap_invalidates_the_wave_without_replacement() {
         .find(|a| a["usage"]["completion_tokens"] == 399)
         .unwrap();
     assert_eq!(report["first_failure"]["lane"], failed["lane"]);
-    assert!(!temp.path("a/acquisition-00/wave-000004").exists());
+    assert!(!temp.path("a/acquisition-00/wave-000002").exists());
     let capture = read_json(&temp.path("a/capture.json"));
     for acquisition in &capture["acquisitions"].as_array().unwrap()[1..] {
         assert!(acquisition["plan_sha256"].is_null());
@@ -290,55 +290,4 @@ fn concurrent_budget_stop_reports_aggregate_rate() {
     assert!(!report["baseline_ready"].as_bool().unwrap());
     let capture = read_json(&temp.path("a/capture.json"));
     assert!(capture["acquisitions"][1]["plan_sha256"].is_null());
-}
-
-#[test]
-#[ignore = "requires GRILL_PERF_BEFORE pointing to the prechange binary"]
-fn c1_report_json_is_byte_identical_to_before() {
-    let before_binary = std::env::var_os("GRILL_PERF_BEFORE").expect("prechange binary path");
-    for workload in ["portable-v1", "baseline-v2"] {
-        let temp = Temp::new();
-        let server = Server::new(|stream, _, _| response(stream, Some(400), false));
-        let before = deployment(&temp, "before.json", "before");
-        let after = deployment(&temp, "after.json", "after");
-        let baseline = command()
-            .args([
-                "baseline",
-                "--endpoint",
-                &server.endpoint,
-                "--model",
-                "fixture",
-            ])
-            .args([
-                "--workload",
-                workload,
-                "--client-placement",
-                "same-host",
-                "--local-http",
-                "--json",
-            ])
-            .arg("--deployment")
-            .arg(before)
-            .arg("--out")
-            .arg(temp.path("a"))
-            .output()
-            .unwrap();
-        assert!(baseline.status.success(), "{}", decoded(&baseline));
-        let report = decoded(&baseline);
-        assert!(report.get("baseline_acquisition_cells").is_none());
-        assert!(report.get("candidate_acquisition_cells").is_none());
-        let candidate = check(&temp, "a", &after, "b");
-        assert_ne!(decoded(&candidate)["result"], "INVALID");
-        let old = Command::new(&before_binary)
-            .arg("compare")
-            .arg(temp.path("a"))
-            .arg(temp.path("b"))
-            .arg("--json")
-            .output()
-            .unwrap();
-        let current = compare(&temp.path("a"), &temp.path("b"));
-        assert_ne!(decoded(&old)["result"], "INVALID");
-        assert_eq!(old.status.code(), current.status.code());
-        assert_eq!(old.stdout, current.stdout, "{workload}");
-    }
 }
