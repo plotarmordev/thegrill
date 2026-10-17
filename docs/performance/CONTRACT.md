@@ -611,9 +611,8 @@ and the A2→B (`candidate_against_reference`) and A→A2
 `deployment` for every reference-aware comparison, including single-field
 candidates, and is `null` for a single-field comparison without a reference.
 Differing prompt-token medians add a reason, because the servers then do
-different prefill work. For deployment
-candidates the scope is a whole-deployment comparison of request throughput at
-C1 including prefill:
+different prefill work. For deployment candidates the scope is a
+whole-deployment comparison of request throughput at C1 including prefill:
 hardware, runtime, model build, settings, endpoint and placement are confounded,
 so no single factor such as a quantization format is attributed; only the
 baseline deployment has a drift control; and the synthetic count prompt lets
