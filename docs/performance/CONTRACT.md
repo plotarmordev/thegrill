@@ -607,8 +607,11 @@ A→B; `deployment` holds each side's endpoint, model, declaration, collector
 identity, binary fingerprint, client placement and median reported
 `usage.prompt_tokens` over measured requests, the reference path and identity,
 and the A2→B (`candidate_against_reference`) and A→A2
-(`reference_against_baseline`) intervals. Differing prompt-token medians add a
-reason, because the servers then do different prefill work. For deployment
+(`reference_against_baseline`) intervals. The object keeps the name
+`deployment` for every reference-aware comparison, including single-field
+candidates, and is `null` for a single-field comparison without a reference.
+Differing prompt-token medians add a reason, because the servers then do
+different prefill work. For deployment
 candidates the scope is a whole-deployment comparison of request throughput at
 C1 including prefill:
 hardware, runtime, model build, settings, endpoint and placement are confounded,
