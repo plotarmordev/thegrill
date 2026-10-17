@@ -21,7 +21,7 @@ benchmark code, statistical policy or compatibility retry loop.
 | Input | Recipe/operator responsibility | What `check` inherits |
 |---|---|---|
 | Endpoint and model selector | Explicit full resource URL and actual server selector; no model detection | Verified baseline endpoint, selector and loopback permission |
-| Request controls and membership | Qualify backend support; choose default C1 or an explicit pinned selection before baseline | Exact retained workload and selection, not a recipe lookup |
+| Request controls and membership | Qualify backend support; choose a built-in workload or an explicit pinned selection before baseline | Exact retained workload and selection, not a recipe lookup |
 | Authentication | Supply credential independently; pass only its environment-variable name to baseline, or omit for unauthenticated use | Variable name only; the value must remain available in the process environment |
 | Deployment | Reuse actual `model_revision`, `runtime`, `hardware`, `settings` facts; obtain missing facts from the operator | Baseline declaration for comparison; pass an explicit candidate declaration with only the selected field changed, or the same declaration for `--change none` |
 | Output and allowance | Choose a fresh private output outside the baseline with an existing nonsymlink parent; approve finite traffic prospectively | No output path or custom `--seconds` allowance is inherited |
@@ -30,6 +30,22 @@ The first-run declaration example uses actual recipe variables, not fictional
 identities. Its candidate example updates just the declared field, retaining
 only facts confirmed unchanged. Do not copy stale facts to hide a multi-field
 migration. Declarations are operator claims, not execution attestation.
+
+## Speed claim rule
+
+Recipe repositories can copy this into their `CONTRIBUTING.md`:
+
+> Speed claims are measured with The Grill (`grill-perf`), not a separate benchmark
+> tool. State the claim's concurrency before measuring. Single-request claims use
+> `--workload portable-v1` (`baseline-v2` when both sides are vLLM). Concurrency
+> claims use `--workload portable-cN-v1` at the stated level (`portable-c2-v1`,
+> `portable-c4-v1` or `portable-c8-v1`), with `--seconds` set on every capture. A
+> claim is accepted only when `compare A B --reference A2` on that workload reports
+> `MEASURED FASTER`. A ladder selection may be attached as descriptive context; it
+> is not a verdict.
+
+Levels, limits and allowances: [concurrency built-ins](README.md#concurrency-built-ins)
+and [concurrency claim](INSTALL.md#concurrency-claim).
 
 ## Choose explicit packaged workloads
 
@@ -96,8 +112,8 @@ Every explicit selection is descriptive, including selected C1. A complete
 comparison reports **COMPLETE - DESCRIPTIVE ONLY** / `DESCRIPTIVE`, not a
 faster/slower, PASS, equivalence or noninferiority claim. The
 [first-run result table](INSTALL.md#baseline-optional-control-change-check)
-separates success, incomplete evidence and invalid input from default C1 measured
-directions. Exit success is not a universal no-regression certificate.
+separates success, incomplete evidence and invalid input from built-in-workload
+measured directions. Exit success is not a universal no-regression certificate.
 
 Keep acquisitions/cells separate; concurrent lanes are not independent samples.
 Native summaries retain missing usage, partial peers, request failures, timing,

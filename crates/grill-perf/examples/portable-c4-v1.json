@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "name": "portable-c4-v1",
+  "request": {
+    "profile": "portable-chat-v1",
+    "stream": true,
+    "output": { "tokens": 400, "mode": "cap-reached" },
+    "cache": "observe",
+    "temperature_milli": 0,
+    "top_p_milli": 1000,
+    "seed": null,
+    "thinking_control": { "kind": "chat-template-thinking-v1", "enabled": false }
+  },
+  "limits": {
+    "total_ms": 600000,
+    "idle_ms": 300000,
+    "response_bytes": 1048576,
+    "wave_buffer_bytes": 67108864
+  },
+  "cases": [
+    {
+      "id": "count",
+      "messages": [
+        { "role": "user", "content": "Count from 1 to 1000. Output every number, separated by single spaces. Do not abbreviate or use ellipses. No other text." }
+      ]
+    }
+  ],
+  "cells": [
+    { "id": "count-4", "case": "count", "concurrency": 4, "warmup_trials": 1, "trials": 3 }
+  ]
+}

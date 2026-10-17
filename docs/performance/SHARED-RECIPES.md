@@ -424,6 +424,15 @@ This matrix introduces no new workload variant. Any necessary change identified
 by a pilot requires an explicit new declaration and identity, not an edit to a
 frozen workload or a silently weakened protocol.
 
+The [concurrency built-ins](README.md#concurrency-built-ins) differ further from the
+pinned protocol. Every lane sends the same count prompt, without ` (stream i/n)`,
+because no workload placeholder renders fixed per-lane text: `{salt}` renders only
+in filled cases, differs per capture, and is refused by `outputs`. Output is capped
+at 400 and verified by `cap-reached` rather than forced, because `min_tokens` and
+`ignore_eos` need `vllm-fixed-v1`. The [wave aggregate](README.md#interpret-the-result)
+includes dispatch through settlement, not upstream's first-to-last-token window.
+These built-ins make no sparkDash equivalence claim.
+
 ## Create and approve the policy before collection
 
 Choose the recipe and one workload first. A decode study and a prefill study are

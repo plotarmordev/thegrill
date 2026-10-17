@@ -1,5 +1,17 @@
 # Performance release notes
 
+## Unreleased
+
+- Add `portable-c2-v1`, `portable-c4-v1` and `portable-c8-v1`:
+  [`portable-v1` at C2, C4 and C8](README.md#concurrency-built-ins), with verdicts
+  from the existing wave-aggregate statistic and reference rule and no separate
+  concurrency calibration. See [allowances](INSTALL.md#concurrency-claim).
+  Existing workload identities are unchanged.
+- Reports for these built-ins add descriptive per-acquisition per-stream
+  observations. C1 reports and `capture.json` are unchanged; older readers reject
+  captures that name the new built-ins
+  ([contract](CONTRACT.md#capture-v3-and-deployment-comparison)).
+
 ## Version 0.7.0 — unchanged-control verdicts for single-field changes and System One captures
 
 - `compare A B --reference A2` now also accepts a capture v3 built-in candidate

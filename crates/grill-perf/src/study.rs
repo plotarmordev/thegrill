@@ -82,6 +82,15 @@ pub enum Builtin {
     BaselineV1,
     BaselineV2,
     PortableV1,
+    #[value(name = "portable-c2-v1")]
+    #[serde(rename = "portable-c2-v1")]
+    PortableC2V1,
+    #[value(name = "portable-c4-v1")]
+    #[serde(rename = "portable-c4-v1")]
+    PortableC4V1,
+    #[value(name = "portable-c8-v1")]
+    #[serde(rename = "portable-c8-v1")]
+    PortableC8V1,
 }
 
 impl Builtin {
@@ -90,6 +99,9 @@ impl Builtin {
             Self::BaselineV1 => include_bytes!("../examples/baseline-v1.json"),
             Self::BaselineV2 => include_bytes!("../examples/baseline-v2.json"),
             Self::PortableV1 => include_bytes!("../examples/portable-v1.json"),
+            Self::PortableC2V1 => include_bytes!("../examples/portable-c2-v1.json"),
+            Self::PortableC4V1 => include_bytes!("../examples/portable-c4-v1.json"),
+            Self::PortableC8V1 => include_bytes!("../examples/portable-c8-v1.json"),
         }
     }
     fn scope(self) -> &'static str {
@@ -100,6 +112,54 @@ impl Builtin {
             Self::PortableV1 => {
                 "One short synthetic count C1 workload with 400 output tokens verified by cap-reached; not general concurrency, long-context, model quality, tail SLOs, or full serving qualification. Deployment values are operator declarations, not server attestation. A settings fingerprint cannot prove only one internal knob changed."
             }
+            Self::PortableC2V1 => {
+                "Achieved fixed-wave throughput at C2, not capacity: identical synthetic count prompts, 400 output tokens per lane verified by cap-reached. Prefix sharing can affect prefill and TTFT. Scheduler and KV-cache carryover can narrow intervals unjustifiably; higher variance can make results inconclusive. No separate concurrency calibration, general serving, quality or tail-SLO claim. Deployment values are operator declarations, not attestation."
+            }
+            Self::PortableC4V1 => {
+                "Achieved fixed-wave throughput at C4, not capacity: identical synthetic count prompts, 400 output tokens per lane verified by cap-reached. Prefix sharing can affect prefill and TTFT. Scheduler and KV-cache carryover can narrow intervals unjustifiably; higher variance can make results inconclusive. No separate concurrency calibration, general serving, quality or tail-SLO claim. Deployment values are operator declarations, not attestation."
+            }
+            Self::PortableC8V1 => {
+                "Achieved fixed-wave throughput at C8, not capacity: identical synthetic count prompts, 400 output tokens per lane verified by cap-reached. Prefix sharing can affect prefill and TTFT. Scheduler and KV-cache carryover can narrow intervals unjustifiably; higher variance can make results inconclusive. No separate concurrency calibration, general serving, quality or tail-SLO claim. Deployment values are operator declarations, not attestation."
+            }
+        }
+    }
+
+    fn concurrency(self) -> u32 {
+        match self {
+            Self::BaselineV1 | Self::BaselineV2 | Self::PortableV1 => 1,
+            Self::PortableC2V1 => 2,
+            Self::PortableC4V1 => 4,
+            Self::PortableC8V1 => 8,
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::BaselineV1 | Self::BaselineV2 => {
+                "structured C1 (one concurrent request), exactly 400 output tokens per request."
+            }
+            Self::PortableV1 => {
+                "count C1 (one concurrent request), 400 output tokens per request verified by cap-reached."
+            }
+            Self::PortableC2V1 => {
+                "count C2 (two concurrent requests, one wave), 400 output tokens per request verified by cap-reached; aggregate wave throughput."
+            }
+            Self::PortableC4V1 => {
+                "count C4 (four concurrent requests, one wave), 400 output tokens per request verified by cap-reached; aggregate wave throughput."
+            }
+            Self::PortableC8V1 => {
+                "count C8 (eight concurrent requests, one wave), 400 output tokens per request verified by cap-reached; aggregate wave throughput."
+            }
+        }
+    }
+
+    fn deployment_scope(self) -> std::borrow::Cow<'static, str> {
+        if self.concurrency() == 1 {
+            DEPLOYMENT_SCOPE.into()
+        } else {
+            DEPLOYMENT_SCOPE
+                .replace("at C1", &format!("at C{}", self.concurrency()))
+                .into()
         }
     }
 }
@@ -201,6 +261,7 @@ struct Verified {
     sha256: String,
     deployment: Deployment,
     observations: Vec<f64>,
+    cells: Vec<evidence::CellSummary>,
     accounting: Accounting,
     first_failure: Option<Failure>,
     selected: Option<SelectedReport>,
@@ -326,6 +387,10 @@ pub struct Report {
     pub candidate_complete_acquisitions: usize,
     pub baseline_acquisition_medians: Vec<f64>,
     pub candidate_acquisition_medians: Vec<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub baseline_acquisition_cells: Vec<evidence::CellSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub candidate_acquisition_cells: Vec<evidence::CellSummary>,
     pub observed_change_percent: Option<f64>,
     pub model_based_interval_percent: Option<[f64; 2]>,
     pub model_based_confidence_level: Option<f64>,
@@ -340,7 +405,7 @@ pub struct Report {
     pub stop_reason: Option<String>,
     pub first_failure: Option<Failure>,
     pub assumptions: &'static str,
-    pub scope: &'static str,
+    pub scope: std::borrow::Cow<'static, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected: Option<SelectedReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,6 +430,8 @@ impl Report {
             candidate_complete_acquisitions: 0,
             baseline_acquisition_medians: Vec::new(),
             candidate_acquisition_medians: Vec::new(),
+            baseline_acquisition_cells: Vec::new(),
+            candidate_acquisition_cells: Vec::new(),
             observed_change_percent: None,
             model_based_interval_percent: None,
             model_based_confidence_level: None,
@@ -379,7 +446,7 @@ impl Report {
             stop_reason: None,
             first_failure: None,
             assumptions: ASSUMPTIONS,
-            scope: UNAVAILABLE_SCOPE,
+            scope: UNAVAILABLE_SCOPE.into(),
             selected: None,
             deployment: None,
         }
@@ -449,7 +516,10 @@ fn directory(index: usize) -> String {
     format!("acquisition-{index:02}")
 }
 
-fn inspect(loaded: &evidence::Loaded, selected: bool) -> Result<(CaptureStatus, Option<f64>)> {
+fn inspect(
+    loaded: &evidence::Loaded,
+    selected: bool,
+) -> Result<(CaptureStatus, Option<evidence::CellSummary>)> {
     if loaded.history.count != 1 || loaded.history.open {
         return Err("acquisition must have exactly one settled native execution session; no continuation or missing receipts".into());
     }
@@ -491,13 +561,15 @@ fn inspect(loaded: &evidence::Loaded, selected: bool) -> Result<(CaptureStatus, 
         if selected {
             return Ok((CaptureStatus::Complete, None));
         }
-        let summaries = evidence::summarize(loaded);
-        let median = summaries
-            .first()
-            .and_then(|s| s.median_achieved_completion_tokens_per_second)
+        let summary = evidence::summarize(loaded)
+            .into_iter()
+            .next()
+            .ok_or("complete acquisition has no cell summary")?;
+        summary
+            .median_achieved_completion_tokens_per_second
             .filter(|v| v.is_finite() && *v > 0.0)
             .ok_or("complete acquisition has no positive finite throughput median")?;
-        return Ok((CaptureStatus::Complete, Some(median)));
+        return Ok((CaptureStatus::Complete, Some(summary)));
     }
     if status == "interrupted" || status == "budget-exhausted" || status == "paused" {
         Ok((CaptureStatus::Incomplete, None))
@@ -597,6 +669,7 @@ fn load(root: &Path) -> Result<Verified> {
     let deployment = declaration(&deployment_bytes)?;
     wire::endpoint(&manifest.endpoint, manifest.local_http)?;
     let mut observations = Vec::with_capacity(ACQUISITIONS);
+    let mut cells = Vec::new();
     let mut first_failure = None;
     let mut complete_acquisitions = 0;
     let mut stopped = false;
@@ -786,13 +859,22 @@ fn load(root: &Path) -> Result<Verified> {
                 .filter_map(|attempt| attempt.usage.prompt_tokens)
                 .map(|tokens| tokens as f64),
         );
-        let (status, median) = inspect(&loaded, selected.is_some())?;
+        let (status, summary) = inspect(&loaded, selected.is_some())?;
+        let median = summary
+            .as_ref()
+            .and_then(|s| s.median_achieved_completion_tokens_per_second);
         complete_acquisitions += usize::from(status == CaptureStatus::Complete);
         if median != acquisition.median_achieved_completion_tokens_per_second {
             return Err("acquisition median differs from verified native evidence".into());
         }
         if let Some(value) = median {
             observations.push(value);
+        }
+        if manifest
+            .workload
+            .is_some_and(|builtin| builtin.concurrency() > 1)
+        {
+            cells.extend(summary);
         }
         if status != CaptureStatus::Complete {
             observed_status = status;
@@ -870,6 +952,7 @@ fn load(root: &Path) -> Result<Verified> {
         sha256: identity,
         deployment,
         observations,
+        cells,
         accounting,
         first_failure,
         selected,
@@ -920,7 +1003,8 @@ fn collect(
         let finished_unix_ms = metrics::unix_ms_checked()?;
         match evidence::load(&options.out) {
             Ok(loaded) => {
-                let (status, median) = match inspect(&loaded, manifest.selection_sha256.is_some()) {
+                let (status, summary) = match inspect(&loaded, manifest.selection_sha256.is_some())
+                {
                     Ok(observation) => observation,
                     Err(error) => {
                         manifest.stop_reason = Some(error);
@@ -934,7 +1018,8 @@ fn collect(
                     started_unix_ms: Some(loaded.plan.started_unix_ms),
                     finished_unix_ms: Some(finished_unix_ms),
                     status: loaded.history.last_status,
-                    median_achieved_completion_tokens_per_second: median,
+                    median_achieved_completion_tokens_per_second: summary
+                        .and_then(|s| s.median_achieved_completion_tokens_per_second),
                 };
                 manifest.status = status;
                 if let Err(error) = outcome {
@@ -1126,12 +1211,12 @@ fn selected_report(
     if selected.is_some() {
         report.version = 2;
         report.kind = "performance-capture-comparison-v2";
-        report.scope = SELECTED_SCOPE;
+        report.scope = SELECTED_SCOPE.into();
         report.assumptions = SELECTED_SCOPE;
         report.result_scope = SELECTED_SCOPE;
         report.selected = selected;
     } else {
-        report.scope = builtin.unwrap_or(Builtin::BaselineV1).scope();
+        report.scope = builtin.unwrap_or(Builtin::BaselineV1).scope().into();
     }
 }
 
@@ -1190,6 +1275,7 @@ pub fn baseline(options: &BaselineOptions) -> Result<Report> {
         report.baseline_accounting = Some(verified.accounting);
         report.baseline_complete_acquisitions = verified.complete_acquisitions;
         report.baseline_acquisition_medians = verified.observations;
+        report.baseline_acquisition_cells = verified.cells;
         report.baseline_capture_sha256 = Some(verified.sha256);
         report.baseline_ready = verified.manifest.status == CaptureStatus::Complete;
         selected_report(&mut report, verified.selected, verified.manifest.workload);
@@ -1256,6 +1342,7 @@ pub fn check(options: &CheckOptions) -> Result<Report> {
         report.baseline_accounting = Some(before.accounting.clone());
         report.baseline_complete_acquisitions = before.complete_acquisitions;
         report.baseline_acquisition_medians = before.observations;
+        report.baseline_acquisition_cells = before.cells;
         report.baseline_capture_sha256 = Some(before.sha256.clone());
         selected_report(&mut report, before.selected, before.manifest.workload);
         if before.manifest.baseline_sha256.is_some() {
@@ -1431,6 +1518,8 @@ pub fn compare(baseline: &Path, candidate: &Path, reference: Option<&Path>) -> R
         report.candidate_complete_acquisitions = after.complete_acquisitions;
         report.baseline_acquisition_medians = before.observations.clone();
         report.candidate_acquisition_medians = after.observations.clone();
+        report.baseline_acquisition_cells = std::mem::take(&mut before.cells);
+        report.candidate_acquisition_cells = std::mem::take(&mut after.cells);
         report.baseline_capture_sha256 = Some(before.sha256.clone());
         report.candidate_capture_sha256 = Some(after.sha256.clone());
         report.first_failure = before
@@ -1563,7 +1652,11 @@ fn reference_comparison(
 ) -> Result<()> {
     if after.manifest.change == Some(Change::Deployment) {
         report.kind = "performance-deployment-comparison-v1";
-        report.scope = DEPLOYMENT_SCOPE;
+        report.scope = before
+            .manifest
+            .workload
+            .unwrap_or(Builtin::BaselineV1)
+            .deployment_scope();
         report.model = None;
     }
     let control = reference
@@ -1745,12 +1838,12 @@ pub fn human(report: &Report) -> String {
     };
     let scope = if let Some(selected) = &report.selected {
         selected.manifest.scope.as_str()
-    } else if report.scope == Builtin::BaselineV2.scope() {
-        "structured C1 (one concurrent request), exactly 400 output tokens per request."
-    } else if report.scope == Builtin::PortableV1.scope() {
-        "count C1 (one concurrent request), 400 output tokens per request verified by cap-reached."
     } else {
-        report.scope
+        use clap::ValueEnum;
+        Builtin::value_variants()
+            .iter()
+            .find(|builtin| report.scope == builtin.scope())
+            .map_or(report.scope.as_ref(), |builtin| builtin.summary())
     };
     let mut text = format!("{label}\nScope: {scope}\nComplete acquisitions: ");
     for (side, accounting, complete) in [
@@ -1773,6 +1866,19 @@ pub fn human(report: &Report) -> String {
         }
     }
     text.push('\n');
+    if !report.baseline_acquisition_cells.is_empty()
+        || !report.candidate_acquisition_cells.is_empty()
+    {
+        text.push_str("Per-stream observations (descriptive; the verdict uses the wave aggregate; lanes are not samples):\n");
+        text.push_str(&streams_text(
+            "Baseline",
+            &report.baseline_acquisition_cells,
+        ));
+        text.push_str(&streams_text(
+            "Candidate",
+            &report.candidate_acquisition_cells,
+        ));
+    }
     if let Some(selected) = &report.selected {
         text.push_str(&format!("Fill kinds: {}\n", selected.fill_kinds.join(", ")));
         text.push_str(&format!(
@@ -1869,7 +1975,18 @@ pub fn human(report: &Report) -> String {
                 a.request_ceiling, a.output_token_ceiling, a.allowance_seconds
             ));
             if let Some(rate) = a.minimum_full_capture_tokens_per_second {
-                text.push_str(&format!(" Full completion needs >{rate:.1} reported output tokens/s including overhead; use --seconds for a larger allowance.\n"));
+                // Every built-in has four waves per acquisition in one cell; its ceiling scales with lanes.
+                let aggregate = if report
+                    .baseline_accounting
+                    .as_ref()
+                    .is_some_and(|a| a.request_ceiling > ACQUISITIONS * 4)
+                    && report.selected.is_none()
+                {
+                    " aggregate across lanes"
+                } else {
+                    ""
+                };
+                text.push_str(&format!(" Full completion needs >{rate:.1} reported output tokens/s{aggregate} including overhead; use --seconds for a larger allowance.\n"));
             } else {
                 text.push_str(" At least one planned phase uses capped output; no minimum completion rate inferred.\n");
             }
@@ -2032,6 +2149,27 @@ fn deployment_text(deployment: &DeploymentReport) -> String {
     text
 }
 
+fn streams_text(label: &str, cells: &[evidence::CellSummary]) -> String {
+    let mut text = String::new();
+    for (index, cell) in cells.iter().enumerate() {
+        let first: Vec<f64> = cell
+            .first_answer_text_us
+            .iter()
+            .flatten()
+            .map(|us| *us as f64 / 1000.0)
+            .collect();
+        let worst = first.iter().copied().reduce(f64::max);
+        let median = evidence::median(first);
+        text.push_str(&format!("  {label} acquisition {index}: aggregate {} tokens/s; per-stream settlement decode {}, text-window {}, prefill {} tokens/s; first answer median {}ms, worst lane {}ms\n",
+            OrNull(cell.median_achieved_completion_tokens_per_second),
+            OrNull(cell.median_decode_tokens_per_second),
+            OrNull(cell.median_text_decode_tokens_per_second),
+            OrNull(cell.median_prefill_tokens_per_second),
+            OrNull(median), OrNull(worst)));
+    }
+    text
+}
+
 #[cfg(test)]
 #[path = "../tests/support/calibration.rs"]
 mod calibration;
@@ -2039,3 +2177,37 @@ mod calibration;
 #[cfg(test)]
 #[path = "../tests/support/finalization.rs"]
 mod finalization;
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    #[test]
+    fn builtin_table_matches_example_bytes() {
+        let portable = selection::workload(Builtin::PortableV1.bytes()).unwrap();
+        for builtin in Builtin::value_variants() {
+            let workload = selection::workload(builtin.bytes()).unwrap();
+            assert_eq!(
+                workload.name,
+                builtin.to_possible_value().unwrap().get_name()
+            );
+            assert_eq!(serde_json::to_value(builtin).unwrap(), workload.name);
+            assert_eq!(workload.cells.len(), 1);
+            assert_eq!(workload.cases.len(), 1);
+            assert_eq!(workload.cells[0].concurrency, builtin.concurrency());
+            assert_eq!(workload.cells[0].warmup_trials, 1);
+            assert_eq!(workload.cells[0].trials, 3);
+            let scope = builtin.deployment_scope();
+            assert_eq!(scope.matches("at C").count(), 1);
+            assert!(scope.contains(&format!("at C{} including prefill", builtin.concurrency())));
+            if builtin.concurrency() == 1 {
+                assert_eq!(scope, DEPLOYMENT_SCOPE);
+            }
+            if !matches!(builtin, Builtin::BaselineV1 | Builtin::BaselineV2) {
+                assert_eq!(workload.request, portable.request);
+                assert_eq!(workload.cases, portable.cases);
+            }
+        }
+    }
+}
