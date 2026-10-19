@@ -4,6 +4,7 @@ mod capacity;
 mod envelope;
 mod evidence;
 mod lifecycle;
+mod media;
 mod metrics;
 mod microbench;
 mod model;
@@ -109,6 +110,11 @@ enum Command {
         #[command(subcommand)]
         command: MicrobenchCommand,
     },
+    /// Experimental image CLI benchmarking.
+    Media {
+        #[command(subcommand)]
+        command: media::Command,
+    },
 }
 #[derive(Subcommand)]
 enum MicrobenchCommand {
@@ -154,6 +160,7 @@ fn execute(cli: Cli) -> model::Result<u8> {
         Command::Resource { command } => resources::execute(command),
         Command::Startup { command } => startup::execute(command),
         Command::Capacity { command } => capacity::execute(command),
+        Command::Media { command } => media::execute(command),
         Command::Baseline(options) => {
             let report = study::baseline(&options)?;
             show_study(&report, options.json)

@@ -7,6 +7,8 @@ Legacy v1/v2 plans stay readable with their original timing semantics and no
 invented timestamps. Legacy v1 plans cannot be paused or resumed.
 Cross-contract raw comparisons are rejected, not silently harmonized.
 
+The experimental [media contract](MEDIA.md) is separate from serving measurements.
+
 Plans may additionally bind `policy.json` through optional `policy_sha256`.
 The field is omitted when unused; existing unbound plans retain their bytes.
 Policy-bearing plans require a reader that supports this declaration.

@@ -80,6 +80,10 @@ long prompts, coding prompts, multi-request tests and conversation history check
 See the [list of tests](docs/performance/INSTALL.md#optional-selections-and-failures)
 and the [full speed guide](docs/performance/README.md).
 
+### Media CLI benchmarking
+
+See the separate [media CLI guide](docs/performance/MEDIA.md).
+
 ## Quality evaluation (WIP)
 
 A second tool, `grill`, checks model answers against task rules. It is not ready

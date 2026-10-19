@@ -9,6 +9,8 @@ Explicit startup/bootstrap and operator-restart cache studies use the separate
 baseline/check workflow. Their local-process producer and CPU fixtures do not
 qualify real recipe startup, hidden-warmup suppression or persistent model KV.
 
+Experimental image CLI benchmarking has a separate [media contract](MEDIA.md).
+
 ## Baseline, change, check
 
 Start with **[Install and first capture](INSTALL.md)** for the authoritative
