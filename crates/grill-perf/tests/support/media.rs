@@ -461,7 +461,7 @@ fn capture_retains_setup_warmups_and_serial_samples_before_offline_inspect() {
     assert_eq!(report["cells"][0]["eligible"], 3);
     assert_eq!(report["runs"].as_array().unwrap().len(), 4);
     assert_eq!(report["runs"][0]["phase"], "warmup");
-    assert_eq!(report["setup"]["status"], "complete");
+    assert_eq!(report["setup"]["process"]["status"], "complete");
     assert_eq!(fs::read(f.root.path("setup-count")).unwrap(), b"setup");
     let pids = fs::read_to_string(f.root.path("pids")).unwrap();
     assert_eq!(
@@ -471,7 +471,7 @@ fn capture_retains_setup_warmups_and_serial_samples_before_offline_inspect() {
         4
     );
     assert_eq!(
-        report["runs"][1]["outputs"][0]["validation"]["Ok"]["label"],
+        report["runs"][1]["outputs"][0]["validation"]["label"],
         "container_checked"
     );
     assert_eq!(
@@ -503,10 +503,10 @@ fn capture_checks_jpeg_content_without_trusting_extension() {
     assert_eq!(report["cells"][0]["eligible"], 3);
     assert_eq!(
         report["runs"][0]["outputs"][0]["original_name"],
-        json!(b"custom.bin".to_vec())
+        "custom.bin"
     );
     assert_eq!(
-        report["runs"][0]["outputs"][0]["validation"]["Ok"]["container"],
+        report["runs"][0]["outputs"][0]["validation"]["container"],
         "jpeg"
     );
 }
@@ -531,7 +531,7 @@ fn capture_preserves_malformed_wrong_dimensions_missing_oversized_and_nonzero_sa
             "cp \"$PREPARED\" \"$1\"",
             vec![0; 2048],
             "output_invalid",
-            "output_invalid",
+            "output_oversized",
         ),
         (
             "cp \"$PREPARED\" \"$1\"; exit 7",
@@ -541,19 +541,33 @@ fn capture_preserves_malformed_wrong_dimensions_missing_oversized_and_nonzero_sa
         ),
     ] {
         let f = capture_fixture(script);
-        fs::write(f.root.path("prepared"), bytes).unwrap();
+        fs::write(f.root.path("prepared"), &bytes).unwrap();
         let report = f.captured();
         assert_eq!(report["cells"][0]["eligible"], 0);
-        assert_eq!(report["cells"][0]["end_to_end_us"]["n"], 3);
+        assert!(report["cells"][0]["end_to_end_us"].is_null());
+        assert_eq!(report["cells"][0]["measured_runs"], 3);
         assert_eq!(report["runs"].as_array().unwrap().len(), 4);
         for run in report["runs"].as_array().unwrap() {
-            assert_eq!(run["status"], status);
+            assert_eq!(run["process"]["status"], status);
             assert_eq!(run["eligible"], false);
             if !reason.is_empty() {
                 assert!(run["reasons"].as_array().unwrap().contains(&json!(reason)));
             } else {
-                assert_eq!(run["exit_status"], 7);
+                assert_eq!(run["process"]["exit_status"], 7);
             }
+        }
+        if bytes.len() <= 1024 && script != "true" {
+            let retained = &report["runs"][0]["outputs"][0];
+            assert_eq!(retained["sha256"], digest(&bytes));
+            assert_eq!(
+                fs::read(f.root.path(&format!(
+                    "capture/run-000000/{}",
+                    retained["path"].as_str().unwrap()
+                )))
+                .unwrap(),
+                bytes
+            );
+            assert!(!f.root.path("capture/run-000000/output-00.png").exists());
         }
         successful(&f.inspect_capture());
     }
@@ -569,9 +583,9 @@ fn capture_stdout_stderr_truncation_is_nonfatal_and_prefixes_are_bounded() {
     let report = f.captured();
     assert_eq!(report["cells"][0]["eligible"], 3);
     for run in report["runs"].as_array().unwrap() {
-        assert_eq!(run["stdout_truncated"], true);
-        assert_eq!(run["stderr_truncated"], true);
-        assert_eq!(run["status"], "complete");
+        assert_eq!(run["process"]["stdout"]["truncated"], true);
+        assert_eq!(run["process"]["stderr"]["truncated"], true);
+        assert_eq!(run["process"]["status"], "complete");
     }
     assert_eq!(
         fs::read(f.root.path("capture/run-000000/stdout.bin")).unwrap(),
@@ -608,14 +622,8 @@ fn capture_output_directory_requires_all_entries_and_retains_lexical_order() {
         let report = f.captured();
         if reason.is_empty() {
             assert_eq!(report["cells"][0]["eligible"], 3);
-            assert_eq!(
-                report["runs"][0]["outputs"][0]["original_name"],
-                json!([97])
-            );
-            assert_eq!(
-                report["runs"][0]["outputs"][1]["original_name"],
-                json!([122])
-            );
+            assert_eq!(report["runs"][0]["outputs"][0]["original_name"], "a");
+            assert_eq!(report["runs"][0]["outputs"][1]["original_name"], "z");
         } else {
             assert_eq!(report["cells"][0]["eligible"], 0);
             assert!(
@@ -688,7 +696,7 @@ fn capture_deadline_cleans_descendants_and_retains_every_failure() {
     assert_eq!(report["runs"].as_array().unwrap().len(), 4);
     assert_eq!(report["cells"][0]["eligible"], 0);
     for run in report["runs"].as_array().unwrap() {
-        assert_eq!(run["status"], "deadline_exceeded");
+        assert_eq!(run["process"]["status"], "deadline_exceeded");
     }
     let pids = fs::read_to_string(f.root.path("descendants")).unwrap();
     assert_eq!(pids.lines().count(), 4);
@@ -717,13 +725,304 @@ fn capture_cancellation_cleans_descendants_and_does_not_launch_replacements() {
         .unwrap();
     assert!(signal.success());
     let output = child.wait_with_output().unwrap();
-    successful(&output);
+    assert_eq!(output.status.code(), Some(1));
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["cells"][0]["eligible"], 0);
     for run in report["runs"].as_array().unwrap() {
-        assert_eq!(run["status"], "cancelled");
+        assert_eq!(run["process"]["status"], "cancelled");
+    }
+    assert_eq!(report["status"], "cancelled");
+    for run in &report["runs"].as_array().unwrap()[1..] {
+        assert_eq!(run["process"]["spawned"], false);
+        assert_eq!(run["process"]["failure"], "cancelled_before_launch");
+        assert!(run["process"]["exit_status"].is_null());
     }
     let pids = fs::read_to_string(f.root.path("descendants")).unwrap();
     assert_eq!(pids.lines().count(), 1);
     assert_process_stopped(pids.trim());
+}
+
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn rewrite_evidence(fixture: &Fixture, name: &str, change: impl FnOnce(&mut Value)) {
+    let path = fixture.root.path(&format!("capture/{name}"));
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    change(&mut value);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    fs::write(path, &bytes).unwrap();
+    let manifest_path = fixture.root.path("capture/capture.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"][name] = json!(digest(&bytes));
+    manifest["evidence_sha256"] = json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+    fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+fn inspection_rejected(fixture: &Fixture, expected: &str) {
+    let output = fixture.inspect_capture();
+    assert_eq!(output.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains(expected), "{text}");
+}
+
+#[test]
+fn inspect_rechecks_semantics_when_manifest_hashes_are_rewritten() {
+    let invalid = capture_fixture("printf malformed > \"$1\"");
+    invalid.captured();
+    rewrite_evidence(&invalid, "run-000001/run.json", |run| {
+        run["process"]["status"] = json!("complete");
+        run["eligible"] = json!(true);
+        run["reasons"] = json!([]);
+    });
+    inspection_rejected(&invalid, "eligibility mismatch");
+
+    let reservation = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    reservation.captured();
+    rewrite_evidence(&reservation, "run-000001/reservation.json", |record| {
+        record["seed"] = json!(999)
+    });
+    inspection_rejected(&reservation, "reservation projection mismatch");
+
+    let deadline = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    deadline.captured();
+    rewrite_evidence(&deadline, "run-000001/run.json", |run| {
+        run["process"]["end_to_end_us"] = json!(5_000_000);
+    });
+    inspection_rejected(&deadline, "eligibility mismatch");
+}
+
+#[test]
+fn inspect_requires_manifest_self_digest_and_all_top_level_entries() {
+    for mode in [
+        "self_digest",
+        "receipt",
+        "cache-after-setup.json",
+        "setup/setup.json",
+    ] {
+        let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+        fixture.runner["setup"] = json!({"program":"/bin/sh","args":["-c","true"]});
+        fixture.captured();
+        let path = fixture.root.path("capture/capture.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if mode == "self_digest" {
+            manifest["evidence_sha256"] = json!("0".repeat(64));
+        } else {
+            let removed = if mode == "receipt" {
+                "receipt.json"
+            } else {
+                mode
+            };
+            manifest["files"].as_object_mut().unwrap().remove(removed);
+            manifest["evidence_sha256"] =
+                json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+            if mode == "receipt" {
+                let receipt_path = fixture.root.path("capture/receipt.json");
+                let mut receipt: Value =
+                    serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+                receipt["collector"]["version"] = json!("tampered");
+                fs::write(receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+            }
+        }
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        inspection_rejected(
+            &fixture,
+            if mode == "self_digest" {
+                "manifest digest mismatch"
+            } else {
+                "manifest"
+            },
+        );
+    }
+}
+
+#[test]
+fn typed_evidence_rejects_unknown_fields_even_with_matching_hashes() {
+    for name in [
+        "receipt.json",
+        "run-000000/reservation.json",
+        "run-000000/run.json",
+        "setup/setup.json",
+    ] {
+        let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+        fixture.runner["setup"] = json!({"program":"/bin/sh","args":["-c","true"]});
+        fixture.captured();
+        rewrite_evidence(&fixture, name, |record| {
+            record["unrecognized"] = json!(true)
+        });
+        inspection_rejected(&fixture, "unknown field");
+    }
+}
+
+#[test]
+fn failed_setup_retains_evidence_stops_samples_and_exits_nonzero() {
+    let mut fixture = capture_fixture("touch \"$ROOT/LAUNCHED\"; cp \"$PREPARED\" \"$1\"");
+    fixture.runner["setup"] =
+        json!({"program":"/bin/sh","args":["-c","printf setup-failure >&2; exit 3"]});
+    let output = fixture.capture_command().output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "setup_failed");
+    assert_eq!(report["setup"]["process"]["exit_status"], 3);
+    assert!(report["runs"].as_array().unwrap().is_empty());
+    assert_eq!(report["cells"][0]["eligible"], 0);
+    assert!(report["cells"][0]["end_to_end_us"].is_null());
+    assert!(!fixture.root.path("LAUNCHED").exists());
+    assert!(!fixture.root.path("capture/run-000000").exists());
+    assert!(!fixture.root.path("capture/setup/out").exists());
+    assert_eq!(
+        fs::read(fixture.root.path("capture/setup/stderr.bin")).unwrap(),
+        b"setup-failure"
+    );
+    let inspection = fixture.inspect_capture();
+    assert_eq!(inspection.status.code(), Some(1));
+    assert_eq!(
+        report,
+        serde_json::from_slice::<Value>(&inspection.stdout).unwrap()
+    );
+}
+
+#[test]
+fn setup_output_is_renamed_hashed_and_rechecked_offline() {
+    let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    fixture.runner["setup"] = json!({"args":["{output}"]});
+    let report = fixture.captured();
+    let output = &report["setup"]["outputs"][0];
+    assert_eq!(output["sha256"], digest(&png(1, 1)));
+    assert_eq!(output["validation"]["label"], "container_checked");
+    assert!(!fixture.root.path("capture/setup/output-00.png").exists());
+    assert!(!fixture.root.path("capture/setup/out").exists());
+    assert!(!fixture.root.path("capture/run-000000/out").exists());
+    fs::write(
+        fixture.root.path("capture/setup/retained/output-00.png"),
+        b"tampered",
+    )
+    .unwrap();
+    inspection_rejected(&fixture, "hash mismatch");
+}
+
+#[test]
+fn cache_symlinks_are_observed_without_following_or_stopping_walk() {
+    let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    fs::create_dir_all(fixture.root.path("cache/blobs")).unwrap();
+    fs::create_dir_all(fixture.root.path("cache/snapshots/revision")).unwrap();
+    fs::write(fixture.root.path("cache/blobs/a"), [0; 50]).unwrap();
+    fs::write(fixture.root.path("cache/blobs/b"), [0; 100]).unwrap();
+    fs::write(fixture.root.path("outside"), [0; 200]).unwrap();
+    symlink(
+        "../../blobs/a",
+        fixture.root.path("cache/snapshots/revision/a"),
+    )
+    .unwrap();
+    symlink("missing", fixture.root.path("cache/dangling")).unwrap();
+    symlink(
+        fixture.root.path("outside"),
+        fixture.root.path("cache/external"),
+    )
+    .unwrap();
+    fixture.runner["cache"]["paths"] = json!([fixture.root.path("cache")]);
+    let report = fixture.captured();
+    assert_eq!(report["cache_mutated_during_measurement"], false);
+    for run in report["runs"].as_array().unwrap() {
+        let cache = &run["cache_after"][0];
+        assert_eq!(cache["complete"], true);
+        assert_eq!(cache["files"], 2);
+        assert_eq!(cache["bytes"], 150);
+        assert_eq!(cache["symlinks"], 3);
+        assert_eq!(cache["links"].as_array().unwrap().len(), 3);
+        assert!(
+            cache["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|link| link["target"] == "../../blobs/a")
+        );
+    }
+}
+
+#[test]
+fn cancellation_interrupts_pause_without_launching_the_next_sample() {
+    let mut fixture = capture_fixture("printf x >> \"$ROOT/launches\"; cp \"$PREPARED\" \"$1\"");
+    fixture.workload["cells"][0]["pause_between_runs_ms"] = json!(10_000);
+    let child = fixture
+        .capture_command()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !fixture.root.path("capture/run-000000/run.json").exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let stopped = std::time::Instant::now();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        stopped.elapsed() < std::time::Duration::from_secs(5),
+        "pause ignored cancellation"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "cancelled");
+    assert_eq!(fs::read(fixture.root.path("launches")).unwrap(), b"x");
+    for run in &report["runs"].as_array().unwrap()[1..] {
+        assert_eq!(run["process"]["spawned"], false);
+        assert_eq!(run["process"]["failure"], "cancelled_before_launch");
+    }
+}
+
+#[test]
+fn spawn_failure_and_output_errors_have_codes_without_paths() {
+    let fixture = capture_fixture("true");
+    fs::write(fixture.root.path("runner"), b"#!/missing-interpreter\n").unwrap();
+    let report = fixture.captured();
+    for run in report["runs"].as_array().unwrap() {
+        assert_eq!(run["process"]["status"], "spawn_failed");
+        assert_eq!(run["process"]["spawned"], false);
+        assert_eq!(run["process"]["failure"], "spawn_failed");
+        assert!(
+            run["process"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("<program>")
+        );
+        assert!(
+            !run["process"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains(fixture.root.0.to_str().unwrap())
+        );
+        assert!(
+            run["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|reason| !reason.as_str().unwrap().contains('/'))
+        );
+    }
+}
+
+#[test]
+fn output_directory_rejects_non_utf8_filenames() {
+    let mut fixture = capture_fixture("name=$(printf '\\377'); cp \"$PREPARED\" \"$1/$name\"");
+    fixture.runner["args"] = json!(["{output_dir}"]);
+    fixture.workload["outputs"][0]["placeholder"] = json!("output_dir");
+    let report = fixture.captured();
+    assert_eq!(report["cells"][0]["eligible"], 0);
+    assert!(
+        report["runs"][0]["reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("output_non_utf8"))
+    );
 }

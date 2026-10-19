@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+/// Polling cadence and cleanup allowance, not real-time guarantees.
 const PROGRAM_POLL: Duration = Duration::from_millis(2);
 const PROGRAM_CLEANUP: Duration = Duration::from_millis(100);
 
@@ -20,10 +21,11 @@ pub struct Request<'a> {
 #[derive(Default)]
 pub struct Output {
     pub status: Option<ExitStatus>,
+    pub spawned: bool,
     /// Stops at observed leader exit, excluding subsequent pipe drainage.
-    pub elapsed_us: u64,
+    pub exit_observed_us: u64,
     /// Includes cleanup to preserve the microbench receipt's timing contract.
-    pub elapsed_ms: u64,
+    pub elapsed_with_cleanup_ms: u64,
     pub timed_out: bool,
     pub cancelled: bool,
     pub stdout: Vec<u8>,
@@ -34,7 +36,7 @@ pub struct Output {
 }
 
 impl Output {
-    fn fail(&mut self, detail: impl AsRef<str>) {
+    pub(crate) fn fail(&mut self, detail: impl AsRef<str>) {
         if let Some(failure) = &mut self.failure {
             failure.push_str("; ");
             failure.push_str(detail.as_ref());
@@ -43,6 +45,7 @@ impl Output {
         }
     }
 }
+
 /// Scoped to the synchronous external-capture command, including publication.
 /// Existing serving collectors own their separate process-wide signal latch.
 pub mod program_signals {
@@ -195,7 +198,7 @@ fn exited_pid(info: &libc::siginfo_t) -> libc::pid_t {
 
 /// The caller holds a program_signals::Guard through capture and publication.
 /// No wait/reader joins: cleanup has its own finite drain/reap allowance.
-pub fn run(request: &Request<'_>) -> Output {
+pub fn run(_guard: &program_signals::Guard, request: &Request<'_>) -> Output {
     use std::os::unix::process::CommandExt;
     let started = Instant::now();
     let mut run = Output::default();
@@ -221,11 +224,12 @@ pub fn run(request: &Request<'_>) -> Output {
         Ok(child) => child,
         Err(error) => {
             run.fail(format!("spawn {}: {error}", request.program.display()));
-            run.elapsed_ms = started.elapsed().as_millis() as u64;
-            run.elapsed_us = started.elapsed().as_micros() as u64;
+            run.elapsed_with_cleanup_ms = started.elapsed().as_millis() as u64;
+            run.exit_observed_us = started.elapsed().as_micros() as u64;
             return run;
         }
     };
+    run.spawned = true;
     let pid = child.id();
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
@@ -290,7 +294,7 @@ pub fn run(request: &Request<'_>) -> Output {
                 }
             };
             if exited {
-                run.elapsed_us = started.elapsed().as_micros() as u64;
+                run.exit_observed_us = started.elapsed().as_micros() as u64;
             }
             if exited || run.failure.is_some() {
                 // This is the ONLY group signal. WNOWAIT above kept the leader
@@ -298,10 +302,14 @@ pub fn run(request: &Request<'_>) -> Output {
                 // SAFETY: kill takes plain integers; the unreaped leader keeps
                 // its PGID reserved, so the signal cannot reach a reused group.
                 if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
-                    run.fail(format!(
-                        "owned group cleanup signal failed: {}",
-                        std::io::Error::last_os_error()
-                    ));
+                    let error = std::io::Error::last_os_error();
+                    // XNU skips exited members: an owned zombie-only group returns EPERM.
+                    if !(cfg!(target_os = "macos")
+                        && exited
+                        && error.raw_os_error() == Some(libc::EPERM))
+                    {
+                        run.fail(format!("owned group cleanup signal failed: {error}"));
+                    }
                 }
                 cleanup_started = Some(Instant::now());
             }
@@ -311,8 +319,8 @@ pub fn run(request: &Request<'_>) -> Output {
             if !reaped {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        if run.elapsed_us == 0 {
-                            run.elapsed_us = started.elapsed().as_micros() as u64;
+                        if run.exit_observed_us == 0 {
+                            run.exit_observed_us = started.elapsed().as_micros() as u64;
                         }
                         run.status = Some(status);
                         reaped = true;
@@ -337,10 +345,10 @@ pub fn run(request: &Request<'_>) -> Output {
         std::thread::sleep(PROGRAM_POLL);
     }
     finish(&mut run, out_done, err_done, request.truncation_fatal);
-    if run.elapsed_us == 0 {
-        run.elapsed_us = started.elapsed().as_micros() as u64;
+    if run.exit_observed_us == 0 {
+        run.exit_observed_us = started.elapsed().as_micros() as u64;
     }
-    run.elapsed_ms = started.elapsed().as_millis() as u64;
+    run.elapsed_with_cleanup_ms = started.elapsed().as_millis() as u64;
     run
 }
 
@@ -373,18 +381,26 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
 
+    static ACTIVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn shell(script: &str, deadline: Duration, cap: usize, fatal: bool) -> Output {
-        let _guard = program_signals::Guard::install().unwrap();
-        run(&Request {
-            program: Path::new("/bin/sh"),
-            argv: &["-c".into(), script.into()],
-            env: &[("GRILL_PROCESS_TEST".into(), "inherited addition".into())],
-            cwd: Some(Path::new("/")),
-            deadline,
-            stdout_cap: cap,
-            stderr_cap: cap,
-            truncation_fatal: fatal,
-        })
+        let _lock = ACTIVE_TEST
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let guard = program_signals::Guard::install().unwrap();
+        run(
+            &guard,
+            &Request {
+                program: Path::new("/bin/sh"),
+                argv: &["-c".into(), script.into()],
+                env: &[("GRILL_PROCESS_TEST".into(), "inherited addition".into())],
+                cwd: Some(Path::new("/")),
+                deadline,
+                stdout_cap: cap,
+                stderr_cap: cap,
+                truncation_fatal: fatal,
+            },
+        )
     }
 
     #[test]
@@ -395,14 +411,15 @@ mod tests {
             1024,
             true,
         );
+        assert!(output.spawned);
         assert!(output.status.unwrap().success());
         assert_eq!(output.stdout, b"inherited addition");
         assert_eq!(output.stderr, b"/\n");
         assert!(output.failure.is_none(), "{:?}", output.failure);
         assert!(!output.timed_out && !output.cancelled);
         assert!(!output.stdout_truncated && !output.stderr_truncated);
-        assert!(output.elapsed_us > 0);
-        assert!(output.elapsed_us / 1000 <= output.elapsed_ms);
+        assert!(output.exit_observed_us > 0);
+        assert!(output.exit_observed_us / 1000 <= output.elapsed_with_cleanup_ms);
     }
 
     #[test]
@@ -416,7 +433,10 @@ mod tests {
         assert_eq!(output.status.unwrap().code(), Some(7));
         assert_eq!(output.stderr, b"failure");
         assert!(!output.timed_out && !output.cancelled);
-        assert!(output.failure.unwrap().contains("Some(7)"));
+        assert_eq!(
+            output.failure.as_deref(),
+            Some("program exited with status Some(7)")
+        );
     }
 
     #[test]

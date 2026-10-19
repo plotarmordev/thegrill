@@ -2136,45 +2136,25 @@ fn cpu_reference(plan: &Plan, bound: u32, collector_sha256: &str) -> Result<Arti
 // Explicit operator programs
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct ProgramRun {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-    failure: Option<String>,
-    elapsed_ms: u64,
-}
-
-impl ProgramRun {
-    fn fail(&mut self, detail: impl AsRef<str>) {
-        if let Some(failure) = &mut self.failure {
-            failure.push_str("; ");
-            failure.push_str(detail.as_ref());
-        } else {
-            self.failure = Some(detail.as_ref().to_string());
-        }
-    }
-
-    fn output(&self) -> ProgramOutput {
-        ProgramOutput {
-            stdout_sha256: evidence::digest(&self.stdout),
-            stderr_sha256: evidence::digest(&self.stderr),
-            stdout_bytes: self.stdout.len() as u64,
-            stderr_bytes: self.stderr.len() as u64,
-            stdout_truncated: self.stdout_truncated,
-            stderr_truncated: self.stderr_truncated,
-        }
+fn program_output(run: &crate::process::Output) -> ProgramOutput {
+    ProgramOutput {
+        stdout_sha256: evidence::digest(&run.stdout),
+        stderr_sha256: evidence::digest(&run.stderr),
+        stdout_bytes: run.stdout.len() as u64,
+        stderr_bytes: run.stderr.len() as u64,
+        stdout_truncated: run.stdout_truncated,
+        stderr_truncated: run.stderr_truncated,
     }
 }
 
 #[cfg(target_os = "linux")]
 fn run_program(
+    guard: &program_signals::Guard,
     program: &Path,
     extra: &[String],
     plan_path: &Path,
     deadline: Duration,
-) -> ProgramRun {
+) -> crate::process::Output {
     let argv: Vec<std::ffi::OsString> = extra
         .iter()
         .map(std::ffi::OsString::from)
@@ -2183,33 +2163,29 @@ fn run_program(
             plan_path.as_os_str().to_owned(),
         ])
         .collect();
-    let run = crate::process::run(&crate::process::Request {
-        program,
-        argv: &argv,
-        env: &[],
-        cwd: None,
-        deadline,
-        stdout_cap: OUTPUT_CAP,
-        stderr_cap: STDERR_CAP,
-        truncation_fatal: true,
-    });
-    ProgramRun {
-        stdout: run.stdout,
-        stderr: run.stderr,
-        stdout_truncated: run.stdout_truncated,
-        stderr_truncated: run.stderr_truncated,
-        failure: run.failure,
-        elapsed_ms: run.elapsed_ms,
-    }
+    crate::process::run(
+        guard,
+        &crate::process::Request {
+            program,
+            argv: &argv,
+            env: &[],
+            cwd: None,
+            deadline,
+            stdout_cap: OUTPUT_CAP,
+            stderr_cap: STDERR_CAP,
+            truncation_fatal: true,
+        },
+    )
 }
 
+// The microbench evidence contract remains Linux-only despite the portable shared launcher.
 #[cfg(not(target_os = "linux"))]
-fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
-    ProgramRun {
+fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> crate::process::Output {
+    crate::process::Output {
         failure: Some(
             "native external capture requires Linux owned-process-group containment".into(),
         ),
-        ..ProgramRun::default()
+        ..crate::process::Output::default()
     }
 }
 
@@ -2630,14 +2606,20 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         evidence::write(&plan_path, &plan_bytes)?;
         let mut run = match setup {
             Ok(()) => run_program(
+                #[cfg(target_os = "linux")]
+                signal_guard
+                    .as_ref()
+                    .expect("external adapter")
+                    .as_ref()
+                    .expect("admitted signal guard"),
                 program.expect("admitted program"),
                 &options.args,
                 &plan_path,
                 Duration::from_millis(plan.allowance.deadline_ms),
             ),
-            Err(error) => ProgramRun {
+            Err(error) => crate::process::Output {
                 failure: Some(error),
-                ..ProgramRun::default()
+                ..crate::process::Output::default()
             },
         };
         // Raw bytes are authoritative even when JSON parsing, spawn or setup fails.
@@ -2674,10 +2656,10 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
             collector_sha256: collector_sha256.clone(),
             started_unix_ms,
             observation_unix_ms: metrics::unix_ms_checked()?,
-            duration_ms: run.elapsed_ms,
+            duration_ms: run.elapsed_with_cleanup_ms,
         }
         .build();
-        let output = run.output();
+        let output = program_output(&run);
         receipt.program = program.map(|path| path.display().to_string());
         receipt.program_sha256 = program_sha256;
         receipt.source_sha256 = Some(output.stdout_sha256.clone());

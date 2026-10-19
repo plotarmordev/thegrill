@@ -3,7 +3,6 @@ use crate::media::Container;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Checked {
-    pub kind: Container,
     pub width: u32,
     pub height: u32,
 }
@@ -23,6 +22,8 @@ pub(crate) enum Failure {
     InvalidMarker,
     DuplicateIhdr,
     InvalidHeader,
+    MissingIdat,
+    MissingSos,
 }
 impl Failure {
     pub(crate) fn as_str(self) -> &'static str {
@@ -40,6 +41,8 @@ impl Failure {
             Self::InvalidMarker => "invalid_marker",
             Self::DuplicateIhdr => "duplicate_ihdr",
             Self::InvalidHeader => "invalid_header",
+            Self::MissingIdat => "missing_idat",
+            Self::MissingSos => "missing_sos",
         }
     }
 }
@@ -77,21 +80,18 @@ fn crc32(bytes: &[u8]) -> u32 {
 fn u32_be(bytes: &[u8]) -> u32 {
     u32::from_be_bytes(bytes[..4].try_into().unwrap())
 }
-fn dimensions(kind: Container, width: u32, height: u32) -> Result<Checked, Failure> {
+fn dimensions(width: u32, height: u32) -> Result<Checked, Failure> {
     if width == 0 || height == 0 {
         return Err(Failure::ZeroDimension);
     }
-    Ok(Checked {
-        kind,
-        width,
-        height,
-    })
+    Ok(Checked { width, height })
 }
 fn png(bytes: &[u8]) -> Result<Checked, Failure> {
     let mut rest = bytes
         .strip_prefix(PNG_SIGNATURE)
         .ok_or(Failure::BadSignature)?;
     let mut checked = None;
+    let mut has_idat = false;
     while !rest.is_empty() {
         if rest.len() < 12 {
             return Err(Failure::Truncated);
@@ -128,12 +128,9 @@ fn png(bytes: &[u8]) -> Result<Checked, Failure> {
             if !valid_depth || data[10] != 0 || data[11] != 0 || data[12] > 1 {
                 return Err(Failure::InvalidHeader);
             }
-            checked = Some(dimensions(
-                Container::Png,
-                u32_be(data),
-                u32_be(&data[4..]),
-            )?);
+            checked = Some(dimensions(u32_be(data), u32_be(&data[4..]))?);
         }
+        has_idat |= tag == b"IDAT";
         rest = &rest[length + 12..];
         if tag == b"IEND" {
             if length != 0 {
@@ -141,6 +138,9 @@ fn png(bytes: &[u8]) -> Result<Checked, Failure> {
             }
             if !rest.is_empty() {
                 return Err(Failure::TrailingBytes);
+            }
+            if !has_idat {
+                return Err(Failure::MissingIdat);
             }
             return checked.ok_or(Failure::MissingIhdr);
         }
@@ -170,7 +170,11 @@ fn jpeg(bytes: &[u8]) -> Result<Checked, Failure> {
                 if !rest.is_empty() {
                     return Err(Failure::TrailingBytes);
                 }
-                return checked.ok_or(Failure::MissingSof);
+                return Err(if checked.is_some() {
+                    Failure::MissingSos
+                } else {
+                    Failure::MissingSof
+                });
             }
             0x01 | 0xd0..=0xd7 => continue,
             0x00 | 0xd8 => return Err(Failure::InvalidMarker),
@@ -199,7 +203,6 @@ fn jpeg(bytes: &[u8]) -> Result<Checked, Failure> {
                 return Err(Failure::InvalidLength);
             }
             checked = Some(dimensions(
-                Container::Jpeg,
                 u32::from(u16::from_be_bytes([data[3], data[4]])),
                 u32::from(u16::from_be_bytes([data[1], data[2]])),
             )?);
@@ -262,7 +265,6 @@ mod tests {
         assert_eq!(
             check(&bytes, Container::Png),
             Ok(Checked {
-                kind: Container::Png,
                 width: 17,
                 height: 29
             })
@@ -338,7 +340,6 @@ mod tests {
                 Err(Failure::MissingSof)
             } else {
                 Ok(Checked {
-                    kind: Container::Jpeg,
                     width: 17,
                     height: 29,
                 })
@@ -347,6 +348,10 @@ mod tests {
         }
         let mut bytes = jpeg_header(0xc0, 17, 29);
         bytes.extend(segment(0xc2, &[8, 0, 3, 0, 4, 0]));
+        bytes.extend([0xff, 0xd9]);
+        assert_eq!(check(&bytes, Container::Jpeg), Err(Failure::MissingSos));
+        bytes.truncate(bytes.len() - 2);
+        bytes.extend(segment(0xda, &[1, 1, 0, 0, 63, 0]));
         bytes.extend([0xff, 0xd9]);
         assert_eq!(check(&bytes, Container::Jpeg).unwrap().width, 17);
     }
@@ -432,7 +437,6 @@ mod tests {
         assert_eq!(
             check(&bytes, Container::Jpeg),
             Ok(Checked {
-                kind: Container::Jpeg,
                 width: 17,
                 height: 29,
             })
@@ -449,5 +453,11 @@ mod tests {
             let bytes = [vec![0xff, 0xd8], segment(0xc0, data), vec![0xff, 0xd9]].concat();
             assert_eq!(check(&bytes, Container::Jpeg), Err(Failure::InvalidLength));
         }
+    }
+
+    #[test]
+    fn png_requires_idat_before_iend() {
+        let bytes = [png_header(17, 29), chunk(b"IEND", &[])].concat();
+        assert_eq!(check(&bytes, Container::Png), Err(Failure::MissingIdat));
     }
 }

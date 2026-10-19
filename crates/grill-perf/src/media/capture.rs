@@ -1,260 +1,683 @@
+use super::cache::{self, Observation};
 use super::*;
-use crate::model::Deployment;
-use serde_json::{Value, json};
+use crate::{
+    model::Deployment,
+    process::{self, program_signals::Guard},
+};
 use std::{
     fs,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const CLAIM: &str = "collector-observed-fresh-process-wall-time-and-container-checked-outputs-not-attested-execution-or-quality";
-const CACHE_ENTRIES: usize = 100_000;
+const TOP_FILES: [&str; 7] = [
+    "workload.json",
+    "runner.json",
+    "deployment.json",
+    "receipt.json",
+    "cache-before.json",
+    "cache-after-setup.json",
+    "cache-after.json",
+];
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Collector {
+    version: String,
+    source: String,
+    sha256: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Platform {
+    os: String,
+    arch: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Receipt {
+    version: u32,
+    kind: String,
+    claim: String,
+    support: String,
+    slot: Slot,
+    workload_sha256: String,
+    workload_typed_sha256: String,
+    runner_sha256: String,
+    deployment_sha256: String,
+    program: Program,
+    setup_program: Option<Program>,
+    execution: Execution,
+    env: BTreeMap<String, String>,
+    cwd: Option<PathBuf>,
+    cache_declared_state: CacheState,
+    cache_paths: Vec<PathBuf>,
+    collector: Collector,
+    clock: String,
+    poll_interval_us: u64,
+    platform: Platform,
+    started_unix_ms: u64,
+    projection_root: PathBuf,
+}
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct CacheObservation {
-    path: PathBuf,
-    exists: bool,
-    files: u64,
-    bytes: u64,
-    newest_mtime_unix_ms: Option<u128>,
-    complete: bool,
-    error: Option<String>,
+struct Reservation {
+    cell: String,
+    phase: Phase,
+    seed: u64,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct SetupReservation {
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
 }
 
-fn observe(paths: &[PathBuf]) -> Vec<CacheObservation> {
-    paths
-        .iter()
-        .map(|path| {
-            let mut observation = CacheObservation {
-                path: path.clone(),
-                exists: false,
-                files: 0,
-                bytes: 0,
-                newest_mtime_unix_ms: None,
-                complete: true,
-                error: None,
-            };
-            let mut remaining = CACHE_ENTRIES;
-            if let Err(error) = walk_cache(path, &mut observation, &mut remaining, 0) {
-                observation.complete = false;
-                observation.error = Some(error);
-            }
-            observation
-        })
-        .collect()
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    Complete,
+    NonzeroExit,
+    DeadlineExceeded,
+    SpawnFailed,
+    Cancelled,
+    OutputMissing,
+    OutputInvalid,
+    CaptureFailed,
 }
-
-fn walk_cache(
-    path: &Path,
-    observation: &mut CacheObservation,
-    remaining: &mut usize,
-    depth: usize,
-) -> Result<()> {
-    if *remaining == 0 || depth > 64 {
-        return Err("cache observation walk bound exceeded".into());
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CaptureStatus {
+    Complete,
+    Cancelled,
+    SetupFailed,
+}
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum Reason {
+    OutputMissing,
+    OutputInvalid,
+    OutputCount,
+    OutputEntryType,
+    OutputNonUtf8,
+    OutputOversized,
+    OutputUnreadable,
+    NonzeroExit,
+    DeadlineExceeded,
+    SpawnFailed,
+    Cancelled,
+    CancelledBeforeLaunch,
+    CaptureFailed,
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Validation {
+    label: String,
+    container: Container,
+    width: Option<u32>,
+    height: Option<u32>,
+    reason: Option<String>,
+}
+impl Validation {
+    fn valid(&self) -> bool {
+        self.label == "container_checked" && self.reason.is_none()
     }
-    *remaining -= 1;
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && depth == 0 => return Ok(()),
-        Err(error) => return Err(error.to_string()),
-    };
-    observation.exists = true;
-    if metadata.file_type().is_symlink() {
-        return Err("cache observation does not follow symlinks".into());
-    }
-    let modified = metadata
-        .modified()
-        .map_err(|e| e.to_string())?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_millis();
-    observation.newest_mtime_unix_ms =
-        Some(observation.newest_mtime_unix_ms.unwrap_or(0).max(modified));
-    if metadata.is_file() {
-        observation.files += 1;
-        observation.bytes = observation
-            .bytes
-            .checked_add(metadata.len())
-            .ok_or("cache byte count overflow")?;
-    } else if metadata.is_dir() {
-        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
-            walk_cache(
-                &entry.map_err(|e| e.to_string())?.path(),
-                observation,
-                remaining,
-                depth + 1,
-            )?;
-        }
-    } else {
-        return Err("cache path is not a regular file or directory".into());
-    }
-    Ok(())
 }
-
-fn grew(before: &[CacheObservation], after: &[CacheObservation]) -> bool {
-    before
-        .iter()
-        .zip(after)
-        .any(|(a, b)| b.bytes > a.bytes || b.files > a.files || (!a.exists && b.exists))
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RetainedOutput {
     path: String,
-    original_name: Vec<u8>,
+    original_name: String,
     declaration: usize,
     sha256: String,
     bytes: u64,
-    validation: std::result::Result<Value, String>,
+    validation: Validation,
 }
-
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Stream {
+    sha256: String,
+    bytes: usize,
+    truncated: bool,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessRecord {
+    end_to_end_us: u64,
+    exit_status: Option<i32>,
+    status: Status,
+    spawned: bool,
+    failure: Option<Reason>,
+    detail: Option<String>,
+    stdout: Stream,
+    stderr: Stream,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SetupRecord {
+    process: ProcessRecord,
+    outputs: Vec<RetainedOutput>,
+    reasons: Vec<Reason>,
+    details: Vec<String>,
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Run {
     cell: String,
-    phase: String,
+    phase: Phase,
     seed: u64,
-    end_to_end_us: u64,
-    exit_status: Option<i32>,
-    status: String,
+    process: ProcessRecord,
     eligible: bool,
-    failure: Option<String>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-    stdout_sha256: String,
-    stderr_sha256: String,
-    stdout_bytes: usize,
-    stderr_bytes: usize,
     outputs: Vec<RetainedOutput>,
-    reasons: Vec<String>,
-    cache_after: Vec<CacheObservation>,
+    reasons: Vec<Reason>,
+    details: Vec<String>,
+    cache_after: Vec<Observation>,
     cache_mutated_during_measurement: bool,
 }
-
-fn render(
-    args: &[String],
-    request: &Request,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Manifest {
+    version: u32,
+    kind: String,
+    status: CaptureStatus,
+    runs: usize,
+    files: BTreeMap<String, String>,
+    evidence_sha256: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Summary {
+    n: usize,
+    min: u64,
+    median: f64,
+    mean: f64,
+    max: u64,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Determinism {
     seed: u64,
-    dir: &Path,
-    w: &Workload,
-) -> Result<Vec<String>> {
-    let dir = dir.to_str().ok_or("capture path must be UTF-8")?;
-    let ext = w
-        .outputs
-        .iter()
-        .find(|o| o.placeholder == OutputPlaceholder::Output)
-        .map(|o| o.container.extension());
-    args.iter()
-        .map(|arg| substitute(arg, request, seed, dir, ext))
-        .collect()
+    n: usize,
+    deterministic: Option<bool>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CellSummary {
+    cell: String,
+    warmup_runs: usize,
+    measured_runs: usize,
+    eligible: usize,
+    ineligible_by_reason: BTreeMap<Reason, usize>,
+    end_to_end_us: Option<Summary>,
+    determinism_by_seed: Vec<Determinism>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Inspection {
+    version: u32,
+    kind: String,
+    claim: String,
+    support: String,
+    status: CaptureStatus,
+    execution: Execution,
+    slot: Slot,
+    cells: Vec<CellSummary>,
+    runs: Vec<Run>,
+    setup: Option<SetupRecord>,
+    cache_mutated_during_measurement: bool,
+    evidence_sha256: String,
+}
+impl Inspection {
+    pub(super) fn exit_code(&self) -> u8 {
+        u8::from(self.status != CaptureStatus::Complete)
+    }
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&evidence::read(path, FILE_CAP)?).map_err(|e| e.to_string())
+    parse(&evidence::read(path, FILE_CAP)?)
+}
+fn json_digest(value: &impl Serialize) -> Result<String> {
+    Ok(evidence::digest(
+        &serde_json::to_vec(value).map_err(|error| error.to_string())?,
+    ))
+}
+fn reservation(sample: &Scheduled<'_>, plan: &Plan, root: &Path) -> Result<Reservation> {
+    Ok(Reservation {
+        cell: sample.cell.id.clone(),
+        phase: sample.phase,
+        seed: sample.seed,
+        args: render(
+            &plan.runner.args,
+            sample.request,
+            sample.seed,
+            &root.join(sample.directory()),
+            &plan.workload,
+        )?,
+        env: plan.runner.env.clone(),
+    })
+}
+fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
+    let mut result = Validation {
+        label: "invalid".into(),
+        container: declaration.container,
+        width: None,
+        height: None,
+        reason: None,
+    };
+    match crate::imagefile::check(bytes, declaration.container) {
+        Ok(checked) => {
+            result.width = Some(checked.width);
+            result.height = Some(checked.height);
+            if checked.width == declaration.expect.width
+                && checked.height == declaration.expect.height
+            {
+                result.label = "container_checked".into();
+            } else {
+                result.reason = Some("output_dimensions".into());
+            }
+        }
+        Err(error) => result.reason = Some(error.as_str().into()),
+    }
+    result
 }
 
-fn output_sources(dir: &Path, declaration: &Output, count: u32) -> Result<Vec<PathBuf>> {
+fn output_sources(
+    dir: &Path,
+    declaration: &Output,
+    count: u32,
+) -> std::result::Result<Vec<PathBuf>, Reason> {
     if declaration.placeholder == OutputPlaceholder::Output {
         return Ok(vec![
             dir.join(format!("output-00.{}", declaration.container.extension())),
         ]);
     }
     let directory = dir.join("out");
-    evidence::directory(&directory).map_err(|_| "output_entry_type".to_string())?;
+    evidence::directory(&directory).map_err(|_| Reason::OutputEntryType)?;
     let mut paths = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+    for entry in fs::read_dir(directory).map_err(|_| Reason::OutputUnreadable)? {
+        let path = entry.map_err(|_| Reason::OutputUnreadable)?.path();
+        if path.file_name().and_then(|name| name.to_str()).is_none() {
+            return Err(Reason::OutputNonUtf8);
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|_| Reason::OutputUnreadable)?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err("output_entry_type".into());
+            return Err(Reason::OutputEntryType);
         }
         paths.push(path);
         if paths.len() > count as usize {
-            return Err("output_count".into());
+            return Err(Reason::OutputCount);
         }
     }
     if paths.len() != count as usize {
-        return Err("output_count".into());
+        return Err(Reason::OutputCount);
     }
     paths.sort();
     Ok(paths)
 }
 
+fn retain_output(
+    source: &Path,
+    dir: &Path,
+    declaration: &Output,
+    index: usize,
+    declaration_index: usize,
+    cap: usize,
+) -> std::result::Result<RetainedOutput, (Reason, Option<String>)> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| {
+        (
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Reason::OutputMissing
+            } else {
+                Reason::OutputUnreadable
+            },
+            Some(error.to_string()),
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err((Reason::OutputEntryType, None));
+    }
+    if metadata.len() > cap as u64 {
+        return Err((Reason::OutputOversized, None));
+    }
+    let original_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or((Reason::OutputNonUtf8, None))?
+        .to_string();
+    let bytes = evidence::read(source, cap).map_err(|_| (Reason::OutputUnreadable, None))?;
+    let path = format!(
+        "retained/output-{index:02}.{}",
+        declaration.container.extension()
+    );
+    fs::rename(source, dir.join(&path))
+        .map_err(|error| (Reason::OutputUnreadable, Some(error.to_string())))?;
+    Ok(RetainedOutput {
+        path,
+        original_name,
+        declaration: declaration_index,
+        sha256: evidence::digest(&bytes),
+        bytes: bytes.len() as u64,
+        validation: validate_output(&bytes, declaration),
+    })
+}
+
+#[derive(Default)]
+struct Outputs {
+    retained: Vec<RetainedOutput>,
+    reasons: Vec<Reason>,
+    details: Vec<String>,
+}
 fn collect_outputs(
     dir: &Path,
-    w: &Workload,
+    workload: &Workload,
     request: &Request,
-) -> Result<(Vec<RetainedOutput>, Vec<String>)> {
-    use std::os::unix::ffi::OsStrExt;
-    let cap =
-        usize::try_from(w.limits.output_bytes).map_err(|_| "output_bytes exceeds platform size")?;
-    let retained = dir.join("retained");
-    evidence::fresh(&retained)?;
-    let mut outputs = Vec::new();
-    let mut reasons = Vec::new();
-    for (index, declaration) in w.outputs.iter().enumerate() {
+    args: &[String],
+    setup: bool,
+) -> Result<Outputs> {
+    let cap = usize::try_from(workload.limits.output_bytes)
+        .map_err(|_| "output_bytes exceeds platform size")?;
+    let mut result = Outputs::default();
+    let selected = workload.outputs.iter().enumerate().filter(|(_, output)| {
+        !setup
+            || args
+                .iter()
+                .any(|arg| arg.contains(&format!("{{{}}}", output.placeholder.name())))
+    });
+    for (declaration_index, declaration) in selected {
+        if !dir.join("retained").exists() {
+            evidence::fresh(&dir.join("retained"))?;
+        }
         let sources = match output_sources(dir, declaration, request.images_per_run) {
             Ok(paths) => paths,
             Err(reason) => {
-                reasons.push(reason);
+                result.reasons.push(reason);
                 continue;
             }
         };
         for source in sources {
-            let bytes = match evidence::read(&source, cap) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    reasons.push(
-                        if source.try_exists().unwrap_or(true) {
-                            "output_invalid"
-                        } else {
-                            "output_missing"
-                        }
-                        .into(),
-                    );
-                    reasons.push(error);
-                    continue;
+            match retain_output(
+                &source,
+                dir,
+                declaration,
+                result.retained.len(),
+                declaration_index,
+                cap,
+            ) {
+                Ok(output) => {
+                    if !output.validation.valid() {
+                        result.reasons.push(Reason::OutputInvalid);
+                    }
+                    result.retained.push(output);
                 }
-            };
-            let name = format!(
-                "retained/output-{:02}.{}",
-                outputs.len(),
-                declaration.container.extension()
-            );
-            evidence::write(&dir.join(&name), &bytes)?;
-            let validation = validate_output(&bytes, declaration);
-            if validation.is_err() {
-                reasons.push("output_invalid".into());
+                Err((reason, detail)) => {
+                    result.reasons.push(reason);
+                    if let Some(detail) = detail {
+                        result.details.push(detail);
+                    }
+                }
             }
-            outputs.push(RetainedOutput {
-                path: name,
-                original_name: source
-                    .file_name()
-                    .ok_or("output filename missing")?
-                    .as_bytes()
-                    .to_vec(),
-                declaration: index,
-                sha256: evidence::digest(&bytes),
-                bytes: bytes.len() as u64,
-                validation,
-            });
         }
     }
-    Ok((outputs, reasons))
+    result.reasons.sort();
+    result.reasons.dedup();
+    evidence::sync(dir)?;
+    Ok(result)
 }
 
-fn validate_output(bytes: &[u8], declaration: &Output) -> Result<Value> {
-    let checked = crate::imagefile::check(bytes, declaration.container)
-        .map_err(|error| error.as_str().to_string())?;
-    if checked.width != declaration.expect.width || checked.height != declaration.expect.height {
-        return Err("output_dimensions".into());
+fn process_status(output: &process::Output, deadline_ms: u32) -> Status {
+    if output.cancelled {
+        Status::Cancelled
+    } else if !output.spawned {
+        Status::SpawnFailed
+    } else if output.timed_out || output.exit_observed_us >= u64::from(deadline_ms) * 1000 {
+        Status::DeadlineExceeded
+    } else if output.status.is_none() {
+        Status::CaptureFailed
+    } else if !output.status.is_some_and(|status| status.success()) {
+        Status::NonzeroExit
+    } else if output.failure.is_some() {
+        Status::CaptureFailed
+    } else {
+        Status::Complete
     }
-    Ok(
-        json!({"label":"container_checked", "container":checked.kind,
-        "width":checked.width, "height":checked.height}),
-    )
+}
+fn reason_for(status: Status) -> Option<Reason> {
+    Some(match status {
+        Status::Complete => return None,
+        Status::Cancelled => Reason::Cancelled,
+        Status::DeadlineExceeded => Reason::DeadlineExceeded,
+        Status::SpawnFailed => Reason::SpawnFailed,
+        Status::NonzeroExit => Reason::NonzeroExit,
+        Status::CaptureFailed => Reason::CaptureFailed,
+        Status::OutputMissing => Reason::OutputMissing,
+        Status::OutputInvalid => Reason::OutputInvalid,
+    })
+}
+
+struct Session<'a> {
+    plan: &'a Plan,
+    receipt: &'a Receipt,
+    guard: &'a Guard,
+}
+impl Session<'_> {
+    fn launch(
+        &self,
+        program: &Program,
+        args: &[String],
+        deadline_ms: u32,
+        dir: &Path,
+    ) -> Result<ProcessRecord> {
+        let argv = args
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>();
+        let env = self
+            .plan
+            .runner
+            .env
+            .iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect::<Vec<_>>();
+        let limits = &self.plan.workload.limits;
+        let output = process::run(
+            self.guard,
+            &process::Request {
+                program: &program.path,
+                argv: &argv,
+                env: &env,
+                cwd: self.receipt.cwd.as_deref(),
+                deadline: Duration::from_millis(u64::from(deadline_ms)),
+                stdout_cap: limits.stdout_bytes,
+                stderr_cap: limits.stderr_bytes,
+                truncation_fatal: false,
+            },
+        );
+        let status = process_status(&output, deadline_ms);
+        evidence::write(&dir.join("stdout.bin"), &output.stdout)?;
+        evidence::write(&dir.join("stderr.bin"), &output.stderr)?;
+        let failure = if status == Status::Cancelled && !output.spawned {
+            Some(Reason::CancelledBeforeLaunch)
+        } else {
+            reason_for(status)
+        };
+        Ok(ProcessRecord {
+            end_to_end_us: output.exit_observed_us,
+            exit_status: output.status.and_then(|status| status.code()),
+            status,
+            spawned: output.spawned,
+            failure,
+            detail: output
+                .failure
+                .map(|text| text.replace(program.path.to_string_lossy().as_ref(), "<program>")),
+            stdout: Stream {
+                sha256: evidence::digest(&output.stdout),
+                bytes: output.stdout.len(),
+                truncated: output.stdout_truncated,
+            },
+            stderr: Stream {
+                sha256: evidence::digest(&output.stderr),
+                bytes: output.stderr.len(),
+                truncated: output.stderr_truncated,
+            },
+        })
+    }
+    fn setup(&self, root: &Path, declaration: &Setup) -> Result<SetupRecord> {
+        let dir = root.join("setup");
+        prepare_directory(&dir, &declaration.args)?;
+        let workload = &self.plan.workload;
+        let args = render(
+            &declaration.args,
+            &workload.request,
+            workload.request.seeds[0],
+            &dir,
+            workload,
+        )?;
+        evidence::publish(
+            &dir,
+            "reservation.json",
+            &SetupReservation {
+                args: args.clone(),
+                env: self.plan.runner.env.clone(),
+            },
+        )?;
+        let mut process = self.launch(
+            self.receipt
+                .setup_program
+                .as_ref()
+                .ok_or("missing setup program")?,
+            &args,
+            declaration
+                .deadline_ms
+                .unwrap_or(workload.limits.setup_deadline_ms),
+            &dir,
+        )?;
+        let outputs = collect_outputs(&dir, workload, &workload.request, &declaration.args, true)?;
+        demote_outputs(&mut process, &outputs.reasons);
+        let record = SetupRecord {
+            process,
+            outputs: outputs.retained,
+            reasons: outputs.reasons,
+            details: outputs.details,
+        };
+        evidence::publish(&dir, "setup.json", &record)?;
+        Ok(record)
+    }
+    fn sample(&self, root: &Path, sample: &Scheduled<'_>, previous: &[Observation]) -> Result<Run> {
+        let dir = root.join(sample.directory());
+        prepare_directory(&dir, &self.plan.runner.args)?;
+        let reservation = reservation(sample, self.plan, root)?;
+        evidence::publish(&dir, "reservation.json", &reservation)?;
+        let mut process = self.launch(
+            &self.receipt.program,
+            &reservation.args,
+            self.plan.workload.limits.run_deadline_ms,
+            &dir,
+        )?;
+        let mut outputs = collect_outputs(
+            &dir,
+            &self.plan.workload,
+            sample.request,
+            &self.plan.runner.args,
+            false,
+        )?;
+        demote_outputs(&mut process, &outputs.reasons);
+        if let Some(reason) = reason_for(process.status) {
+            outputs.reasons.push(reason);
+        }
+        outputs.reasons.sort();
+        outputs.reasons.dedup();
+        let cache_after = cache::observe(&self.receipt.cache_paths);
+        let record = Run {
+            cell: sample.cell.id.clone(),
+            phase: sample.phase,
+            seed: sample.seed,
+            eligible: process.status == Status::Complete,
+            process,
+            outputs: outputs.retained,
+            reasons: outputs.reasons,
+            details: outputs.details,
+            cache_mutated_during_measurement: sample.phase == Phase::Measured
+                && cache::grew(previous, &cache_after),
+            cache_after,
+        };
+        evidence::publish(&dir, "run.json", &record)?;
+        Ok(record)
+    }
+}
+fn prepare_directory(dir: &Path, args: &[String]) -> Result<()> {
+    evidence::fresh(dir)?;
+    if args.iter().any(|arg| arg.contains("{output_dir}")) {
+        evidence::fresh(&dir.join("out"))?;
+    }
+    Ok(())
+}
+fn demote_outputs(process: &mut ProcessRecord, reasons: &[Reason]) {
+    if process.status == Status::Complete && !reasons.is_empty() {
+        process.status = if reasons.contains(&Reason::OutputMissing) {
+            Status::OutputMissing
+        } else {
+            Status::OutputInvalid
+        };
+    }
+}
+fn pause(ms: u32) {
+    let deadline = Instant::now() + Duration::from_millis(u64::from(ms));
+    while !process::program_signals::cancelled() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(2)));
+    }
+}
+
+fn make_receipt(
+    plan: &Plan,
+    admitted: Preflight,
+    deployment: &[u8],
+    slot: &str,
+    root: &Path,
+) -> Result<Receipt> {
+    let slot = plan
+        .workload
+        .slots
+        .iter()
+        .find(|selected| selected.id == slot)
+        .ok_or("undeclared capture slot")?
+        .clone();
+    Ok(Receipt {
+        version: 1,
+        kind: "media-capture-v1".into(),
+        claim: CLAIM.into(),
+        support: SUPPORT.into(),
+        slot,
+        workload_sha256: admitted.workload_sha256,
+        workload_typed_sha256: admitted.workload_typed_sha256,
+        runner_sha256: admitted.runner_sha256,
+        deployment_sha256: evidence::digest(deployment),
+        program: admitted.program,
+        setup_program: admitted.setup_program,
+        execution: plan.runner.execution,
+        env: admitted.env,
+        cwd: admitted.cwd,
+        cache_declared_state: plan.runner.cache.declared_state,
+        cache_paths: admitted.cache_paths,
+        collector: Collector {
+            version: env!("CARGO_PKG_VERSION").into(),
+            source: env!("GRILL_PERF_SOURCE").into(),
+            sha256: evidence::binary_digest()?,
+        },
+        clock: "grill-monotonic".into(),
+        poll_interval_us: 2000,
+        platform: Platform {
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+        },
+        started_unix_ms: crate::metrics::unix_ms(),
+        projection_root: root.into(),
+    })
 }
 
 pub(super) fn capture(
@@ -263,447 +686,204 @@ pub(super) fn capture(
     deployment: &Path,
     slot: &str,
     out: &Path,
-) -> Result<Value> {
-    let admitted = preflight(workload, runner)?;
-    let wb = evidence::read(workload, FILE_CAP)?;
-    let rb = evidence::read(runner, FILE_CAP)?;
-    if admitted.workload_sha256 != evidence::digest(&wb)
-        || admitted.runner_sha256 != evidence::digest(&rb)
-    {
-        return Err("declarations changed during admission".into());
-    }
-    let w: Workload = parse(&wb)?;
-    let r: Runner = parse(&rb)?;
-    let selected = w
+) -> Result<Inspection> {
+    let plan = preflight(workload, runner)?;
+    let admitted = admit(&plan)?;
+    let deployment_bytes = evidence::read(deployment, FILE_CAP)?;
+    let declaration: Deployment = parse(&deployment_bytes)?;
+    declaration.validate()?;
+    if !plan
+        .workload
         .slots
         .iter()
-        .find(|s| s.id == slot)
-        .ok_or("undeclared capture slot")?;
-    let db = evidence::read(deployment, FILE_CAP)?;
-    let deployment: Deployment = serde_json::from_slice(&db).map_err(|e| e.to_string())?;
-    deployment.validate()?;
-    let _signals = crate::process::program_signals::Guard::install()?;
-    evidence::fresh(out)?;
-    let root = fs::canonicalize(out).map_err(|e| e.to_string())?;
-    evidence::write(&root.join("workload.json"), &wb)?;
-    evidence::write(&root.join("runner.json"), &rb)?;
-    evidence::write(&root.join("deployment.json"), &db)?;
-    let receipt = json!({
-        "version":1, "kind":"media-capture-v1", "claim":CLAIM,
-        "support":"experimental-extension-first-released-v0.9", "slot":selected,
-        "workload_sha256":admitted.workload_sha256, "workload_typed_sha256":admitted.workload_typed_sha256,
-        "runner_sha256":admitted.runner_sha256, "deployment_sha256":evidence::digest(&db),
-        "program":admitted.program, "setup_program":admitted.setup_program,
-        "execution":r.execution, "env":r.env, "cwd":admitted.cwd,
-        "cache_declared_state":r.cache.declared_state, "cache_paths":admitted.cache_paths,
-        "collector":{"version":env!("CARGO_PKG_VERSION"), "source":env!("GRILL_PERF_SOURCE"), "sha256":evidence::binary_digest()?},
-        "clock":"grill-monotonic", "platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH},
-        "started_unix_ms":crate::metrics::unix_ms(), "projection_root":root,
-    });
-    evidence::publish(&root, "receipt.json", &receipt)?;
-    let before = observe(&admitted.cache_paths);
-    evidence::publish(&root, "cache-before.json", &before)?;
-    if let Some(setup) = &r.setup {
-        run_setup(&root, &w, &r, &admitted, setup)?;
+        .any(|selected| selected.id == slot)
+    {
+        return Err("undeclared capture slot".into());
     }
-    let after_setup = observe(&admitted.cache_paths);
+    let guard = Guard::install()?;
+    evidence::fresh(out)?;
+    let root = fs::canonicalize(out).map_err(|error| error.to_string())?;
+    let receipt = make_receipt(&plan, admitted, &deployment_bytes, slot, &root)?;
+    evidence::write(&root.join("workload.json"), &plan.workload_bytes)?;
+    evidence::write(&root.join("runner.json"), &plan.runner_bytes)?;
+    evidence::write(&root.join("deployment.json"), &deployment_bytes)?;
+    evidence::publish(&root, "receipt.json", &receipt)?;
+    evidence::publish(
+        &root,
+        "cache-before.json",
+        &cache::observe(&receipt.cache_paths),
+    )?;
+    let session = Session {
+        plan: &plan,
+        receipt: &receipt,
+        guard: &guard,
+    };
+    let setup = plan
+        .runner
+        .setup
+        .as_ref()
+        .map(|setup| session.setup(&root, setup))
+        .transpose()?;
+    let after_setup = cache::observe(&receipt.cache_paths);
     evidence::publish(&root, "cache-after-setup.json", &after_setup)?;
+    let setup_failed = setup
+        .as_ref()
+        .is_some_and(|setup| setup.process.status != Status::Complete);
     let mut runs: Vec<Run> = Vec::new();
-    for cell in &w.cells {
-        let request = cell.request.as_ref().unwrap_or(&w.request);
-        for k in 0..cell.warmup_runs + cell.measured_runs {
-            let seed = request.seeds[k as usize % request.seeds.len()];
-            let phase = if k < cell.warmup_runs {
-                "warmup"
-            } else {
-                "measured"
-            };
-            let dir = root.join(format!("run-{:06}", runs.len()));
+    if !setup_failed {
+        for sample in schedule(&plan.workload) {
             let previous = runs
                 .last()
                 .map_or(after_setup.as_slice(), |run| &run.cache_after);
-            let context = SampleContext {
-                w: &w,
-                r: &r,
-                admitted: &admitted,
-                cell,
-            };
-            let run = sample(&dir, &context, seed, phase, previous)?;
-            runs.push(run);
-            if !crate::process::program_signals::cancelled() {
-                std::thread::sleep(Duration::from_millis(u64::from(cell.pause_between_runs_ms)));
-            }
+            runs.push(session.sample(&root, &sample, previous)?);
+            pause(sample.cell.pause_between_runs_ms);
         }
     }
-    evidence::publish(&root, "cache-after.json", &observe(&admitted.cache_paths))?;
-    publish_manifest(&root, &runs, r.setup.is_some())?;
-    inspect(&root)
-}
-
-fn launch(
-    program: &Program,
-    args: &[String],
-    r: &Runner,
-    admitted: &Preflight,
-    deadline_ms: u32,
-    limits: &Limits,
-) -> crate::process::Output {
-    let argv = args
-        .iter()
-        .map(std::ffi::OsString::from)
-        .collect::<Vec<_>>();
-    let env = r
-        .env
-        .iter()
-        .map(|(k, v)| (k.into(), v.into()))
-        .collect::<Vec<_>>();
-    crate::process::run(&crate::process::Request {
-        program: &program.path,
-        argv: &argv,
-        env: &env,
-        cwd: admitted.cwd.as_deref(),
-        deadline: Duration::from_millis(u64::from(deadline_ms)),
-        stdout_cap: limits.stdout_bytes,
-        stderr_cap: limits.stderr_bytes,
-        truncation_fatal: false,
-    })
-}
-
-fn process_status(run: &crate::process::Output) -> &'static str {
-    if run.cancelled {
-        "cancelled"
-    } else if run.timed_out {
-        "deadline_exceeded"
-    } else if run.status.is_none() {
-        "spawn_failed"
-    } else if !run.status.is_some_and(|s| s.success()) {
-        "nonzero_exit"
-    } else if run.failure.is_some() {
-        "capture_failed"
+    let status = if process::program_signals::cancelled() {
+        CaptureStatus::Cancelled
+    } else if setup_failed {
+        CaptureStatus::SetupFailed
     } else {
-        "complete"
-    }
-}
-
-fn run_setup(
-    root: &Path,
-    w: &Workload,
-    r: &Runner,
-    admitted: &Preflight,
-    setup: &Setup,
-) -> Result<()> {
-    let dir = root.join("setup");
-    evidence::fresh(&dir)?;
-    evidence::fresh(&dir.join("out"))?;
-    let args = render(&setup.args, &w.request, w.request.seeds[0], &dir, w)?;
-    evidence::publish(&dir, "reservation.json", &json!({"args":args,"env":r.env}))?;
-    let run = launch(
-        admitted
-            .setup_program
-            .as_ref()
-            .ok_or("setup program absent")?,
-        &args,
-        r,
-        admitted,
-        setup.deadline_ms.unwrap_or(w.limits.setup_deadline_ms),
-        &w.limits,
-    );
-    evidence::write(&dir.join("stdout.bin"), &run.stdout)?;
-    evidence::write(&dir.join("stderr.bin"), &run.stderr)?;
-    evidence::publish(
-        &dir,
-        "setup.json",
-        &json!({
-            "end_to_end_us":run.elapsed_us, "exit_status":run.status.and_then(|s| s.code()),
-            "status":process_status(&run), "failure":run.failure,
-            "stdout_truncated":run.stdout_truncated, "stderr_truncated":run.stderr_truncated,
-            "stdout_sha256":evidence::digest(&run.stdout), "stderr_sha256":evidence::digest(&run.stderr),
-            "stdout_bytes":run.stdout.len(), "stderr_bytes":run.stderr.len(),
-        }),
-    )
-}
-
-struct SampleContext<'a> {
-    w: &'a Workload,
-    r: &'a Runner,
-    admitted: &'a Preflight,
-    cell: &'a Cell,
-}
-
-fn sample(
-    dir: &Path,
-    context: &SampleContext<'_>,
-    seed: u64,
-    phase: &str,
-    previous: &[CacheObservation],
-) -> Result<Run> {
-    let SampleContext {
-        w,
-        r,
-        admitted,
-        cell,
-    } = context;
-    evidence::fresh(dir)?;
-    evidence::fresh(&dir.join("out"))?;
-    let request = cell.request.as_ref().unwrap_or(&w.request);
-    let args = render(&r.args, request, seed, dir, w)?;
-    evidence::publish(
-        dir,
-        "reservation.json",
-        &json!({
-            "cell":cell.id, "phase":phase, "seed":seed, "args":args, "env":r.env,
-        }),
-    )?;
-    let result = launch(
-        &admitted.program,
-        &args,
-        r,
-        admitted,
-        w.limits.run_deadline_ms,
-        &w.limits,
-    );
-    evidence::write(&dir.join("stdout.bin"), &result.stdout)?;
-    evidence::write(&dir.join("stderr.bin"), &result.stderr)?;
-    let (outputs, reasons) = collect_outputs(dir, w, request)?;
-    let cache_after = observe(&admitted.cache_paths);
-    let mut status = process_status(&result).to_string();
-    if status == "complete" && result.elapsed_us >= u64::from(w.limits.run_deadline_ms) * 1000 {
-        status = "deadline_exceeded".into();
-    }
-    if status == "complete" && !reasons.is_empty() {
-        status = if reasons.iter().any(|r| r == "output_missing") {
-            "output_missing"
-        } else {
-            "output_invalid"
-        }
-        .into();
-    }
-    let run = Run {
-        cell: cell.id.clone(),
-        phase: phase.into(),
-        seed,
-        end_to_end_us: result.elapsed_us,
-        exit_status: result.status.and_then(|s| s.code()),
-        eligible: status == "complete",
-        status,
-        failure: result.failure,
-        stdout_truncated: result.stdout_truncated,
-        stderr_truncated: result.stderr_truncated,
-        stdout_sha256: evidence::digest(&result.stdout),
-        stderr_sha256: evidence::digest(&result.stderr),
-        stdout_bytes: result.stdout.len(),
-        stderr_bytes: result.stderr.len(),
-        outputs,
-        reasons,
-        cache_mutated_during_measurement: phase == "measured" && grew(previous, &cache_after),
-        cache_after,
+        CaptureStatus::Complete
     };
-    evidence::publish(dir, "run.json", &run)?;
-    Ok(run)
+    evidence::publish(
+        &root,
+        "cache-after.json",
+        &cache::observe(&receipt.cache_paths),
+    )?;
+    let digest = publish_manifest(&root, status, runs.len(), setup.is_some())?;
+    Ok(inspection(&plan, receipt, status, runs, setup, digest))
 }
 
-fn publish_manifest(root: &Path, runs: &[Run], setup: bool) -> Result<()> {
+fn manifest_names(runs: usize, setup: bool) -> Vec<String> {
+    let mut names = TOP_FILES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    if setup {
+        names.extend(["setup/reservation.json".into(), "setup/setup.json".into()]);
+    }
+    for index in 0..runs {
+        names.push(format!("run-{index:06}/reservation.json"));
+        names.push(format!("run-{index:06}/run.json"));
+    }
+    names
+}
+fn publish_manifest(
+    root: &Path,
+    status: CaptureStatus,
+    runs: usize,
+    setup: bool,
+) -> Result<String> {
     let mut files = BTreeMap::new();
-    for name in [
-        "workload.json",
-        "runner.json",
-        "deployment.json",
-        "receipt.json",
-        "cache-before.json",
-        "cache-after-setup.json",
-        "cache-after.json",
-    ] {
+    for name in manifest_names(runs, setup) {
         files.insert(
-            name.to_string(),
+            name.clone(),
             evidence::hash_file(&root.join(name), FILE_CAP)?,
         );
     }
-    if setup {
-        for name in [
-            "setup/reservation.json",
-            "setup/setup.json",
-            "setup/stdout.bin",
-            "setup/stderr.bin",
-        ] {
-            files.insert(
-                name.to_string(),
-                evidence::hash_file(&root.join(name), usize::MAX - 1)?,
-            );
-        }
-    }
-    for (index, run) in runs.iter().enumerate() {
-        let prefix = format!("run-{index:06}");
-        for name in ["reservation.json", "run.json", "stdout.bin", "stderr.bin"] {
-            let path = format!("{prefix}/{name}");
-            files.insert(
-                path.clone(),
-                evidence::hash_file(&root.join(path), usize::MAX - 1)?,
-            );
-        }
-        for output in &run.outputs {
-            files.insert(format!("{prefix}/{}", output.path), output.sha256.clone());
-        }
-    }
-    let digest = evidence::digest(&serde_json::to_vec(&files).map_err(|e| e.to_string())?);
-    evidence::publish(
-        root,
-        "capture.json",
-        &json!({
-            "kind":"media-capture-complete-v1", "version":1, "runs":runs.len(),
-            "files":files, "evidence_sha256":digest,
-        }),
-    )
+    let evidence_sha256 = json_digest(&files)?;
+    let manifest = Manifest {
+        version: 1,
+        kind: "media-capture-complete-v1".into(),
+        status,
+        runs,
+        files,
+        evidence_sha256,
+    };
+    evidence::publish(root, "capture.json", &manifest)?;
+    Ok(manifest.evidence_sha256)
 }
-
-fn check_manifest(root: &Path) -> Result<(Value, BTreeMap<String, String>)> {
+fn check_manifest(root: &Path) -> Result<Manifest> {
     evidence::directory(root)?;
-    let manifest: Value = read_json(&root.join("capture.json"))?;
-    if manifest["kind"] != "media-capture-complete-v1" || manifest["version"] != 1 {
+    let manifest: Manifest = read_json(&root.join("capture.json"))?;
+    if manifest.kind != "media-capture-complete-v1" || manifest.version != 1 {
         return Err("invalid media capture manifest".into());
     }
-    let files: BTreeMap<String, String> =
-        serde_json::from_value(manifest["files"].clone()).map_err(|e| e.to_string())?;
-    if manifest["evidence_sha256"]
-        != evidence::digest(&serde_json::to_vec(&files).map_err(|e| e.to_string())?)
-    {
+    if manifest.evidence_sha256 != json_digest(&manifest.files)? {
         return Err("capture manifest digest mismatch".into());
     }
-    for (name, digest) in &files {
-        let path = Path::new(name);
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return Err("invalid retained evidence path".into());
-        }
-        let mut ancestor = root.to_path_buf();
-        for part in path.parent().into_iter().flat_map(Path::components) {
-            ancestor.push(part);
-            evidence::directory(&ancestor)?;
-        }
-        if evidence::hash_file(&root.join(path), usize::MAX - 1)? != *digest {
-            return Err(format!("retained evidence hash mismatch: {name}"));
-        }
-    }
-    Ok((manifest, files))
+    Ok(manifest)
 }
-
-pub(super) fn inspect(root: &Path) -> Result<Value> {
-    let (manifest, files) = check_manifest(root)?;
-    let wb = evidence::read(&root.join("workload.json"), FILE_CAP)?;
-    let rb = evidence::read(&root.join("runner.json"), FILE_CAP)?;
-    let w: Workload = parse(&wb)?;
-    let r: Runner = parse(&rb)?;
-    validate(&w, &r)?;
-    let receipt: Value = read_json(&root.join("receipt.json"))?;
-    if receipt["kind"] != "media-capture-v1"
-        || receipt["workload_sha256"] != evidence::digest(&wb)
-        || receipt["runner_sha256"] != evidence::digest(&rb)
-        || receipt["workload_typed_sha256"]
-            != evidence::digest(&serde_json::to_vec(&w).map_err(|e| e.to_string())?)
+fn verified_bytes(root: &Path, name: &str, manifest: &Manifest) -> Result<Vec<u8>> {
+    let expected = manifest.files.get(name).ok_or("incomplete manifest")?;
+    let path = Path::new(name);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        return Err("media receipt declaration mismatch".into());
+        return Err("invalid evidence path".into());
     }
-    let db = evidence::read(&root.join("deployment.json"), FILE_CAP)?;
-    let deployment: Deployment = serde_json::from_slice(&db).map_err(|e| e.to_string())?;
-    deployment.validate()?;
-    if receipt["deployment_sha256"] != evidence::digest(&db) {
-        return Err("media deployment hash mismatch".into());
+    let mut ancestor = root.to_path_buf();
+    for part in path.parent().into_iter().flat_map(Path::components) {
+        ancestor.push(part);
+        evidence::directory(&ancestor)?;
     }
-    let projection = Path::new(
-        receipt["projection_root"]
-            .as_str()
-            .ok_or("missing projection root")?,
-    );
-    let mut runs = Vec::new();
-    let mut summaries = Vec::new();
-    let after_setup: Vec<CacheObservation> = read_json(&root.join("cache-after-setup.json"))?;
-    for cell in &w.cells {
-        let first = runs.len();
-        let request = cell.request.as_ref().unwrap_or(&w.request);
-        for k in 0..cell.warmup_runs + cell.measured_runs {
-            let name = format!("run-{:06}", runs.len());
-            let dir = root.join(&name);
-            evidence::directory(&dir)?;
-            let run: Run = read_json(&dir.join("run.json"))?;
-            let phase = if k < cell.warmup_runs {
-                "warmup"
-            } else {
-                "measured"
-            };
-            let seed = request.seeds[k as usize % request.seeds.len()];
-            let args = render(&r.args, request, seed, &projection.join(&name), &w)?;
-            let reservation: Value = read_json(&dir.join("reservation.json"))?;
-            if reservation
-                != json!({"cell":cell.id,"phase":phase,"seed":seed,"args":args,"env":r.env})
-                || run.cell != cell.id
-                || run.phase != phase
-                || run.seed != seed
-            {
-                return Err("sample reservation projection mismatch".into());
-            }
-            verify_run(&dir, &name, &run, &w, request, &files)?;
-            let previous = runs
-                .last()
-                .map_or(after_setup.as_slice(), |r: &Run| &r.cache_after);
-            if run.cache_mutated_during_measurement
-                != (phase == "measured" && grew(previous, &run.cache_after))
-            {
-                return Err("cache growth observation mismatch".into());
-            }
-            runs.push(run);
-        }
-        summaries.push(summarize(cell, &runs[first..]));
+    let bytes = evidence::read(&root.join(path), FILE_CAP)?;
+    if evidence::digest(&bytes) != *expected {
+        return Err(format!("retained evidence hash mismatch: {name}"));
     }
-    if manifest["runs"] != runs.len() {
-        return Err("capture run count mismatch".into());
-    }
-    Ok(json!({
-        "version":1, "kind":"media-inspection-v1", "claim":CLAIM,
-        "support":"experimental-extension-first-released-v0.9", "execution":r.execution,
-        "slot":receipt["slot"], "cells":summaries, "runs":runs,
-        "setup":if r.setup.is_some() { read_json::<Value>(&root.join("setup/setup.json"))? } else { Value::Null },
-        "cache_mutated_during_measurement":runs.iter().any(|r| r.cache_mutated_during_measurement),
-        "evidence_sha256":manifest["evidence_sha256"],
-    }))
+    Ok(bytes)
+}
+fn verified_json<T: serde::de::DeserializeOwned>(
+    root: &Path,
+    name: &str,
+    manifest: &Manifest,
+) -> Result<T> {
+    parse(&verified_bytes(root, name, manifest)?)
 }
 
-fn verify_run(
+fn verified_observations(root: &Path, name: &str, manifest: &Manifest) -> Result<Vec<Observation>> {
+    let Strict(value) = serde_json::from_slice(&verified_bytes(root, name, manifest)?)
+        .map_err(|error| error.to_string())?;
+    for observation in value
+        .as_array()
+        .ok_or("cache observations must be an array")?
+    {
+        reject_positional_records(observation)?;
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+fn verify_process(
     dir: &Path,
-    name: &str,
-    run: &Run,
-    w: &Workload,
-    request: &Request,
-    files: &BTreeMap<String, String>,
+    record: &ProcessRecord,
+    limits: &Limits,
+    deadline_ms: u32,
 ) -> Result<()> {
-    for required in ["reservation.json", "run.json", "stdout.bin", "stderr.bin"] {
-        if !files.contains_key(&format!("{name}/{required}")) {
-            return Err("incomplete manifest".into());
-        }
-    }
-    for (stream, cap, length, digest) in [
-        (
-            "stdout.bin",
-            w.limits.stdout_bytes,
-            run.stdout_bytes,
-            &run.stdout_sha256,
-        ),
-        (
-            "stderr.bin",
-            w.limits.stderr_bytes,
-            run.stderr_bytes,
-            &run.stderr_sha256,
-        ),
+    for (name, stream, cap) in [
+        ("stdout.bin", &record.stdout, limits.stdout_bytes),
+        ("stderr.bin", &record.stderr, limits.stderr_bytes),
     ] {
-        let bytes = evidence::read(&dir.join(stream), cap)?;
-        if bytes.len() != length || evidence::digest(&bytes) != *digest {
-            return Err("stream evidence mismatch".into());
+        let bytes = evidence::read(&dir.join(name), cap)?;
+        if bytes.len() != stream.bytes || evidence::digest(&bytes) != stream.sha256 {
+            return Err("stream hash mismatch".into());
         }
     }
-    let mut counts = vec![0; w.outputs.len()];
-    for (index, output) in run.outputs.iter().enumerate() {
-        let declaration = w
+    if record.status == Status::Complete
+        && (!record.spawned
+            || record.exit_status != Some(0)
+            || record.failure.is_some()
+            || record.end_to_end_us >= u64::from(deadline_ms) * 1000)
+    {
+        return Err("process eligibility mismatch".into());
+    }
+    if record.status == Status::SpawnFailed && record.spawned {
+        return Err("spawn status mismatch".into());
+    }
+    if !record.spawned && record.exit_status.is_some() {
+        return Err("unstarted process has exit status".into());
+    }
+    Ok(())
+}
+fn verify_outputs(dir: &Path, outputs: &[RetainedOutput], workload: &Workload) -> Result<Vec<u32>> {
+    let mut counts = vec![0; workload.outputs.len()];
+    if !outputs.is_empty() {
+        evidence::directory(&dir.join("retained"))?;
+    }
+    for (index, output) in outputs.iter().enumerate() {
+        let declaration = workload
             .outputs
             .get(output.declaration)
             .ok_or("invalid output declaration index")?;
@@ -712,74 +892,369 @@ fn verify_run(
                 "retained/output-{index:02}.{}",
                 declaration.container.extension()
             )
+            || output.original_name.is_empty()
+            || Path::new(&output.original_name).components().count() != 1
+            || !matches!(
+                Path::new(&output.original_name).components().next(),
+                Some(std::path::Component::Normal(_))
+            )
         {
-            return Err("invalid retained output path".into());
+            return Err("invalid retained output name".into());
         }
-        if !files.contains_key(&format!("{name}/{}", output.path)) {
-            return Err("unlisted output".into());
-        }
-        let cap =
-            usize::try_from(w.limits.output_bytes).map_err(|_| "output cap exceeds platform")?;
+        let cap = usize::try_from(workload.limits.output_bytes)
+            .map_err(|_| "output cap exceeds platform")?;
         let bytes = evidence::read(&dir.join(&output.path), cap)?;
-        if evidence::digest(&bytes) != output.sha256
-            || bytes.len() as u64 != output.bytes
-            || validate_output(&bytes, declaration) != output.validation
-        {
-            return Err("retained output hash or validation mismatch".into());
+        if bytes.len() as u64 != output.bytes || evidence::digest(&bytes) != output.sha256 {
+            return Err("retained output hash mismatch".into());
+        }
+        if validate_output(&bytes, declaration) != output.validation {
+            return Err("retained output validation mismatch".into());
         }
         counts[output.declaration] += 1;
     }
-    let complete = counts.iter().zip(&w.outputs).all(|(count, output)| {
-        *count
-            == if output.placeholder == OutputPlaceholder::Output {
-                1
-            } else {
-                request.images_per_run
-            }
-    });
-    let eligible = run.exit_status == Some(0)
-        && run.failure.is_none()
-        && run.end_to_end_us < u64::from(w.limits.run_deadline_ms) * 1000
+    Ok(counts)
+}
+fn output_counts_match(
+    counts: &[u32],
+    workload: &Workload,
+    request: &Request,
+    args: &[String],
+    setup: bool,
+) -> bool {
+    counts.iter().zip(&workload.outputs).all(|(count, output)| {
+        let selected = !setup
+            || args
+                .iter()
+                .any(|arg| arg.contains(&format!("{{{}}}", output.placeholder.name())));
+        let expected = if !selected {
+            0
+        } else if output.placeholder == OutputPlaceholder::Output {
+            1
+        } else {
+            request.images_per_run
+        };
+        *count == expected
+    })
+}
+fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Result<()> {
+    let workload = &plan.workload;
+    verify_process(
+        dir,
+        &run.process,
+        &workload.limits,
+        workload.limits.run_deadline_ms,
+    )?;
+    let counts = verify_outputs(dir, &run.outputs, workload)?;
+    let eligible = run.process.status == Status::Complete
+        && run.process.exit_status == Some(0)
+        && run.process.failure.is_none()
+        && run.process.end_to_end_us < u64::from(workload.limits.run_deadline_ms) * 1000
         && run.reasons.is_empty()
-        && complete
-        && run.outputs.iter().all(|o| o.validation.is_ok());
-    if run.eligible != (run.status == "complete") || (run.eligible && !eligible) {
+        && output_counts_match(&counts, workload, sample.request, &plan.runner.args, false)
+        && run.outputs.iter().all(|output| output.validation.valid());
+    if run.eligible != eligible || (run.process.status == Status::Complete && !eligible) {
         return Err("sample eligibility mismatch".into());
+    }
+    if run.cell != sample.cell.id || run.phase != sample.phase || run.seed != sample.seed {
+        return Err("sample schedule mismatch".into());
     }
     Ok(())
 }
 
-fn summarize(cell: &Cell, runs: &[Run]) -> Value {
-    let measured = runs
-        .iter()
-        .filter(|r| r.phase == "measured")
-        .collect::<Vec<_>>();
-    let mut times = measured.iter().map(|r| r.end_to_end_us).collect::<Vec<_>>();
-    times.sort_unstable();
-    let n = times.len();
-    let median = if n % 2 == 0 {
-        (times[n / 2 - 1] as f64 + times[n / 2] as f64) / 2.0
-    } else {
-        times[n / 2] as f64
+fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<()> {
+    if receipt.kind != "media-capture-v1"
+        || receipt.version != 1
+        || receipt.support != SUPPORT
+        || receipt.claim != CLAIM
+        || receipt.workload_sha256 != evidence::digest(&plan.workload_bytes)
+        || receipt.workload_typed_sha256 != json_digest(&plan.workload)?
+        || receipt.runner_sha256 != evidence::digest(&plan.runner_bytes)
+        || receipt.deployment_sha256 != evidence::digest(deployment)
+        || !plan.workload.slots.contains(&receipt.slot)
+        || receipt.execution != plan.runner.execution
+        || receipt.env != plan.runner.env
+        || receipt.cache_declared_state != plan.runner.cache.declared_state
+        || receipt.setup_program.is_some() != plan.runner.setup.is_some()
+    {
+        return Err("media receipt declaration mismatch".into());
+    }
+    let declaration: Deployment = parse(deployment)?;
+    declaration.validate()
+}
+fn inspect_setup(
+    root: &Path,
+    plan: &Plan,
+    receipt: &Receipt,
+    manifest: &Manifest,
+) -> Result<Option<SetupRecord>> {
+    let Some(setup) = &plan.runner.setup else {
+        return Ok(None);
     };
+    let reservation: SetupReservation = verified_json(root, "setup/reservation.json", manifest)?;
+    let args = render(
+        &setup.args,
+        &plan.workload.request,
+        plan.workload.request.seeds[0],
+        &receipt.projection_root.join("setup"),
+        &plan.workload,
+    )?;
+    if reservation
+        != (SetupReservation {
+            args,
+            env: plan.runner.env.clone(),
+        })
+    {
+        return Err("setup reservation projection mismatch".into());
+    }
+    let record: SetupRecord = verified_json(root, "setup/setup.json", manifest)?;
+    let dir = root.join("setup");
+    verify_process(
+        &dir,
+        &record.process,
+        &plan.workload.limits,
+        setup
+            .deadline_ms
+            .unwrap_or(plan.workload.limits.setup_deadline_ms),
+    )?;
+    let counts = verify_outputs(&dir, &record.outputs, &plan.workload)?;
+    if record.process.status == Status::Complete
+        && (!record.reasons.is_empty()
+            || !output_counts_match(
+                &counts,
+                &plan.workload,
+                &plan.workload.request,
+                &setup.args,
+                true,
+            )
+            || record
+                .outputs
+                .iter()
+                .any(|output| !output.validation.valid()))
+    {
+        return Err("setup output eligibility mismatch".into());
+    }
+    Ok(Some(record))
+}
+
+pub(super) fn inspect(root: &Path) -> Result<Inspection> {
+    let manifest = check_manifest(root)?;
+    let plan = plan_from_bytes(
+        verified_bytes(root, "workload.json", &manifest)?,
+        verified_bytes(root, "runner.json", &manifest)?,
+    )?;
+    let receipt: Receipt = verified_json(root, "receipt.json", &manifest)?;
+    verify_receipt(
+        &receipt,
+        &plan,
+        &verified_bytes(root, "deployment.json", &manifest)?,
+    )?;
+    if manifest.runs > schedule(&plan.workload).count() {
+        return Err("capture run count exceeds plan".into());
+    }
+    let expected_names = manifest_names(manifest.runs, plan.runner.setup.is_some())
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if manifest.files.keys().cloned().collect::<BTreeSet<_>>() != expected_names {
+        return Err("manifest completeness mismatch".into());
+    }
+    verified_observations(root, "cache-before.json", &manifest)?;
+    let after_setup = verified_observations(root, "cache-after-setup.json", &manifest)?;
+    verified_observations(root, "cache-after.json", &manifest)?;
+    let setup = inspect_setup(root, &plan, &receipt, &manifest)?;
+    let setup_failed = setup
+        .as_ref()
+        .is_some_and(|setup| setup.process.status != Status::Complete);
+    let expected_runs = if setup_failed {
+        0
+    } else {
+        schedule(&plan.workload).count()
+    };
+    if manifest.runs != expected_runs {
+        return Err("capture run count mismatch".into());
+    }
+    let mut runs: Vec<Run> = Vec::with_capacity(expected_runs);
+    for sample in schedule(&plan.workload).take(expected_runs) {
+        let prefix = sample.directory();
+        let reserved: Reservation =
+            verified_json(root, &format!("{prefix}/reservation.json"), &manifest)?;
+        if reserved != reservation(&sample, &plan, &receipt.projection_root)? {
+            return Err("sample reservation projection mismatch".into());
+        }
+        let run: Run = verified_json(root, &format!("{prefix}/run.json"), &manifest)?;
+        verify_run(&root.join(prefix), &run, &sample, &plan)?;
+        let previous = runs
+            .last()
+            .map_or(after_setup.as_slice(), |run| &run.cache_after);
+        if run.cache_mutated_during_measurement
+            != (sample.phase == Phase::Measured && cache::grew(previous, &run.cache_after))
+        {
+            return Err("cache growth observation mismatch".into());
+        }
+        runs.push(run);
+    }
+    let cancelled = runs
+        .iter()
+        .any(|run| run.process.status == Status::Cancelled)
+        || setup
+            .as_ref()
+            .is_some_and(|setup| setup.process.status == Status::Cancelled);
+    if (setup_failed && manifest.status == CaptureStatus::Complete)
+        || (cancelled && manifest.status != CaptureStatus::Cancelled)
+        || (!setup_failed && manifest.status == CaptureStatus::SetupFailed)
+    {
+        return Err("capture status mismatch".into());
+    }
+    Ok(inspection(
+        &plan,
+        receipt,
+        manifest.status,
+        runs,
+        setup,
+        manifest.evidence_sha256,
+    ))
+}
+
+fn inspection(
+    plan: &Plan,
+    receipt: Receipt,
+    status: CaptureStatus,
+    runs: Vec<Run>,
+    setup: Option<SetupRecord>,
+    evidence_sha256: String,
+) -> Inspection {
+    let cells = plan
+        .workload
+        .cells
+        .iter()
+        .map(|cell| summarize(cell, &runs))
+        .collect();
+    Inspection {
+        version: 1,
+        kind: "media-inspection-v1".into(),
+        claim: CLAIM.into(),
+        support: SUPPORT.into(),
+        status,
+        execution: receipt.execution,
+        slot: receipt.slot,
+        cells,
+        cache_mutated_during_measurement: runs
+            .iter()
+            .any(|run| run.cache_mutated_during_measurement),
+        runs,
+        setup,
+        evidence_sha256,
+    }
+}
+
+fn summarize(cell: &Cell, runs: &[Run]) -> CellSummary {
+    let matching = runs
+        .iter()
+        .filter(|run| run.cell == cell.id)
+        .collect::<Vec<_>>();
+    let measured = matching
+        .iter()
+        .copied()
+        .filter(|run| run.phase == Phase::Measured)
+        .collect::<Vec<_>>();
+    let times = measured
+        .iter()
+        .filter(|run| run.eligible)
+        .map(|run| run.process.end_to_end_us)
+        .collect::<Vec<_>>();
+    let end_to_end_us =
+        evidence::median(times.iter().map(|value| *value as f64).collect()).map(|median| Summary {
+            n: times.len(),
+            min: *times.iter().min().expect("nonempty median"),
+            median,
+            mean: times.iter().map(|value| u128::from(*value)).sum::<u128>() as f64
+                / times.len() as f64,
+            max: *times.iter().max().expect("nonempty median"),
+        });
+    let mut reasons = BTreeMap::new();
     let mut seeds = BTreeMap::<u64, Vec<Vec<&str>>>::new();
     for run in &measured {
         if run.eligible {
-            seeds
-                .entry(run.seed)
-                .or_default()
-                .push(run.outputs.iter().map(|o| o.sha256.as_str()).collect());
+            seeds.entry(run.seed).or_default().push(
+                run.outputs
+                    .iter()
+                    .map(|output| output.sha256.as_str())
+                    .collect(),
+            );
+        } else {
+            for reason in &run.reasons {
+                *reasons.entry(*reason).or_default() += 1;
+            }
         }
     }
-    let determinism = seeds.iter().map(|(seed, outputs)| json!({
-        "seed":seed, "n":outputs.len(),
-        "deterministic":if outputs.len() < 2 { Value::Null } else { json!(outputs.windows(2).all(|w| w[0] == w[1])) },
-    })).collect::<Vec<_>>();
-    json!({
-        "cell":cell.id, "warmup_runs":cell.warmup_runs, "measured_runs":measured.len(),
-        "eligible":measured.iter().filter(|r| r.eligible).count(),
-        "end_to_end_us":{"n":n,"min":times[0],"median":median,
-            "mean":times.iter().map(|t| u128::from(*t)).sum::<u128>() as f64 / n as f64,"max":times[n-1]},
-        "determinism_by_seed":determinism,
-    })
+    let determinism_by_seed = seeds
+        .into_iter()
+        .map(|(seed, outputs)| Determinism {
+            seed,
+            n: outputs.len(),
+            deterministic: (outputs.len() > 1)
+                .then(|| outputs.windows(2).all(|pair| pair[0] == pair[1])),
+        })
+        .collect();
+    CellSummary {
+        cell: cell.id.clone(),
+        warmup_runs: matching.len() - measured.len(),
+        measured_runs: measured.len(),
+        eligible: times.len(),
+        ineligible_by_reason: reasons,
+        end_to_end_us,
+        determinism_by_seed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn maximal_schedule_manifest_fits_and_round_trips() {
+        let runs = MAX_CELLS * (MAX_WARMUPS + MAX_MEASURED) as usize;
+        let files = manifest_names(runs, true)
+            .into_iter()
+            .map(|name| (name, "0".repeat(64)))
+            .collect();
+        let manifest = Manifest {
+            version: 1,
+            kind: "media-capture-complete-v1".into(),
+            status: CaptureStatus::Complete,
+            runs,
+            evidence_sha256: json_digest(&files).unwrap(),
+            files,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        assert!(bytes.len() <= FILE_CAP);
+        let root = std::env::temp_dir().join(format!(
+            "grill-media-max-{}-{}",
+            std::process::id(),
+            crate::metrics::unix_ms()
+        ));
+        evidence::fresh(&root).unwrap();
+        evidence::write(&root.join("capture.json"), &bytes).unwrap();
+        let read = check_manifest(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(read.runs, runs);
+        assert_eq!(read.files.len(), runs * 2 + TOP_FILES.len() + 2);
+        assert_eq!(read.evidence_sha256, json_digest(&read.files).unwrap());
+    }
+
+    #[test]
+    fn deadline_and_spawn_status_use_observed_facts() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut output = process::Output {
+            spawned: true,
+            status: Some(std::process::ExitStatus::from_raw(0)),
+            exit_observed_us: 100_000,
+            ..process::Output::default()
+        };
+        assert!(process_status(&output, 100) == Status::DeadlineExceeded);
+        output.exit_observed_us = 99_999;
+        assert!(process_status(&output, 100) == Status::Complete);
+        output.status = None;
+        assert!(process_status(&output, 100) == Status::CaptureFailed);
+        output.spawned = false;
+        assert!(process_status(&output, 100) == Status::SpawnFailed);
+    }
 }
