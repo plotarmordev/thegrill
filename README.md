@@ -80,6 +80,9 @@ long prompts, coding prompts, multi-request tests and conversation history check
 See the [list of tests](docs/performance/INSTALL.md#optional-selections-and-failures)
 and the [full speed guide](docs/performance/README.md).
 
+Experimental image CLI workload admission is available through
+[`grill-perf media preflight`](docs/performance/MEDIA.md); it launches nothing.
+
 ## Quality evaluation (WIP)
 
 A second tool, `grill`, checks model answers against task rules. It is not ready

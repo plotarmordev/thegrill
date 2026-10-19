@@ -4,6 +4,7 @@ mod capacity;
 mod envelope;
 mod evidence;
 mod lifecycle;
+mod media;
 mod metrics;
 mod microbench;
 mod model;
@@ -38,6 +39,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Experimental image CLI benchmarking: preflight only; launches nothing.
+    Media {
+        #[command(subcommand)]
+        command: media::Command,
+    },
     /// Finite prospective context/load and retention studies; operator recovery only.
     Capacity {
         #[command(subcommand)]
@@ -150,6 +156,7 @@ fn print_json(value: &impl serde::Serialize) -> model::Result<()> {
 #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 fn execute(cli: Cli) -> model::Result<u8> {
     match cli.command {
+        Command::Media { command } => media::execute(command),
         Command::Systemone { command } => systemone::execute(command),
         Command::Resource { command } => resources::execute(command),
         Command::Startup { command } => startup::execute(command),
