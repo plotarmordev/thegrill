@@ -1,4 +1,3 @@
-#[path = "compare.rs"]
 pub(super) mod compare;
 use super::cache::{self, Observation};
 use super::*;
@@ -29,7 +28,7 @@ struct Collector {
     source: String,
     sha256: String,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Platform {
     os: String,
@@ -181,6 +180,7 @@ struct SetupRecord {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Run {
+    receipt_sha256: String,
     cell: String,
     phase: Phase,
     seed: u64,
@@ -202,6 +202,19 @@ struct Manifest {
     runs: usize,
     files: BTreeMap<String, String>,
     evidence_sha256: String,
+}
+impl Manifest {
+    fn digest(&self) -> Result<String> {
+        // The digest covers the complete manifest body, excluding only itself.
+        json_digest(&(
+            self.version,
+            &self.kind,
+            self.status,
+            self.finished_unix_ms,
+            self.runs,
+            &self.files,
+        ))
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -485,6 +498,7 @@ fn reason_for(status: Status) -> Option<Reason> {
 struct Session<'a> {
     plan: &'a Plan,
     receipt: &'a Receipt,
+    receipt_sha256: &'a str,
     guard: &'a Guard,
 }
 impl Session<'_> {
@@ -619,6 +633,7 @@ impl Session<'_> {
         outputs.reasons.sort();
         outputs.reasons.dedup();
         let record = Run {
+            receipt_sha256: self.receipt_sha256.into(),
             cell: sample.cell.id.clone(),
             phase: sample.phase,
             seed: sample.seed,
@@ -730,6 +745,7 @@ pub(super) fn capture(
     evidence::write(&root.join("runner.json"), &plan.runner_bytes)?;
     evidence::write(&root.join("deployment.json"), &deployment_bytes)?;
     evidence::publish(&root, "receipt.json", &receipt)?;
+    let receipt_sha256 = evidence::hash_file(&root.join("receipt.json"), FILE_CAP)?;
     evidence::publish(
         &root,
         "cache-before.json",
@@ -738,6 +754,7 @@ pub(super) fn capture(
     let session = Session {
         plan: &plan,
         receipt: &receipt,
+        receipt_sha256: &receipt_sha256,
         guard: &guard,
     };
     let setup = plan
@@ -804,16 +821,16 @@ fn publish_manifest(
             evidence::hash_file(&root.join(name), FILE_CAP)?,
         );
     }
-    let evidence_sha256 = json_digest(&files)?;
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         version: 1,
         kind: "media-capture-complete-v1".into(),
         status,
         finished_unix_ms: crate::metrics::unix_ms(),
         runs,
         files,
-        evidence_sha256,
+        evidence_sha256: String::new(),
     };
+    manifest.evidence_sha256 = manifest.digest()?;
     evidence::publish(root, "capture.json", &manifest)?;
     Ok(manifest.evidence_sha256)
 }
@@ -823,7 +840,7 @@ fn check_manifest(root: &Path) -> Result<Manifest> {
     if manifest.kind != "media-capture-complete-v1" || manifest.version != 1 {
         return Err("invalid media capture manifest".into());
     }
-    if manifest.evidence_sha256 != json_digest(&manifest.files)? {
+    if manifest.evidence_sha256 != manifest.digest()? {
         return Err("capture manifest digest mismatch".into());
     }
     Ok(manifest)
@@ -1068,6 +1085,7 @@ struct Loaded {
     receipt: Receipt,
     deployment: Deployment,
     finished_unix_ms: u64,
+    receipt_sha256: String,
     inspection: Inspection,
 }
 
@@ -1078,6 +1096,10 @@ fn load(root: &Path) -> Result<Loaded> {
         verified_bytes(root, "runner.json", &manifest)?,
     )?;
     let receipt: Receipt = verified_json(root, "receipt.json", &manifest)?;
+    let receipt_sha256 = manifest
+        .files
+        .get("receipt.json")
+        .expect("verified receipt entry");
     let deployment = verify_receipt(
         &receipt,
         &plan,
@@ -1119,6 +1141,9 @@ fn load(root: &Path) -> Result<Loaded> {
             return Err("sample reservation projection mismatch".into());
         }
         let run: Run = verified_json(root, &format!("{prefix}/run.json"), &manifest)?;
+        if &run.receipt_sha256 != receipt_sha256 {
+            return Err("run record is bound to a different capture receipt".into());
+        }
         verify_run(&root.join(prefix), &run, &sample, &plan)?;
         let previous = runs
             .last()
@@ -1142,6 +1167,17 @@ fn load(root: &Path) -> Result<Loaded> {
     {
         return Err("capture status mismatch".into());
     }
+    let process_us = runs
+        .iter()
+        .map(|run| u128::from(run.process.end_to_end_us))
+        .sum::<u128>()
+        + setup
+            .as_ref()
+            .map_or(0, |setup| u128::from(setup.process.end_to_end_us));
+    // Wall-clock endpoints have millisecond resolution; process durations do not.
+    if process_us / 1000 > u128::from(manifest.finished_unix_ms - receipt.started_unix_ms) {
+        return Err("capture interval is shorter than its retained process durations".into());
+    }
     let inspection = inspection(
         &plan,
         &receipt,
@@ -1155,6 +1191,7 @@ fn load(root: &Path) -> Result<Loaded> {
         receipt,
         deployment,
         finished_unix_ms: manifest.finished_unix_ms,
+        receipt_sha256: receipt_sha256.clone(),
         inspection,
     })
 }
@@ -1217,6 +1254,23 @@ fn cache_reason(growth: Option<bool>) -> Option<Reason> {
     }
 }
 
+fn hashes_by_seed<'a>(runs: impl Iterator<Item = &'a Run>) -> BTreeMap<u64, Vec<Vec<&'a str>>> {
+    let mut seeds = BTreeMap::<u64, Vec<Vec<&str>>>::new();
+    for run in runs.filter(|run| run.phase == Phase::Measured && run.eligible) {
+        seeds.entry(run.seed).or_default().push(
+            run.outputs
+                .iter()
+                .map(|output| output.sha256.as_str())
+                .collect(),
+        );
+    }
+    seeds
+}
+
+fn identical_hashes(outputs: &[Vec<&str>]) -> bool {
+    outputs.windows(2).all(|pair| pair[0] == pair[1])
+}
+
 fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummary {
     let matching = runs.filter(|run| run.cell == cell.id).collect::<Vec<_>>();
     let measured = matching
@@ -1239,16 +1293,9 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
             max: *times.iter().max().expect("nonempty median"),
         });
     let mut reasons = BTreeMap::new();
-    let mut seeds = BTreeMap::<u64, Vec<Vec<&str>>>::new();
+    let seeds = hashes_by_seed(measured.iter().copied());
     for run in &measured {
-        if run.eligible {
-            seeds.entry(run.seed).or_default().push(
-                run.outputs
-                    .iter()
-                    .map(|output| output.sha256.as_str())
-                    .collect(),
-            );
-        } else {
+        if !run.eligible {
             for reason in &run.reasons {
                 *reasons.entry(*reason).or_default() += 1;
             }
@@ -1259,8 +1306,7 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
         .map(|(seed, outputs)| Determinism {
             seed,
             n: outputs.len(),
-            deterministic: (outputs.len() > 1)
-                .then(|| outputs.windows(2).all(|pair| pair[0] == pair[1])),
+            deterministic: (outputs.len() > 1).then(|| identical_hashes(&outputs)),
         })
         .collect();
     CellSummary {
@@ -1284,15 +1330,16 @@ mod tests {
             .into_iter()
             .map(|name| (name, "0".repeat(64)))
             .collect();
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             version: 1,
             kind: "media-capture-complete-v1".into(),
             status: CaptureStatus::Complete,
             finished_unix_ms: crate::metrics::unix_ms(),
             runs,
-            evidence_sha256: json_digest(&files).unwrap(),
+            evidence_sha256: String::new(),
             files,
         };
+        manifest.evidence_sha256 = manifest.digest().unwrap();
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         assert!(bytes.len() <= FILE_CAP);
         let root = std::env::temp_dir().join(format!(
@@ -1306,7 +1353,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(read.runs, runs);
         assert_eq!(read.files.len(), runs * 2 + TOP_FILES.len() + 2);
-        assert_eq!(read.evidence_sha256, json_digest(&read.files).unwrap());
+        assert_eq!(read.evidence_sha256, read.digest().unwrap());
     }
 
     #[test]

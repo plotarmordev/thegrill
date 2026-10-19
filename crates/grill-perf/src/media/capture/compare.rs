@@ -58,38 +58,55 @@ struct GateResult {
 fn same_runner(a: &Loaded, b: &Loaded) -> bool {
     a.plan.runner_bytes == b.plan.runner_bytes
         && a.receipt.program.sha256 == b.receipt.program.sha256
+        && a.receipt
+            .setup_program
+            .as_ref()
+            .map(|program| &program.sha256)
+            == b.receipt
+                .setup_program
+                .as_ref()
+                .map(|program| &program.sha256)
         && a.deployment == b.deployment
 }
 
 fn admit(captures: &[Loaded], arms: &[Arm]) -> Result<()> {
     let a = &captures[0];
+    let mut receipts = BTreeSet::new();
     for (capture, arm) in captures.iter().zip(arms) {
+        if !receipts.insert(&capture.receipt_sha256) {
+            return Err("repeated capture receipt is not an independent acquisition".into());
+        }
         if capture.inspection.status != CaptureStatus::Complete {
-            return Err("INVALID: comparison requires complete captures".into());
+            return Err("comparison requires complete captures".into());
         }
         if &capture.receipt.slot.arm != arm {
-            return Err("INVALID: capture slot arm does not match its comparison position".into());
+            return Err("capture slot arm does not match its comparison position".into());
         }
         if capture.plan.workload_bytes != a.plan.workload_bytes {
-            return Err("INVALID: captures must share byte-identical workloads".into());
+            return Err("captures must share byte-identical workloads".into());
+        }
+        if capture.receipt.collector.sha256 != a.receipt.collector.sha256
+            || capture.receipt.platform != a.receipt.platform
+        {
+            return Err("captures must use the same collector binary and platform".into());
         }
     }
     if a.plan.workload.slots.len() != captures.len() {
-        return Err("INVALID: every declared slot must be supplied, including b2".into());
+        return Err("every declared slot must be supplied, including b2".into());
     }
     if !same_runner(a, captures.last().expect("reference return")) {
-        return Err("INVALID: A and A2 runner bytes, program hash or deployment differ".into());
+        return Err("A and A2 runner bytes, program or setup hash, or deployment differ".into());
     }
     if same_runner(a, &captures[1]) {
-        return Err("INVALID: B must differ from A in runner, program or deployment".into());
+        return Err("B must differ from A in runner, program, setup or deployment".into());
     }
     if captures.len() == 4 && !same_runner(&captures[1], &captures[2]) {
-        return Err("INVALID: B2 must match B runner, program and deployment".into());
+        return Err("B2 must match B runner, program, setup and deployment".into());
     }
     for pair in captures.windows(2) {
         if pair[0].finished_unix_ms > pair[1].receipt.started_unix_ms {
             return Err(format!(
-                "INVALID: chronology requires {} to finish before {} starts",
+                "chronology requires {} to finish no later than {} starts",
                 pair[0].receipt.slot.id, pair[1].receipt.slot.id
             ));
         }
@@ -116,20 +133,8 @@ fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
 }
 
 fn hash_equality(reference: &[&Run], candidate: &[&Run]) -> Vec<HashEquality> {
-    fn hashes<'a>(runs: &[&'a Run]) -> BTreeMap<u64, BTreeSet<Vec<&'a str>>> {
-        let mut seeds = BTreeMap::<u64, BTreeSet<Vec<&str>>>::new();
-        for run in runs.iter().filter(|run| run.eligible) {
-            seeds.entry(run.seed).or_default().insert(
-                run.outputs
-                    .iter()
-                    .map(|output| output.sha256.as_str())
-                    .collect(),
-            );
-        }
-        seeds
-    }
-    let a = hashes(reference);
-    let b = hashes(candidate);
+    let a = hashes_by_seed(reference.iter().copied());
+    let b = hashes_by_seed(candidate.iter().copied());
     a.keys()
         .chain(b.keys())
         .copied()
@@ -140,18 +145,14 @@ fn hash_equality(reference: &[&Run], candidate: &[&Run]) -> Vec<HashEquality> {
             equal: a
                 .get(&seed)
                 .zip(b.get(&seed))
-                .map(|(a, b)| a.len() == 1 && a == b),
+                .filter(|(a, b)| identical_hashes(a) && identical_hashes(b))
+                .map(|(a, b)| a[0] == b[0]),
         })
         .collect()
 }
 
 fn envelope_failure(result: &mut GateResult, reason: EnvelopeReason) {
-    result.outcome = match reason {
-        EnvelopeReason::InvalidRational
-        | EnvelopeReason::InvalidBounds
-        | EnvelopeReason::ArithmeticOverflow { .. } => Outcome::Error,
-        _ => Outcome::Inconclusive,
-    };
+    result.outcome = reason.into();
     result.adverse_bounds = match reason {
         EnvelopeReason::EnvelopeStraddlesTolerance { adverse_bounds } => Some(adverse_bounds),
         EnvelopeReason::ArithmeticOverflow { adverse_bounds } => adverse_bounds,
@@ -175,12 +176,12 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
                 .inspection
                 .runs
                 .iter()
-                .filter(|run| run.cell == gate.cell && run.phase == Phase::Measured),
+                .filter(|run| run.cell == gate.cell),
         );
     }
     let values = arms.each_ref().map(|runs| {
         runs.iter()
-            .filter(|run| run.eligible)
+            .filter(|run| run.phase == Phase::Measured && run.eligible)
             .map(|run| Rational {
                 numerator: run.process.end_to_end_us,
                 denominator: 1,
@@ -209,30 +210,47 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
         }
     }
     if values.iter().any(|values| values.len() < 3)
-        || arms.iter().flatten().any(|run| !run.eligible)
+        || arms
+            .iter()
+            .flatten()
+            .any(|run| run.phase == Phase::Measured && !run.eligible)
     {
-        result.reason = Some("insufficient_samples: at least three eligible measured samples per pooled arm and no ineligible measured samples are required".into());
+        result.reason = Some("insufficient_samples".into());
         return result;
     }
-    if let (Some(reference), Some(candidate)) = (result.reference, result.candidate) {
-        match envelope::assess(
-            reference,
-            candidate,
-            gate.max_adverse_bps,
-            gate.max_reference_spread_bps,
-            Direction::LowerBetter,
-        ) {
-            Ok(assessment) => {
-                result.outcome = match assessment.decision {
-                    EnvelopeDecision::Pass => Outcome::Pass,
-                    EnvelopeDecision::Regression => Outcome::Regression,
-                };
-                result.adverse_bounds = Some(assessment.adverse_bounds);
-            }
-            Err(reason) => envelope_failure(&mut result, reason),
+    let reference = result.reference.expect("at least three reference samples");
+    let candidate = result.candidate.expect("at least three candidate samples");
+    match envelope::assess(
+        reference,
+        candidate,
+        gate.max_adverse_bps,
+        gate.max_reference_spread_bps,
+        Direction::LowerBetter,
+    ) {
+        Ok(assessment) => {
+            result.outcome = match assessment.decision {
+                EnvelopeDecision::Pass => Outcome::Pass,
+                EnvelopeDecision::Regression => Outcome::Regression,
+            };
+            result.adverse_bounds = Some(assessment.adverse_bounds);
         }
+        Err(reason) => envelope_failure(&mut result, reason),
     }
     result
+}
+
+fn matching_pins(a: &Runner, b: &Runner) -> bool {
+    if a.pins.is_empty() || b.pins.is_empty() {
+        return true;
+    }
+    fn pins(runner: &Runner) -> BTreeSet<(&str, &str)> {
+        runner
+            .pins
+            .iter()
+            .map(|pin| (pin.path.as_str(), pin.sha256.as_str()))
+            .collect()
+    }
+    pins(a) == pins(b)
 }
 
 pub(in crate::media) fn compare(
@@ -258,7 +276,11 @@ pub(in crate::media) fn compare(
         &captures[0].deployment.model_revision,
         &captures[1].deployment.model_revision,
     ) {
-        (Some(a), Some(b)) if a == b => Axis::SameCheckpoint,
+        (Some(a), Some(b))
+            if a == b && matching_pins(&captures[0].plan.runner, &captures[1].plan.runner) =>
+        {
+            Axis::SameCheckpoint
+        }
         (Some(_), Some(_)) => Axis::ChangedModel,
         _ => Axis::Unavailable,
     };
@@ -287,7 +309,7 @@ pub(in crate::media) fn compare(
     Ok(Comparison {
         version: 1,
         kind: "media-comparison-v1",
-        claim: "observed-envelope-direction-under-declared-bounds; output quality is not compared; hash equality is a byte fact, not a quality or causal claim",
+        claim: "observed-envelope-direction-under-declared-bounds-not-output-quality",
         support: SUPPORT,
         axis,
         workload_sha256: captures[0].receipt.workload_sha256.clone(),

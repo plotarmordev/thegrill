@@ -954,7 +954,7 @@ pub struct ReferenceIdentity {
 fn declared_identity(
     a: Option<&Deployment>,
     a2: Option<&Deployment>,
-    endpoints: &[(&str, &str, &str)],
+    plan_declarations: &[(&str, &str, &str)],
 ) -> ReferenceIdentity {
     let mut reasons = Vec::new();
     let mut mismatch = false;
@@ -980,7 +980,7 @@ fn declared_identity(
             }
         }
     };
-    for (name, left, right) in endpoints {
+    for (name, left, right) in plan_declarations {
         declaration(name, Some(left), Some(right));
     }
     declaration(

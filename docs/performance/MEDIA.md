@@ -2,6 +2,7 @@
 
 `media preflight`, `media capture`, `media inspect` and `media compare` are
 experimental and image-only. Capture supports Linux and macOS.
+Audio/video, runner markers and external probes are not supported.
 Preflight prints JSON without starting processes or creating directories.
 
 ```text
@@ -64,7 +65,6 @@ spaces, quotes and shell syntax stay literal in their argv element. An absent
 negative prompt substitutes an empty string without removing the element.
 Unknown or unclosed placeholders fail. There is no literal opening-brace escape;
 JSON-valued arguments need an adapter. Env values and paths are not templates.
-Non-image fields, marker fields/placeholders and probes are not admitted.
 
 ## Capture and inspect
 
@@ -113,8 +113,9 @@ observations incomplete and measured samples ineligible, so declare the model's
 own cache directory rather than a whole hub.
 
 Inspect launches nothing and requires no original runner or cache files. It
-rechecks retained hashes, reservations and container validations. Timing count,
-minimum, median, mean and maximum cover only eligible measured samples; setup,
+rechecks retained hashes, reservations and container validations. Every run record
+binds its capture's receipt digest; inspect rejects records from another receipt.
+Timing count, minimum, median, mean and maximum cover only eligible measured samples; setup,
 warmups and failed samples are excluded. Ineligible counts are grouped by reason.
 Determinism is reported by seed among eligible samples, unavailable without a
 repeat. These observations are descriptive, not a comparison verdict.
@@ -124,6 +125,12 @@ or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
 incomplete or inconsistent evidence; individual sample failures remain visible
 inside an otherwise completed capture.
 
+Capture completion records require `finished_unix_ms`. The evidence digest covers
+the entire completion record except the digest itself, including status, run
+count and completion time. Inspect rejects missing completion times, completion
+before the receipt's `started_unix_ms`, and intervals shorter than the retained
+process durations at millisecond resolution.
+
 ## Compare
 
 ```text
@@ -131,41 +138,42 @@ grill-perf media compare --a A --b B --a2 A2 [--b2 B2]
 ```
 
 Compare fully rechecks every capture through inspect before admitting it.
-All declared slots are required, with matching arms and byte-identical workloads.
-A and A2 must match runner bytes, program hash and deployment; B must differ
-in at least one of those, and B2 must match B.
+All declared slots are required, with matching arms, byte-identical workloads,
+and the same collector binary and platform. Repeated capture receipts are rejected.
+A and A2 must match runner bytes, program and setup-program
+hashes, and deployment; B must differ in at least one of those, and B2 must match B.
+Runner bytes include setup arguments.
 
-Capture completion records require `finished_unix_ms`; inspect rejects missing
-completion times or completion before the receipt's `started_unix_ms`.
-Comparison requires A to finish before B starts, then B2 if declared, then A2;
-equal boundary timestamps are allowed. This is wall-clock ordering, so clock
-steps can make it fail closed. Incomplete captures and admission failures are
-INVALID errors, never performance verdicts.
+Comparison requires A to finish no later than B starts, then B2 if declared,
+then A2. This is wall-clock ordering, so clock steps can make it fail closed.
+Incomplete captures and admission failures are INVALID errors, never performance
+verdicts.
 
 Each declared `end_to_end_us` gate pools eligible measured samples from A+A2
 as reference and B+B2 as candidate. At least three samples per pooled arm are
 required; any ineligible measured sample also withholds direction. Gates use
 exact rational microseconds and the shared lower-is-better envelope rule.
 Reference spread above the declared bound or an envelope crossing the tolerance
-is INCONCLUSIVE. Gate outcomes aggregate using the shared policy ordering.
+is INCONCLUSIVE. The worst gate outcome wins (ERROR > REGRESSION >
+INCONCLUSIVE > PASS), before the identity cap.
 
-Equal declared `model_revision` values select `same-checkpoint`. Different
-revisions select `changed-model`: gates remain visible, but the overall outcome
-is INCONCLUSIVE with `changed_model_axis`. Missing model identity or incomplete
-reference deployment declarations also withhold direction. Output quality is
-not compared.
+Equal declared `model_revision` values select `same-checkpoint`, provided that
+when both runners declare pins their sets of `(path, sha256)` match. Different
+revisions or pin sets select `changed-model`: gates remain visible, but the
+overall outcome is INCONCLUSIVE with `changed_model_axis`. Missing model
+identity or incomplete reference deployment declarations also withhold direction.
+The cap never hides an ERROR. Output quality is not compared.
 
 The JSON report retains each capture's execution declaration and reports pooled
 sample counts, minimum, median, mean, maximum, ineligible counts by reason and
 within-arm determinism by seed. Seconds per image and images per second derive
 from mean eligible duration and declared image count; they are display values,
-not separate gates. Cross-arm hash equality is only a byte-equality fact.
+not separate gates. Cross-arm hash equality is only a byte-equality fact; it is
+unavailable if either arm lacks eligible samples for the seed or is nondeterministic.
 Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and
 **3** REGRESSION.
 
-## Planned
-
-Audio/video, runner markers and external probes are not supported.
+## Private evidence
 
 Prompts, program paths, declared env values and outputs are private evidence,
 not a public export. Review preflight output before sharing it.
