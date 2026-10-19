@@ -54,8 +54,9 @@ files; relative paths resolve against the invoking directory, not `cwd`, without
 PATH search. Leading `~` expands to HOME. A declared `cwd` must exist as a directory.
 Setup declares `args`, optional `program` (defaults to the runner program) and
 optional `deadline_ms` (defaults to, and cannot exceed, the workload setup limit).
-Cache declares `declared_state: cold|warm|unknown` and `paths`; preflight does not
-inspect or purge caches. Pins contain `path` and `sha256`; only their form is checked.
+Cache declares `declared_state: cold|warm|unknown` and up to 64 `paths`, each at
+most 4096 bytes; preflight does not inspect caches. Pins contain `path` and
+`sha256`; only their form is checked.
 
 Only argv is templated: `{prompt}`, `{negative_prompt}`, `{seed}`, `{width}`,
 `{height}`, `{steps}`, `{output}`, `{output_dir}`. Substitution is single-pass;
@@ -72,48 +73,52 @@ grill-perf media capture --workload W.json --runner R.json --deployment D.json -
 grill-perf media inspect capture
 ```
 
-Capture publishes the declarations and receipt before setup or sample execution.
-It uses direct exec, declared environment additions and cwd, and an owned process
-group per invocation. Runs are serial, with the declared pause after each run;
-deadlines and cancellation kill the owned group, including descendants that
-remain in it. A runner can escape the group; this is not a sandbox.
+Capture publishes declarations and a receipt before work. It uses direct exec,
+declared environment additions and cwd, with a fresh owned process group for
+each invocation. Runs are serial and pause as declared. Normal exit, deadline
+and cancellation all kill the group, including descendants still in it; a
+runner can escape the group, so this is not a sandbox. Cancellation interrupts
+pauses and records remaining samples as unstarted, without replacements.
 
-Optional setup runs once before warmups and has separate timing and streams.
-Every sample has a reservation, status, exit code, Grill-monotonic
-`end_to_end_us`, retained stdout/stderr prefixes and truncation flags. Truncation
-is nonfatal. Failures are retained, never retried or replaced; cancellation also
-records unstarted samples as cancelled. Warmups are excluded from summaries.
-One capture contains the measured samples for one declared slot.
+Optional setup runs once before samples, with separate timing, streams and
+declared outputs. Failed setup stops the capture before any sample. Each sample
+retains its reservation, exit status, failures and stdout/stderr prefixes;
+truncation is nonfatal, and failures are never retried. `end_to_end_us` measures
+Grill-monotonic time through observed process exit; the polling interval is
+2 ms, not microsecond resolution. One capture represents one declared slot.
 
-`{output}` names a collector-owned file. `{output_dir}` is a fresh empty directory
-that must contain exactly `images_per_run` direct regular files, with no symlinks,
-subdirectories or hidden-file exceptions; all names are retained in lexical byte
-order with their original filename bytes recorded. Invalid counts or entry types
-make the sample ineligible rather than selecting a subset.
+`{output}` names a collector-owned file. `{output_dir}` must contain exactly
+`images_per_run` direct regular files: no symlinks, subdirectories or hidden-file
+exceptions. Names must be UTF-8 and are ordered lexically; a wrong count or entry
+type makes the sample ineligible rather than selecting a subset.
 
-Bounded output files are copied into each run's `retained/` directory with SHA-256
-hashes. PNG signature, IHDR, chunk CRCs and terminal IEND, or JPEG SOI, SOF
-dimensions and terminal EOI are checked by content, not extension. Validation is
-`container_checked`, never `decoded`; it does not establish pixel correctness or
-quality. Eligibility requires successful exit within the deadline and every
-expected output with matching dimensions and count. Oversized or missing files
-are recorded as failures, not loaded into retained output buffers.
+Bounded outputs, including invalid images, are retained with SHA-256 hashes.
+PNG signature, IHDR, every chunk CRC, IDAT presence and terminal IEND, or JPEG
+SOI, SOF dimensions, SOS presence and terminal EOI are checked by content.
+Validation is `container_checked`, never `decoded`; it establishes neither pixel
+correctness nor quality. Eligibility requires successful exit within the
+deadline and every expected output with matching dimensions and count.
+Oversized and missing outputs are recorded as failures.
 
 Declared cache paths are observed before setup, after setup and after runs:
-existence, regular-file count, bytes and newest mtime. Walks are bounded and do
-not follow symlinks; incomplete observations carry errors. Growth during measured
-runs is recorded separately from setup/warmup changes. Nothing is flushed or
-purged, and a fresh CLI does not prove a fresh model load. The execution
-declaration accompanies timing reports.
+existence, regular-file count, bytes, newest mtime and symlink metadata/targets.
+Symlinks are recorded without following them or stopping the walk. Walks are
+bounded; incomplete observations are labelled and do not establish growth.
+Measured cache growth is separate from setup/warmup changes. Nothing is flushed
+or purged, and a fresh CLI does not prove a fresh model load. Reports retain the
+runner's `execution` declaration.
 
 Inspect launches nothing and requires no original runner or cache files. It
-rechecks retained hashes, sample argv projections and container validations,
-then reports measured timing count, minimum, median, mean and maximum, eligible
-count and determinism by seed among eligible samples. Timing summaries include
-failed measured samples; warmups and setup are excluded. A seed with no repeat
-has unavailable determinism. These are descriptive observations, not a verdict.
-Capture and inspect print JSON and exit successfully even when samples failed;
-unreadable, incomplete or inconsistent evidence is an error.
+rechecks retained hashes, reservations and container validations. Timing count,
+minimum, median, mean and maximum cover only eligible measured samples; setup,
+warmups and failed samples are excluded. Ineligible counts are grouped by reason.
+Determinism is reported by seed among eligible samples, unavailable without a
+repeat. These observations are descriptive, not a comparison verdict.
+
+Capture and inspect print JSON with capture status `complete`, `setup_failed`
+or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
+incomplete or inconsistent evidence; individual sample failures remain visible
+inside an otherwise completed capture.
 
 ## Planned
 
