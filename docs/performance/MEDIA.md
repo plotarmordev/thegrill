@@ -12,15 +12,15 @@ program hashes, each sample's argv, phase and seed, and counts. Its wall-clock
 allowance sums run deadlines, pauses after every run and the setup deadline when
 setup is declared; filesystem and OS stalls can exceed it. Output paths are
 projections relative to a future capture directory, not executable capture argv.
-Exit codes: **0** admitted, **1** rejected or unreadable, **2** CLI usage error.
+Exit codes: **0** admitted; **1** rejected, unreadable or CLI usage error.
 
 ## Documents
 
 Both documents require their `kind` (`media-workload-v1` or `media-runner-v1`)
 and `version: 1`. Records are JSON objects; unknown/duplicate fields and positional
-records are rejected. Files and resolved programs are bounded to 4 MiB. Optional
-fields are omitted, not null; absent optional workload fields are omitted from
-typed serialization so later optional additions need not change existing hashes.
+records are rejected. Documents are bounded to 4 MiB; resolved programs to 1 GiB.
+Optional fields are omitted, not null; absent optional workload fields are omitted
+from typed serialization so later optional additions need not change existing hashes.
 
 The shared workload declares `name`, `modality: image`, `request`, `outputs`,
 `cells`, `slots`, `limits` and `gates`. Names and IDs use ASCII letters, digits,
@@ -41,7 +41,8 @@ Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 Outputs declare unique `placeholder` (`output` or `output_dir`), `container`
 (`png` or `jpeg`) and `expect: {width, height}` with the same canvas bounds.
 At least one is required. The declared set must equal the output placeholders
-used in runner argv. `{output}` occurs only once and only for a single image;
+used in sample argv and, when present, setup argv. `{output}` occurs only once in
+each argv and only for a single image;
 multiple images require only `{output_dir}`. The file extension comes from the
 `output` declaration, not the directory declaration.
 
@@ -74,9 +75,8 @@ without recording the inherited environment. Cache observations will accompany
 declared labels; a fresh CLI will not prove a fresh model load.
 
 Comparison will use A/B/A2 or A/B/B2/A2 and require at least three measured samples
-per arm inside a capture (System One convention), not microbench's acquisitions
-per role. Only `end_to_end_us` will gate direction. Container validation will be
-`container_checked`, never `decoded`. Same-checkpoint comparisons will permit
+per arm inside a capture. Only `end_to_end_us` will gate direction. Container
+validation will be `container_checked`, never `decoded`. Same-checkpoint comparisons will permit
 envelope direction; changed-model or unavailable identity will remain
 INCONCLUSIVE without a quality claim. Offline inspect will recheck retained bytes.
 

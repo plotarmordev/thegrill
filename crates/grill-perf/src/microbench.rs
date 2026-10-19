@@ -2487,7 +2487,7 @@ fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
 /// Hash an explicitly declared program file. Symlinks are resolved first
 /// because interpreters and launchers are commonly symlinked; the digest is of
 /// the resolved bytes.
-pub(crate) fn hash_program(path: &Path) -> Result<String> {
+fn hash_program(path: &Path) -> Result<String> {
     let resolved = std::fs::canonicalize(path)
         .map_err(|e| format!("resolve program {}: {e}", path.display()))?;
     evidence::hash_file(&resolved, FILE_CAP)

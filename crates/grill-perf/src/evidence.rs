@@ -24,7 +24,7 @@ pub(crate) fn is_digest(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-pub fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
+fn open_bounded(path: &Path, cap: usize) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -34,6 +34,10 @@ pub fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     if !meta.is_file() || meta.len() > cap as u64 {
         return Err(format!("not a bounded regular file: {}", path.display()));
     }
+    Ok(file)
+}
+pub fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
+    let file = open_bounded(path, cap)?;
     let mut bytes = Vec::new();
     file.take(cap as u64 + 1)
         .read_to_end(&mut bytes)
@@ -127,16 +131,7 @@ fn hash_binary() -> Result<String> {
     hash_reader(file, u64::MAX)
 }
 pub(crate) fn hash_file(path: &Path, cap: usize) -> Result<String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| format!("hash {}: {e}", path.display()))?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() || meta.len() > cap as u64 {
-        return Err(format!("not a bounded regular file: {}", path.display()));
-    }
-    hash_reader(file, cap as u64)
+    hash_reader(open_bounded(path, cap)?, cap as u64)
 }
 fn hash_reader(mut file: File, cap: u64) -> Result<String> {
     let mut remaining = cap;

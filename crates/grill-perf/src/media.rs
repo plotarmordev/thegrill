@@ -1,6 +1,6 @@
 //! Offline admission for operator-declared media processes; never launches a runner.
 use crate::{
-    evidence, microbench,
+    evidence,
     model::{FILE_CAP, Result, identifier, present},
 };
 use clap::Subcommand;
@@ -20,6 +20,7 @@ const MAX_IMAGES: u32 = 64;
 const MAX_WARMUPS: u32 = 20;
 const MAX_MEASURED: u32 = 100;
 const PROMPT_CAP: usize = 16 * 1024;
+const PROGRAM_CAP: usize = 1024 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -419,30 +420,43 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
             }
         }
     }
-    for placeholder in [OutputPlaceholder::Output, OutputPlaceholder::OutputDir] {
-        let token = format!("{{{}}}", placeholder.name());
-        let count = r
-            .args
-            .iter()
-            .map(|a| a.matches(&token).count())
-            .sum::<usize>();
-        if outputs.contains(&placeholder) != (count > 0)
-            || (placeholder == OutputPlaceholder::Output && count > 1)
-        {
-            return Err(format!(
-                "runner.args {token} must match its output declaration; {{output}} may appear only once"
-            ));
+    validate_output_args(&outputs, &r.args, "runner.args")?;
+    if let Some(setup) = &r.setup {
+        validate_output_args(&outputs, &setup.args, "runner.setup.args")?;
+    }
+    if outputs.contains(&OutputPlaceholder::Output) {
+        if w.request.images_per_run > 1 {
+            return Err("request.images_per_run: multiple images require only output_dir".into());
+        }
+        for cell in &w.cells {
+            if cell.request.as_ref().unwrap_or(&w.request).images_per_run > 1 {
+                return Err(format!(
+                    "cell {}.images_per_run: multiple images require only output_dir",
+                    cell.id
+                ));
+            }
         }
     }
-    for (context, request) in std::iter::once(("request", &w.request)).chain(
-        w.cells
+    Ok(())
+}
+fn validate_output_args(
+    outputs: &BTreeSet<OutputPlaceholder>,
+    args: &[String],
+    context: &str,
+) -> Result<()> {
+    for placeholder in [OutputPlaceholder::Output, OutputPlaceholder::OutputDir] {
+        let token = format!("{{{}}}", placeholder.name());
+        let count = args
             .iter()
-            .map(|c| (c.id.as_str(), c.request.as_ref().unwrap_or(&w.request))),
-    ) {
-        if request.images_per_run > 1 && outputs.contains(&OutputPlaceholder::Output) {
+            .map(|arg| arg.matches(&token).count())
+            .sum::<usize>();
+        if outputs.contains(&placeholder) != (count > 0) {
             return Err(format!(
-                "{context}.images_per_run: multiple images require only output_dir"
+                "{context}: {token} must match its output declaration"
             ));
+        }
+        if placeholder == OutputPlaceholder::Output && count > 1 {
+            return Err(format!("{context}: {{output}} may appear only once"));
         }
     }
     Ok(())
@@ -523,7 +537,7 @@ fn resolve_program(name: &str) -> Result<PathBuf> {
 }
 fn program(path: PathBuf) -> Result<Program> {
     Ok(Program {
-        sha256: microbench::hash_program(&path)?,
+        sha256: evidence::hash_file(&path, PROGRAM_CAP)?,
         path,
     })
 }
@@ -637,10 +651,13 @@ fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
     let setup_args = r
         .setup
         .as_ref()
-        .map(|s| render(&s.args, &w.request, w.request.seeds[0], "setup"))
+        .map(|s| {
+            render(&s.args, &w.request, w.request.seeds[0], "setup")
+                .map_err(|e| format!("runner.setup.args: {e}"))
+        })
         .transpose()?;
     let mut samples = Vec::new();
-    let (mut warmup_runs, mut measured_runs, mut ceiling) = (0u64, 0u64, 0u64);
+    let (mut warmup_runs, mut measured_runs, mut wall_clock_allowance_ms) = (0u64, 0u64, 0u64);
     for cell in &w.cells {
         let req = cell.request.as_ref().unwrap_or(&w.request);
         warmup_runs += u64::from(cell.warmup_runs);
@@ -659,11 +676,12 @@ fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
                 args: render(&r.args, req, seed, &dir)
                     .map_err(|e| format!("cell {}.args: {e}", cell.id))?,
             });
-            ceiling += u64::from(w.limits.run_deadline_ms) + u64::from(cell.pause_between_runs_ms);
+            wall_clock_allowance_ms +=
+                u64::from(w.limits.run_deadline_ms) + u64::from(cell.pause_between_runs_ms);
         }
     }
     if let Some(s) = &r.setup {
-        ceiling += u64::from(s.deadline_ms.unwrap_or(w.limits.setup_deadline_ms));
+        wall_clock_allowance_ms += u64::from(s.deadline_ms.unwrap_or(w.limits.setup_deadline_ms));
     }
     Ok(Preflight {
         version: 1,
@@ -691,7 +709,7 @@ fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
         warmup_runs,
         measured_runs,
         total_runs: warmup_runs + measured_runs,
-        wall_clock_allowance_ms: ceiling,
+        wall_clock_allowance_ms,
         samples,
     })
 }

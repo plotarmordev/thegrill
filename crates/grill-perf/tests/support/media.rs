@@ -227,6 +227,7 @@ fn output_contract_and_own_container_extension() {
     let output = f.workload["outputs"][0].clone();
     f.workload["outputs"] = json!([{"placeholder":"output_dir","container":"png","expect":{"width":1,"height":1}}, output]);
     f.runner["args"] = json!(["{output_dir}", "{output}"]);
+    f.runner["setup"]["args"] = json!(["{output_dir}", "{output}"]);
     assert_eq!(
         f.report()["samples"][0]["args"][1],
         "run-000000/output-00.jpeg"
@@ -234,7 +235,7 @@ fn output_contract_and_own_container_extension() {
     f.runner["args"] = json!(["{output_dir}"]);
     f.reject("output declaration");
     f.workload["outputs"].as_array_mut().unwrap().remove(1);
-    f.runner["setup"]["args"] = json!([]);
+    f.runner["setup"]["args"] = json!(["{output_dir}"]);
     f.workload["request"]["images_per_run"] = json!(2);
     assert_eq!(f.report()["samples"][0]["args"][0], "run-000000/out/");
     f.runner["args"] = json!(["{output}"]);
@@ -243,6 +244,7 @@ fn output_contract_and_own_container_extension() {
     f.reject("output declaration");
     f.workload["outputs"][0]["placeholder"] = json!("output");
     f.runner["args"] = json!(["{output}"]);
+    f.runner["setup"]["args"] = json!(["{output}"]);
     f.reject("multiple images require only output_dir");
     f.workload["request"]["images_per_run"] = json!(1);
     f.runner["args"] = json!(["{output}", "{output}"]);
@@ -321,4 +323,42 @@ fn program_and_working_directory_admission() {
     f.reject("executable regular file");
     f.runner["setup"]["program"] = json!(f.root.path("absent"));
     f.reject("resolve program");
+}
+
+#[test]
+fn large_executable_program_is_admitted() {
+    let f = Fixture::new();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(f.root.path("runner"))
+        .unwrap()
+        .set_len(5 * 1024 * 1024)
+        .unwrap();
+    let report = f.report();
+    assert_eq!(
+        report["program"]["path"],
+        f.root.path("runner").to_str().unwrap()
+    );
+    assert_eq!(report["program"], report["setup_program"]);
+    assert!(!f.root.path("LAUNCHED").exists());
+}
+
+#[test]
+fn setup_output_arguments_follow_sample_rules() {
+    let mut f = Fixture::new();
+    for args in [
+        json!([]),
+        json!(["{output_dir}"]),
+        json!(["{output}", "{output}"]),
+    ] {
+        f.runner["setup"]["args"] = args;
+        f.reject("runner.setup.args:");
+    }
+    f.runner["setup"]["args"] = json!(["{output}", "{unknown}"]);
+    f.reject("runner.setup.args: unknown placeholder");
+    f.runner["setup"]["args"] = json!(["{output}"]);
+    assert_eq!(f.report()["setup_args"], json!(["setup/output-00.png"]));
+    f.workload["cells"][0]["request"] = f.workload["request"].clone();
+    f.workload["cells"][0]["request"]["images_per_run"] = json!(2);
+    f.reject("cell c1.images_per_run");
 }
