@@ -2583,15 +2583,11 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
     let (artifact, mut receipt, mut failure) = if plan.adapter.external() {
         let program = options.program.as_deref();
         let mut program_sha256 = None;
-        let setup = (|| -> Result<_> {
+        let setup = (|| -> Result<()> {
             #[cfg(target_os = "linux")]
             if let Some(Err(error)) = &signal_guard {
                 return Err(error.clone());
             }
-            #[cfg(target_os = "linux")]
-            let Some(Ok(guard)) = &signal_guard else {
-                unreachable!("external adapter installs a signal guard");
-            };
             let program = program.ok_or(
                 "this adapter requires an explicitly declared --program; there is no discovery",
             )?;
@@ -2600,14 +2596,7 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
             if plan.program_sha256.as_deref() != Some(digest.as_str()) {
                 return Err("the declared program does not match plan.program_sha256; re-pin the plan instead of running a different producer".into());
             }
-            #[cfg(target_os = "linux")]
-            {
-                Ok(guard)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Ok(())
-            }
+            Ok(())
         })();
         if let Some(program) = program {
             command.push(format!("program={}", program.display()));
@@ -2616,17 +2605,21 @@ pub fn capture(options: &CaptureOptions) -> Result<CaptureReport> {
         let plan_path = options.out.join("plan.json");
         evidence::write(&plan_path, &plan_bytes)?;
         let mut run = match setup {
-            Ok(guard) => {
+            Ok(()) => {
                 let program = program.expect("admitted program");
                 let deadline = Duration::from_millis(plan.allowance.deadline_ms);
                 #[cfg(target_os = "linux")]
-                let run = run_program(guard, program, &options.args, &plan_path, deadline);
-                #[cfg(not(target_os = "linux"))]
-                let run = {
-                    let () = guard;
-                    run_program(program, &options.args, &plan_path, deadline)
+                let Some(Ok(guard)) = &signal_guard else {
+                    unreachable!("setup rejects a failed guard");
                 };
-                run
+                #[cfg(target_os = "linux")]
+                {
+                    run_program(guard, program, &options.args, &plan_path, deadline)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    run_program(program, &options.args, &plan_path, deadline)
+                }
             }
             Err(error) => crate::process::Output {
                 failure: Some(error),

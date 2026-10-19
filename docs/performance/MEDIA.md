@@ -108,6 +108,9 @@ not `false`. Both observed growth and unknown growth withhold measured-sample
 eligibility. Setup/warmup changes are separate. Nothing is flushed or purged,
 and a fresh CLI does not prove a fresh model load. Reports retain the runner's
 `execution` declaration.
+The walk is bounded at 100,000 entries per declared cache; larger caches make
+observations incomplete and measured samples ineligible, so declare the model's
+own cache directory rather than a whole hub.
 
 Inspect launches nothing and requires no original runner or cache files. It
 rechecks retained hashes, reservations and container validations. Timing count,

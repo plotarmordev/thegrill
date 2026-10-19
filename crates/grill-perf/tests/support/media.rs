@@ -802,6 +802,22 @@ fn inspect_rechecks_semantics_when_manifest_hashes_are_rewritten() {
         run["process"]["end_to_end_us"] = json!(5_000_000);
     });
     inspection_rejected(&deadline, "eligibility mismatch");
+
+    let cache = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    cache.captured();
+    rewrite_evidence(&cache, "run-000001/run.json", |run| {
+        run["cache_mutated_during_measurement"] = json!(true);
+        run["reasons"] = json!([]);
+        run["eligible"] = json!(true);
+    });
+    inspection_rejected(&cache, "cache eligibility reason mismatch");
+
+    let status = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    status.captured();
+    rewrite_manifest(&status, |manifest| {
+        manifest["status"] = json!("setup_failed")
+    });
+    inspection_rejected(&status, "capture status mismatch");
 }
 
 #[test]

@@ -959,8 +959,7 @@ fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Res
     let eligible = run.process.status == Status::Complete
         && run.reasons.is_empty()
         && output_counts_match(&counts, workload, sample.request, &plan.runner.args, false)
-        && run.outputs.iter().all(|output| output.validation.valid())
-        && run.cache_mutated_during_measurement == Some(false);
+        && run.outputs.iter().all(|output| output.validation.valid());
     if run.eligible != eligible {
         return Err("sample eligibility mismatch".into());
     }
