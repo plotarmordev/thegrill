@@ -5,8 +5,8 @@ Keep changes focused on observable behavior. For a substantial change, open an i
 ## Development
 
 For installed performance use, begin with [Install and first capture](docs/performance/INSTALL.md).
-There are no published releases yet; reviewed staged archives and the documented
-source fallback work before publication. The quality CLI remains a separate
+For upcoming releases, reviewed staged archives and the documented source fallback
+work before publication. The quality CLI remains a separate
 source-built work in progress.
 
 The Grill is a Rust CLI for Linux. Build and check the workspace with:

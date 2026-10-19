@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.9.0 — experimental image benchmarking
 
 - Add experimental image CLI [`media preflight|capture|inspect|compare`](MEDIA.md):
   declaration admission, serial process capture on Linux/macOS, setup and cache
@@ -8,6 +8,13 @@
   offline inspection and verified A/B/A2 or A/B/B2/A2 envelope comparison.
   Changed-model and unavailable-identity comparisons withhold direction;
   output quality is not compared.
+  Receipts record `support: experimental-extension-first-released-v0.9`.
+
+Verification and limits of this version:
+
+- Real-runner validation is pending; fixture checks do not qualify a model runner.
+- Audio/video are not supported. PNG/JPEG container checks are not image decoding
+  and do not establish output quality.
 
 ## Version 0.8.0 — concurrency verdicts
 

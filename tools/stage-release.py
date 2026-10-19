@@ -100,6 +100,7 @@ PERFORMANCE_DOCS = (
     "SHARED-RECIPES.md", "SHARED-REPORT-TEMPLATE.md", "RECIPES.md",
     "CONVERSATIONS.md", "PROVIDER-ACCOUNTING.md", "RESOURCES.md",
     "CAPACITY.md", "STARTUP.md", "KERNEL-FABRIC.md", "CALIBRATION.md", "SYSTEMONE.md",
+    "MEDIA.md",
     "calibration-policy-v1.json", "calibration-c1-v1.json",
     "2026-09-09-recipe-smoke.md", "2026-09-09-recipe-smoke.json",
 )
