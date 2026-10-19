@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn envelope_failures_preserve_error_precedence() {
+    for reason in [
+        EnvelopeReason::InvalidRational,
+        EnvelopeReason::InvalidBounds,
+        EnvelopeReason::ArithmeticOverflow {
+            adverse_bounds: None,
+        },
+    ] {
+        assert_eq!(Outcome::from(reason), Outcome::Error);
+    }
+    for reason in [
+        EnvelopeReason::NonpositiveReference,
+        EnvelopeReason::ReferenceSpreadExceeded,
+        EnvelopeReason::EnvelopeStraddlesTolerance {
+            adverse_bounds: [0.0, 1.0],
+        },
+    ] {
+        assert_eq!(Outcome::from(reason), Outcome::Inconclusive);
+    }
+}
+
 fn attempt(lane: u32) -> Attempt {
     Attempt {
         lane,

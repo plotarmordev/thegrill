@@ -2263,12 +2263,7 @@ pub fn compare(plan_path: &Path, manifest: &Path) -> Result<Comparison> {
                         }
                     }
                     Err(e) => {
-                        evaluated.outcome = match e {
-                            envelope::EnvelopeReason::InvalidRational
-                            | envelope::EnvelopeReason::InvalidBounds
-                            | envelope::EnvelopeReason::ArithmeticOverflow { .. } => Outcome::Error,
-                            _ => Outcome::Inconclusive,
-                        };
+                        evaluated.outcome = e.into();
                         evaluated.reason = Some(format!("{e:?}"));
                     }
                 }
