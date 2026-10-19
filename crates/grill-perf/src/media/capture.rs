@@ -1,3 +1,5 @@
+#[path = "compare.rs"]
+pub(super) mod compare;
 use super::cache::{self, Observation};
 use super::*;
 use crate::{
@@ -196,6 +198,7 @@ struct Manifest {
     version: u32,
     kind: String,
     status: CaptureStatus,
+    finished_unix_ms: u64,
     runs: usize,
     files: BTreeMap<String, String>,
     evidence_sha256: String,
@@ -771,7 +774,7 @@ pub(super) fn capture(
         &cache::observe(&receipt.cache_paths),
     )?;
     let digest = publish_manifest(&root, status, runs.len(), setup.is_some())?;
-    Ok(inspection(&plan, receipt, status, runs, setup, digest))
+    Ok(inspection(&plan, &receipt, status, runs, setup, digest))
 }
 
 fn manifest_names(runs: usize, setup: bool) -> Vec<String> {
@@ -806,6 +809,7 @@ fn publish_manifest(
         version: 1,
         kind: "media-capture-complete-v1".into(),
         status,
+        finished_unix_ms: crate::metrics::unix_ms(),
         runs,
         files,
         evidence_sha256,
@@ -979,7 +983,7 @@ fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Res
     Ok(())
 }
 
-fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<()> {
+fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<Deployment> {
     if receipt.kind != "media-capture-v1"
         || receipt.version != 1
         || receipt.support != SUPPORT
@@ -997,7 +1001,8 @@ fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<(
         return Err("media receipt declaration mismatch".into());
     }
     let declaration: Deployment = parse(deployment)?;
-    declaration.validate()
+    declaration.validate()?;
+    Ok(declaration)
 }
 fn inspect_setup(
     root: &Path,
@@ -1055,17 +1060,32 @@ fn inspect_setup(
 }
 
 pub(super) fn inspect(root: &Path) -> Result<Inspection> {
+    Ok(load(root)?.inspection)
+}
+
+struct Loaded {
+    plan: Plan,
+    receipt: Receipt,
+    deployment: Deployment,
+    finished_unix_ms: u64,
+    inspection: Inspection,
+}
+
+fn load(root: &Path) -> Result<Loaded> {
     let manifest = check_manifest(root)?;
     let plan = plan_from_bytes(
         verified_bytes(root, "workload.json", &manifest)?,
         verified_bytes(root, "runner.json", &manifest)?,
     )?;
     let receipt: Receipt = verified_json(root, "receipt.json", &manifest)?;
-    verify_receipt(
+    let deployment = verify_receipt(
         &receipt,
         &plan,
         &verified_bytes(root, "deployment.json", &manifest)?,
     )?;
+    if manifest.finished_unix_ms < receipt.started_unix_ms {
+        return Err("capture completion precedes its start".into());
+    }
     if manifest.runs > schedule(&plan.workload).count() {
         return Err("capture run count exceeds plan".into());
     }
@@ -1122,19 +1142,26 @@ pub(super) fn inspect(root: &Path) -> Result<Inspection> {
     {
         return Err("capture status mismatch".into());
     }
-    Ok(inspection(
+    let inspection = inspection(
         &plan,
-        receipt,
+        &receipt,
         manifest.status,
         runs,
         setup,
         manifest.evidence_sha256,
-    ))
+    );
+    Ok(Loaded {
+        plan,
+        receipt,
+        deployment,
+        finished_unix_ms: manifest.finished_unix_ms,
+        inspection,
+    })
 }
 
 fn inspection(
     plan: &Plan,
-    receipt: Receipt,
+    receipt: &Receipt,
     status: CaptureStatus,
     runs: Vec<Run>,
     setup: Option<SetupRecord>,
@@ -1144,7 +1171,7 @@ fn inspection(
         .workload
         .cells
         .iter()
-        .map(|cell| summarize(cell, &runs))
+        .map(|cell| summarize(cell, runs.iter()))
         .collect();
     Inspection {
         version: 1,
@@ -1153,7 +1180,7 @@ fn inspection(
         support: SUPPORT.into(),
         status,
         execution: receipt.execution,
-        slot: receipt.slot,
+        slot: receipt.slot.clone(),
         cells,
         cache_mutated_during_measurement: if runs
             .iter()
@@ -1190,11 +1217,8 @@ fn cache_reason(growth: Option<bool>) -> Option<Reason> {
     }
 }
 
-fn summarize(cell: &Cell, runs: &[Run]) -> CellSummary {
-    let matching = runs
-        .iter()
-        .filter(|run| run.cell == cell.id)
-        .collect::<Vec<_>>();
+fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummary {
+    let matching = runs.filter(|run| run.cell == cell.id).collect::<Vec<_>>();
     let measured = matching
         .iter()
         .copied()
@@ -1264,6 +1288,7 @@ mod tests {
             version: 1,
             kind: "media-capture-complete-v1".into(),
             status: CaptureStatus::Complete,
+            finished_unix_ms: crate::metrics::unix_ms(),
             runs,
             evidence_sha256: json_digest(&files).unwrap(),
             files,

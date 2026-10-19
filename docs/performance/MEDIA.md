@@ -1,7 +1,7 @@
 # Media CLI benchmarking
 
-`media preflight`, `media capture` and `media inspect` are experimental and
-image-only. Capture supports Linux and macOS; audio and video are not supported.
+`media preflight`, `media capture`, `media inspect` and `media compare` are
+experimental and image-only. Capture supports Linux and macOS.
 Preflight prints JSON without starting processes or creating directories.
 
 ```text
@@ -124,12 +124,48 @@ or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
 incomplete or inconsistent evidence; individual sample failures remain visible
 inside an otherwise completed capture.
 
+## Compare
+
+```text
+grill-perf media compare --a A --b B --a2 A2 [--b2 B2]
+```
+
+Compare fully rechecks every capture through inspect before admitting it.
+All declared slots are required, with matching arms and byte-identical workloads.
+A and A2 must match runner bytes, program hash and deployment; B must differ
+in at least one of those, and B2 must match B.
+
+Capture completion records require `finished_unix_ms`; inspect rejects missing
+completion times or completion before the receipt's `started_unix_ms`.
+Comparison requires A to finish before B starts, then B2 if declared, then A2;
+equal boundary timestamps are allowed. This is wall-clock ordering, so clock
+steps can make it fail closed. Incomplete captures and admission failures are
+INVALID errors, never performance verdicts.
+
+Each declared `end_to_end_us` gate pools eligible measured samples from A+A2
+as reference and B+B2 as candidate. At least three samples per pooled arm are
+required; any ineligible measured sample also withholds direction. Gates use
+exact rational microseconds and the shared lower-is-better envelope rule.
+Reference spread above the declared bound or an envelope crossing the tolerance
+is INCONCLUSIVE. Gate outcomes aggregate using the shared policy ordering.
+
+Equal declared `model_revision` values select `same-checkpoint`. Different
+revisions select `changed-model`: gates remain visible, but the overall outcome
+is INCONCLUSIVE with `changed_model_axis`. Missing model identity or incomplete
+reference deployment declarations also withhold direction. Output quality is
+not compared.
+
+The JSON report retains each capture's execution declaration and reports pooled
+sample counts, minimum, median, mean, maximum, ineligible counts by reason and
+within-arm determinism by seed. Seconds per image and images per second derive
+from mean eligible duration and declared image count; they are display values,
+not separate gates. Cross-arm hash equality is only a byte-equality fact.
+Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and
+**3** REGRESSION.
+
 ## Planned
 
-Compare remains unavailable. It will use A/B/A2 or A/B/B2/A2 and require at least
-three measured samples per arm. Only `end_to_end_us` will gate direction.
-Same-checkpoint comparisons will permit envelope direction; changed-model or
-unavailable identity will remain INCONCLUSIVE without a quality claim.
+Audio/video, runner markers and external probes are not supported.
 
 Prompts, program paths, declared env values and outputs are private evidence,
 not a public export. Review preflight output before sharing it.

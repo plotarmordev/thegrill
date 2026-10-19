@@ -68,7 +68,7 @@ enum Arm {
     B2,
     A2,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Metric {
     EndToEndUs,
@@ -167,7 +167,7 @@ struct Limits {
     stdout_bytes: usize,
     stderr_bytes: usize,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Gate {
     cell: String,
@@ -815,6 +815,17 @@ pub enum Command {
     },
     /// Recheck retained evidence without launching a runner.
     Inspect { dir: PathBuf },
+    /// Compare verified image captures under the declared envelope gates.
+    Compare {
+        #[arg(long)]
+        a: PathBuf,
+        #[arg(long)]
+        b: PathBuf,
+        #[arg(long)]
+        a2: PathBuf,
+        #[arg(long)]
+        b2: Option<PathBuf>,
+    },
 }
 pub fn execute(command: Command) -> Result<u8> {
     match command {
@@ -836,6 +847,12 @@ pub fn execute(command: Command) -> Result<u8> {
         Command::Inspect { dir } => {
             let report = capture::inspect(&dir)?;
             let code = report.exit_code();
+            crate::print_json(&report)?;
+            return Ok(code);
+        }
+        Command::Compare { a, b, a2, b2 } => {
+            let report = capture::compare::compare(&a, &b, &a2, b2.as_deref())?;
+            let code = report.outcome.exit();
             crate::print_json(&report)?;
             return Ok(code);
         }

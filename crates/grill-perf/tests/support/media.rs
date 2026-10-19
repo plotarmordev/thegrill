@@ -1145,3 +1145,328 @@ fn retained_directory_exists_before_the_runner_starts() {
     let report = fixture.captured();
     assert_eq!(report["cells"][0]["eligible"], 3);
 }
+
+fn comparison_fixture(measured: u32, b2: bool) -> Fixture {
+    let mut f = capture_fixture("sleep \"$DELAY\"; cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["warmup_runs"] = json!(0);
+    f.workload["cells"][0]["measured_runs"] = json!(measured);
+    f.workload["cells"][0]["pause_between_runs_ms"] = json!(0);
+    f.workload["gates"][0]["max_reference_spread_bps"] = json!(1000000);
+    if !b2 {
+        f.workload["slots"].as_array_mut().unwrap().remove(2);
+    }
+    f
+}
+
+impl Fixture {
+    fn capture_slot(&mut self, slot: &str, delay: &str) {
+        self.runner["env"]["DELAY"] = json!(delay);
+        self.save();
+        let output = cli()
+            .args(["media", "capture", "--workload"])
+            .arg(self.root.path("workload.json"))
+            .arg("--runner")
+            .arg(self.root.path("runner.json"))
+            .arg("--deployment")
+            .arg(self.root.path("deployment.json"))
+            .args(["--slot", slot, "--out"])
+            .arg(self.root.path(slot))
+            .output()
+            .unwrap();
+        successful(&output);
+    }
+
+    fn compare_slots(&self, b2: bool) -> Output {
+        let mut command = cli();
+        command
+            .args(["media", "compare", "--a"])
+            .arg(self.root.path("a"))
+            .arg("--b")
+            .arg(self.root.path("b"))
+            .arg("--a2")
+            .arg(self.root.path("a2"));
+        if b2 {
+            command.arg("--b2").arg(self.root.path("b2"));
+        }
+        command.output().unwrap()
+    }
+
+    fn comparison(&self, b2: bool, code: i32) -> Value {
+        let output = self.compare_slots(b2);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+#[test]
+fn compare_pass_reports_pooled_statistics_and_hash_facts() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 0);
+    assert_eq!(report["kind"], "media-comparison-v1");
+    assert_eq!(report["axis"], "same-checkpoint");
+    assert_eq!(report["outcome"], "PASS");
+    let gate = &report["gates"][0];
+    assert_eq!(gate["reference_summary"]["end_to_end_us"]["n"], 6);
+    assert_eq!(gate["candidate_summary"]["end_to_end_us"]["n"], 3);
+    assert_eq!(
+        gate["reference_summary"]["determinism_by_seed"][0]["deterministic"],
+        true
+    );
+    assert_eq!(gate["cross_arm_hash_equality"][0]["equal"], true);
+    let summary = &gate["reference_summary"];
+    let mean = summary["end_to_end_us"]["mean"].as_f64().unwrap();
+    assert_eq!(
+        summary["seconds_per_image"].as_f64().unwrap(),
+        mean / 1_000_000.0
+    );
+    assert_eq!(
+        summary["images_per_second_end_to_end"].as_f64().unwrap(),
+        1_000_000.0 / mean
+    );
+    assert_eq!(report, f.comparison(false, 0));
+}
+
+#[test]
+fn compare_regression_and_changed_model_cap_keep_gate_direction() {
+    for changed_model in [false, true] {
+        let mut f = comparison_fixture(3, false);
+        f.capture_slot("a", "0");
+        let deployment = fs::read(f.root.path("deployment.json")).unwrap();
+        if changed_model {
+            let mut candidate: Value = serde_json::from_slice(&deployment).unwrap();
+            candidate["model_revision"] = json!("other-checkpoint");
+            fs::write(
+                f.root.path("deployment.json"),
+                serde_json::to_vec(&candidate).unwrap(),
+            )
+            .unwrap();
+        }
+        f.capture_slot("b", "0.3");
+        fs::write(f.root.path("deployment.json"), deployment).unwrap();
+        f.capture_slot("a2", "0");
+        let report = f.comparison(false, if changed_model { 2 } else { 3 });
+        assert_eq!(report["gates"][0]["outcome"], "REGRESSION");
+        assert_eq!(
+            report["outcome"],
+            if changed_model {
+                "INCONCLUSIVE"
+            } else {
+                "REGRESSION"
+            }
+        );
+        if changed_model {
+            assert_eq!(report["axis"], "changed-model");
+            assert!(
+                report["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("changed_model_axis"))
+            );
+            assert!(
+                report["claim"]
+                    .as_str()
+                    .unwrap()
+                    .contains("output quality is not compared")
+            );
+        }
+    }
+}
+
+#[test]
+fn compare_unavailable_identity_and_insufficient_samples_withhold_direction() {
+    for missing_identity in [false, true] {
+        let mut f = comparison_fixture(if missing_identity { 3 } else { 1 }, false);
+        if missing_identity {
+            fs::write(f.root.path("deployment.json"), b"{}").unwrap();
+        }
+        f.capture_slot("a", "0.3");
+        f.capture_slot("b", "0");
+        f.capture_slot("a2", "0.3");
+        let report = f.comparison(false, 2);
+        assert_eq!(report["outcome"], "INCONCLUSIVE");
+        if missing_identity {
+            assert_eq!(report["axis"], "unavailable");
+            assert_eq!(report["reference_identity"]["status"], "unavailable");
+            assert_eq!(report["gates"][0]["outcome"], "PASS");
+        } else {
+            assert_eq!(
+                report["gates"][0]["reference_summary"]["end_to_end_us"]["n"],
+                2
+            );
+            assert!(
+                report["gates"][0]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("insufficient_samples")
+            );
+        }
+    }
+}
+
+#[test]
+fn compare_b2_pools_candidate_samples_and_requires_the_slot() {
+    let mut f = comparison_fixture(2, true);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("b2", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(true, 0);
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["end_to_end_us"]["n"],
+        4
+    );
+    assert_eq!(report["acquisitions"][2]["slot"]["arm"], "b2");
+    assert_eq!(f.compare_slots(false).status.code(), Some(1));
+}
+
+#[test]
+fn compare_reference_spread_withholds_direction() {
+    let mut f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\nsleep \"$(cat \"$ROOT/delay\")\"\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
+    f.workload["gates"][0]["max_reference_spread_bps"] = json!(1000);
+    fs::write(f.root.path("delay"), b"0").unwrap();
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.3");
+    fs::write(f.root.path("delay"), b"0.3").unwrap();
+    f.capture_slot("a2", "0");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["reason"], "ReferenceSpreadExceeded");
+}
+
+#[test]
+fn compare_rejects_wrong_order_workload_runner_and_tampered_capture() {
+    for problem in [
+        "order",
+        "overlap",
+        "workload",
+        "runner",
+        "program",
+        "deployment",
+        "tamper",
+        "slot",
+        "unchanged",
+    ] {
+        let mut f = comparison_fixture(1, false);
+        f.capture_slot("a", "0");
+        if problem == "order" {
+            f.capture_slot("a2", "0");
+        }
+        let workload = f.workload.clone();
+        if problem == "workload" {
+            f.workload["request"]["prompt"] = json!("different workload");
+        }
+        f.capture_slot("b", if problem == "unchanged" { "0" } else { "0.001" });
+        f.workload = workload;
+        if problem != "order" {
+            if problem == "runner" {
+                f.runner["id"] = json!("changed-reference");
+            }
+            if problem == "program" {
+                fs::write(
+                    f.root.path("runner"),
+                    b"#!/bin/sh\ncp \"$PREPARED\" \"$1\"\n",
+                )
+                .unwrap();
+            }
+            if problem == "deployment" {
+                fs::write(f.root.path("deployment.json"), b"{}").unwrap();
+            }
+            f.capture_slot("a2", "0");
+        }
+        if problem == "tamper" {
+            fs::write(
+                f.root.path("b/run-000000/retained/output-00.png"),
+                b"tampered",
+            )
+            .unwrap();
+        }
+        if problem == "overlap" {
+            let path = f.root.path("a/capture.json");
+            let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let last: Value =
+                serde_json::from_slice(&fs::read(f.root.path("a2/capture.json")).unwrap()).unwrap();
+            manifest["finished_unix_ms"] = json!(last["finished_unix_ms"].as_u64().unwrap() + 1);
+            fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        }
+        if problem == "slot" {
+            fs::rename(f.root.path("a"), f.root.path("swap")).unwrap();
+            fs::rename(f.root.path("b"), f.root.path("a")).unwrap();
+            fs::rename(f.root.path("swap"), f.root.path("b")).unwrap();
+        }
+        let output = f.compare_slots(false);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{problem}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{problem}: invalid evidence produced a verdict"
+        );
+    }
+}
+
+#[test]
+fn inspect_requires_completion_timestamp_and_rejects_reversed_clock() {
+    for missing in [true, false] {
+        let f = capture_fixture("cp \"$PREPARED\" \"$1\"");
+        f.captured();
+        rewrite_manifest(&f, |manifest| {
+            if missing {
+                manifest.as_object_mut().unwrap().remove("finished_unix_ms");
+            } else {
+                manifest["finished_unix_ms"] = json!(0);
+            }
+        });
+        inspection_rejected(
+            &f,
+            if missing {
+                "finished_unix_ms"
+            } else {
+                "completion precedes"
+            },
+        );
+    }
+}
+
+#[test]
+fn compare_b2_binding_and_failed_samples_are_not_hidden_by_pooling() {
+    let mut f = comparison_fixture(3, true);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("b2", "0.002");
+    f.capture_slot("a2", "0");
+    let output = f.compare_slots(true);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("B2 must match B"));
+
+    let mut f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\nif [ \"$DELAY\" = 0 ]; then cp \"$PREPARED\" \"$1\"; fi\n",
+    )
+    .unwrap();
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("a2", "0");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["candidate_summary"]["eligible"], 0);
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["ineligible_by_reason"]["output_missing"],
+        3
+    );
+    assert!(report["gates"][0]["candidate_summary"]["end_to_end_us"].is_null());
+}
