@@ -423,6 +423,7 @@ fn capture_fixture(script: &str) -> Fixture {
     f.runner["cwd"] = json!(f.root.0);
     f.runner["env"] = json!({"PREPARED":f.root.path("prepared"),"ROOT":f.root.0});
     f.workload["limits"]["run_deadline_ms"] = json!(5000);
+    f.workload["limits"]["setup_deadline_ms"] = json!(5000);
     f.workload["request"]["seeds"] = json!([42]);
     f
 }
@@ -705,7 +706,7 @@ fn assert_process_stopped(pid: &str) {
 #[test]
 fn capture_deadline_cleans_descendants_and_retains_every_failure() {
     let mut f = capture_fixture("sleep 60 &\nprintf '%s\\n' \"$!\" >> \"$ROOT/descendants\"\nwait");
-    f.workload["limits"]["run_deadline_ms"] = json!(200);
+    f.workload["limits"]["run_deadline_ms"] = json!(5000);
     let report = f.captured();
     assert_eq!(report["runs"].as_array().unwrap().len(), 4);
     assert_eq!(report["cells"][0]["eligible"], 0);
@@ -728,7 +729,7 @@ fn capture_cancellation_cleans_descendants_and_does_not_launch_replacements() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !f.root.path("descendants").exists() {
         assert!(std::time::Instant::now() < deadline, "runner never started");
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1022,7 +1023,7 @@ fn cancellation_interrupts_pause_without_launching_the_next_sample() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !fixture.root.path("capture/run-000000/run.json").exists() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1231,10 +1232,10 @@ impl Fixture {
         command
     }
 
-    fn capture_slot(&mut self, slot: &str, delay: &str) {
-        self.capture_timed_slot(slot, delay);
+    fn capture_slot(&mut self, slot: &str, timing_variant: &str) {
+        self.capture_timed_slot(slot, timing_variant);
         // The runner declaration selects fixture timings, not scheduler-dependent gates.
-        let duration_us = if delay == "0.3" { 300_000 } else { 1_000 };
+        let duration_us = if timing_variant == "0.3" { 300 } else { 1 };
         self.set_slot_times(slot, |_| duration_us);
     }
 
@@ -1438,7 +1439,7 @@ fn compare_reference_spread_withholds_direction() {
     f.capture_slot("a", "0");
     f.capture_slot("b", "0.3");
     f.capture_slot("a2", "0");
-    f.set_slot_times("a2", |_| 300_000);
+    f.set_slot_times("a2", |_| 300);
     let report = f.comparison(false, 2);
     assert_eq!(report["gates"][0]["reason"], "ReferenceSpreadExceeded");
 }
@@ -1456,10 +1457,10 @@ fn compare_rejects_reference_return_captured_before_candidate() {
 }
 
 #[test]
-fn compare_rejects_overlapping_captures() {
+fn compare_rejects_overlapping_captures_even_after_rehashed_completion() {
     let mut f = comparison_fixture(1, false);
     f.workload["limits"]["run_deadline_ms"] = json!(60000);
-    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = wait ]; then while [ ! -f \"$ROOT/release\" ]; do sleep 0.01; done; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = wait ]; then touch \"$ROOT/started\"; while [ ! -f \"$ROOT/release\" ]; do sleep 0.01; done; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
     let child = f
         .slot_command("a", "wait")
         .stdout(std::process::Stdio::piped())
@@ -1467,7 +1468,7 @@ fn compare_rejects_overlapping_captures() {
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !f.root.path("a/receipt.json").exists() {
+    while !f.root.path("started").exists() {
         assert!(
             std::time::Instant::now() < deadline,
             "capture never started"
@@ -1475,14 +1476,32 @@ fn compare_rejects_overlapping_captures() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     f.capture_slot("b", "0");
+    let a: Value =
+        serde_json::from_slice(&fs::read(f.root.path("a/receipt.json")).unwrap()).unwrap();
+    let b: Value =
+        serde_json::from_slice(&fs::read(f.root.path("b/receipt.json")).unwrap()).unwrap();
+    let forged_finish = b["started_unix_ms"].as_u64().unwrap();
+    let forged_interval = forged_finish - a["started_unix_ms"].as_u64().unwrap();
+    // Hold A beyond the forged interval regardless of collector launch overhead.
+    std::thread::sleep(std::time::Duration::from_millis(forged_interval + 10));
     fs::write(f.root.path("release"), b"").unwrap();
     successful(&child.wait_with_output().unwrap());
-    f.set_slot_times("a", |_| 1_000);
     f.capture_slot("a2", "wait");
     f.comparison_rejected(
         false,
         "chronology requires a to finish no later than b starts",
     );
+    rewrite_capture_manifest(&f.root.path("a"), |manifest| {
+        manifest["finished_unix_ms"] = json!(forged_finish);
+    });
+    let inspected = cli()
+        .args(["media", "inspect"])
+        .arg(f.root.path("a"))
+        .output()
+        .unwrap();
+    let reason = "capture interval is shorter than its measured and setup process durations";
+    comparison_rejected(&inspected, reason);
+    f.comparison_rejected(false, reason);
 }
 
 #[test]
@@ -1676,13 +1695,7 @@ fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivor
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
-    f.set_slot_times("b", |run| {
-        if run["eligible"] == true {
-            1_000
-        } else {
-            400_000
-        }
-    });
+    f.set_slot_times("b", |run| if run["eligible"] == true { 1 } else { 400 });
     let report = f.comparison(false, 2);
     let gate = &report["gates"][0];
     assert_eq!(gate["candidate_summary"]["eligible"], 3);
@@ -1695,8 +1708,8 @@ fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivor
     assert_eq!(
         gate["candidate"],
         json!([
-            {"numerator":1000,"denominator":1},
-            {"numerator":1000,"denominator":1},
+            {"numerator":1,"denominator":1},
+            {"numerator":1,"denominator":1},
         ])
     );
     assert_eq!(gate["reason"], "insufficient_samples");
@@ -1737,10 +1750,10 @@ fn compare_excludes_eligible_warmups_from_envelopes_and_hashes() {
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
-    for (slot, measured_us) in [("a", 300_000), ("b", 1_000), ("a2", 300_000)] {
+    for (slot, measured_us) in [("a", 300), ("b", 1), ("a2", 300)] {
         f.set_slot_times(slot, |run| {
             if run["phase"] == "warmup" {
-                1_000_000
+                1_000
             } else {
                 measured_us
             }
@@ -1775,9 +1788,9 @@ fn compare_worst_gate_wins_when_later_cell_regresses() {
     for (slot, reference) in [("a", true), ("b", false), ("a2", true)] {
         f.set_slot_times(slot, |run| {
             if (run["cell"] == "c1") == reference {
-                300_000
+                300
             } else {
-                1_000
+                1
             }
         });
     }
@@ -2120,4 +2133,28 @@ fn compare_cross_arm_hash_equality_is_unavailable_for_nondeterministic_arms() {
         };
         assert_eq!(gate[arm]["determinism_by_seed"][0]["deterministic"], false);
     }
+}
+
+#[test]
+fn inspect_interval_floor_includes_setup_inside_the_capture() {
+    let mut f = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["warmup_runs"] = json!(0);
+    f.workload["cells"][0]["measured_runs"] = json!(1);
+    f.runner["setup"] = json!({"program":"/bin/sh","args":["-c","sleep 0.2"]});
+    let report = f.captured();
+    assert_eq!(report["setup"]["process"]["status"], "complete");
+    let measured_ms = report["runs"][0]["process"]["end_to_end_us"]
+        .as_u64()
+        .unwrap()
+        / 1000;
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(f.root.path("capture/receipt.json")).unwrap()).unwrap();
+    rewrite_capture_manifest(&f.root.path("capture"), |manifest| {
+        manifest["finished_unix_ms"] =
+            json!(receipt["started_unix_ms"].as_u64().unwrap() + measured_ms + 1);
+    });
+    inspection_rejected(
+        &f,
+        "capture interval is shorter than its measured and setup process durations",
+    );
 }

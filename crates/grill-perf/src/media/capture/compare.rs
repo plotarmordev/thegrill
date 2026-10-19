@@ -295,7 +295,7 @@ pub(in crate::media) fn compare(
     if reference_identity.status == ReferenceIdentityStatus::Unavailable {
         reasons.push("reference_identity_unavailable");
     }
-    if !reasons.is_empty() {
+    if !reasons.is_empty() && matches!(outcome, Outcome::Pass | Outcome::Regression) {
         outcome = Outcome::Inconclusive;
     }
     Ok(Comparison {

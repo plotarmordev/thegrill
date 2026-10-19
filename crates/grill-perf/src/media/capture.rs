@@ -684,6 +684,7 @@ fn make_receipt(
     deployment: &[u8],
     slot: Slot,
     root: &Path,
+    started_unix_ms: u64,
 ) -> Result<Receipt> {
     Ok(Receipt {
         version: 1,
@@ -713,7 +714,7 @@ fn make_receipt(
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
         },
-        started_unix_ms: crate::metrics::unix_ms(),
+        started_unix_ms,
         projection_root: root.into(),
     })
 }
@@ -740,7 +741,15 @@ pub(super) fn capture(
     let guard = Guard::install()?;
     evidence::fresh(out)?;
     let root = fs::canonicalize(out).map_err(|error| error.to_string())?;
-    let receipt = make_receipt(&plan, admitted, &deployment_bytes, slot, &root)?;
+    let started = Instant::now();
+    let receipt = make_receipt(
+        &plan,
+        admitted,
+        &deployment_bytes,
+        slot,
+        &root,
+        crate::metrics::unix_ms(),
+    )?;
     evidence::write(&root.join("workload.json"), &plan.workload_bytes)?;
     evidence::write(&root.join("runner.json"), &plan.runner_bytes)?;
     evidence::write(&root.join("deployment.json"), &deployment_bytes)?;
@@ -790,7 +799,13 @@ pub(super) fn capture(
         "cache-after.json",
         &cache::observe(&receipt.cache_paths),
     )?;
-    let digest = publish_manifest(&root, status, runs.len(), setup.is_some())?;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis())
+        .map_err(|_| "capture interval exceeds timestamp range")?;
+    let finished_unix_ms = receipt
+        .started_unix_ms
+        .checked_add(elapsed_ms)
+        .ok_or("capture completion timestamp overflow")?;
+    let digest = publish_manifest(&root, status, runs.len(), setup.is_some(), finished_unix_ms)?;
     Ok(inspection(&plan, &receipt, status, runs, setup, digest))
 }
 
@@ -813,6 +828,7 @@ fn publish_manifest(
     status: CaptureStatus,
     runs: usize,
     setup: bool,
+    finished_unix_ms: u64,
 ) -> Result<String> {
     let mut files = BTreeMap::new();
     for name in manifest_names(runs, setup) {
@@ -825,7 +841,7 @@ fn publish_manifest(
         version: 1,
         kind: "media-capture-complete-v1".into(),
         status,
-        finished_unix_ms: crate::metrics::unix_ms(),
+        finished_unix_ms,
         runs,
         files,
         evidence_sha256: String::new(),
@@ -1165,6 +1181,20 @@ fn load(root: &Path) -> Result<Loaded> {
         || (!setup_failed && manifest.status == CaptureStatus::SetupFailed)
     {
         return Err("capture status mismatch".into());
+    }
+    let measured_us = runs
+        .iter()
+        .filter(|run| run.phase == Phase::Measured)
+        .map(|run| u128::from(run.process.end_to_end_us))
+        .sum::<u128>()
+        + setup
+            .as_ref()
+            .map_or(0, |setup| u128::from(setup.process.end_to_end_us));
+    // Completion is start plus monotonic elapsed time, at millisecond resolution.
+    if measured_us / 1000 > u128::from(manifest.finished_unix_ms - receipt.started_unix_ms) {
+        return Err(
+            "capture interval is shorter than its measured and setup process durations".into(),
+        );
     }
     let inspection = inspection(
         &plan,
