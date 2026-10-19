@@ -344,13 +344,13 @@ fn large_executable_program_is_admitted() {
 }
 
 #[test]
-fn setup_output_arguments_follow_sample_rules() {
+fn setup_output_arguments_are_optional_but_must_be_declared() {
     let mut f = Fixture::new();
-    for args in [
-        json!([]),
-        json!(["{output_dir}"]),
-        json!(["{output}", "{output}"]),
-    ] {
+    for args in [json!([]), json!(["--prefetch"])] {
+        f.runner["setup"]["args"] = args.clone();
+        assert_eq!(f.report()["setup_args"], args);
+    }
+    for args in [json!(["{output_dir}"]), json!(["{output}", "{output}"])] {
         f.runner["setup"]["args"] = args;
         f.reject("runner.setup.args:");
     }
@@ -361,4 +361,10 @@ fn setup_output_arguments_follow_sample_rules() {
     f.workload["cells"][0]["request"] = f.workload["request"].clone();
     f.workload["cells"][0]["request"]["images_per_run"] = json!(2);
     f.reject("cell c1.images_per_run");
+    f.workload["request"]["images_per_run"] = json!(2);
+    f.workload["cells"][0]["request"]["images_per_run"] = json!(1);
+    assert_eq!(
+        f.report()["samples"][0]["args"][5],
+        "run-000000/output-00.png"
+    );
 }

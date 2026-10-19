@@ -41,8 +41,8 @@ Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 Outputs declare unique `placeholder` (`output` or `output_dir`), `container`
 (`png` or `jpeg`) and `expect: {width, height}` with the same canvas bounds.
 At least one is required. The declared set must equal the output placeholders
-used in sample argv and, when present, setup argv. `{output}` occurs only once in
-each argv and only for a single image;
+used in sample argv. Setup arguments may use only declared output placeholders
+but need not use any. `{output}` occurs at most once in each argv; samples with
 multiple images require only `{output_dir}`. The file extension comes from the
 `output` declaration, not the directory declaration.
 

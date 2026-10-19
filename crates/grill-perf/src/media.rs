@@ -420,14 +420,11 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
             }
         }
     }
-    validate_output_args(&outputs, &r.args, "runner.args")?;
+    validate_output_args(&outputs, &r.args, "runner.args", true)?;
     if let Some(setup) = &r.setup {
-        validate_output_args(&outputs, &setup.args, "runner.setup.args")?;
+        validate_output_args(&outputs, &setup.args, "runner.setup.args", false)?;
     }
     if outputs.contains(&OutputPlaceholder::Output) {
-        if w.request.images_per_run > 1 {
-            return Err("request.images_per_run: multiple images require only output_dir".into());
-        }
         for cell in &w.cells {
             if cell.request.as_ref().unwrap_or(&w.request).images_per_run > 1 {
                 return Err(format!(
@@ -443,6 +440,7 @@ fn validate_output_args(
     outputs: &BTreeSet<OutputPlaceholder>,
     args: &[String],
     context: &str,
+    require_all: bool,
 ) -> Result<()> {
     for placeholder in [OutputPlaceholder::Output, OutputPlaceholder::OutputDir] {
         let token = format!("{{{}}}", placeholder.name());
@@ -450,7 +448,9 @@ fn validate_output_args(
             .iter()
             .map(|arg| arg.matches(&token).count())
             .sum::<usize>();
-        if outputs.contains(&placeholder) != (count > 0) {
+        if (count > 0 && !outputs.contains(&placeholder))
+            || (require_all && count == 0 && outputs.contains(&placeholder))
+        {
             return Err(format!(
                 "{context}: {token} must match its output declaration"
             ));
