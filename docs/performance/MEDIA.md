@@ -133,6 +133,7 @@ Inspect requires all process durations (setup, warmups and measured runs) to fit
 within `elapsed_ms`, completion not to precede start, and the wall-clock interval
 to be at least `elapsed_ms - (1000 + elapsed_ms / 1000)` milliseconds, allowing
 clock drift and slew while a suspended machine may have a longer wall interval.
+A backward clock step of more than about a second during a capture fails closed.
 
 ## Compare
 
