@@ -1,7 +1,9 @@
-//! Offline admission for operator-declared media processes; never launches a runner.
+//! Admission and retained evidence for operator-declared image processes.
+mod cache;
+mod capture;
 use crate::{
     evidence,
-    model::{FILE_CAP, Result, identifier, present},
+    model::{FILE_CAP, Phase, Result, identifier, present},
 };
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,7 @@ const MAX_WARMUPS: u32 = 20;
 const MAX_MEASURED: u32 = 100;
 const PROMPT_CAP: usize = 16 * 1024;
 const PROGRAM_CAP: usize = 1024 * 1024 * 1024;
+const SUPPORT: &str = "experimental-extension-first-released-v0.9";
 
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -43,9 +46,9 @@ impl OutputPlaceholder {
         }
     }
 }
-#[derive(Deserialize, Serialize, Copy, Clone)]
+#[derive(Debug, Deserialize, Serialize, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum Container {
+pub(crate) enum Container {
     Png,
     Jpeg,
 }
@@ -57,7 +60,7 @@ impl Container {
         }
     }
 }
-#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 enum Arm {
     A,
@@ -70,14 +73,14 @@ enum Arm {
 enum Metric {
     EndToEndUs,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum Execution {
     InProcess,
     DelegatesToResidentService,
     Unknown,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum CacheState {
     Cold,
@@ -149,7 +152,7 @@ struct Cell {
     )]
     request: Option<Request>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Slot {
     id: String,
@@ -481,6 +484,9 @@ fn validate_runner(r: &Runner, limits: &Limits) -> Result<()> {
             return Err(format!("runner.env key/value invalid: {key}"));
         }
     }
+    if r.cache.paths.len() > 64 || r.cache.paths.iter().any(|path| path.len() > 4096) {
+        return Err("cache paths exceed retained observation bounds".into());
+    }
     for path in &r.cache.paths {
         validate_path(path, "runner.cache.paths")?;
     }
@@ -520,7 +526,8 @@ fn expand(path: &str) -> Result<PathBuf> {
         Ok(path.into())
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Program {
     path: PathBuf,
     sha256: String,
@@ -577,7 +584,7 @@ fn substitute(
 #[derive(Serialize)]
 struct Sample {
     cell: String,
-    phase: &'static str,
+    phase: Phase,
     seed: u64,
     args: Vec<String>,
 }
@@ -604,12 +611,87 @@ struct Preflight {
     wall_clock_allowance_ms: u64,
     samples: Vec<Sample>,
 }
-fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
-    let wb = evidence::read(workload, FILE_CAP)?;
-    let rb = evidence::read(runner, FILE_CAP)?;
-    let w: Workload = parse(&wb)?;
-    let r: Runner = parse(&rb)?;
-    validate(&w, &r)?;
+struct Plan {
+    workload: Workload,
+    runner: Runner,
+    workload_bytes: Vec<u8>,
+    runner_bytes: Vec<u8>,
+}
+
+fn load_plan(workload: &Path, runner: &Path) -> Result<Plan> {
+    let workload_bytes = evidence::read(workload, FILE_CAP)?;
+    let runner_bytes = evidence::read(runner, FILE_CAP)?;
+    plan_from_bytes(workload_bytes, runner_bytes)
+}
+
+fn plan_from_bytes(workload_bytes: Vec<u8>, runner_bytes: Vec<u8>) -> Result<Plan> {
+    let workload = parse(&workload_bytes)?;
+    let runner = parse(&runner_bytes)?;
+    validate(&workload, &runner)?;
+    Ok(Plan {
+        workload,
+        runner,
+        workload_bytes,
+        runner_bytes,
+    })
+}
+
+struct Scheduled<'a> {
+    index: usize,
+    cell: &'a Cell,
+    request: &'a Request,
+    phase: Phase,
+    seed: u64,
+}
+impl Scheduled<'_> {
+    fn directory(&self) -> String {
+        format!("run-{:06}", self.index)
+    }
+}
+
+fn schedule(workload: &Workload) -> impl Iterator<Item = Scheduled<'_>> {
+    workload
+        .cells
+        .iter()
+        .flat_map(|cell| {
+            let request = cell.request.as_ref().unwrap_or(&workload.request);
+            (0..cell.warmup_runs + cell.measured_runs).map(move |k| (cell, request, k))
+        })
+        .enumerate()
+        .map(|(index, (cell, request, k))| Scheduled {
+            index,
+            cell,
+            request,
+            phase: if k < cell.warmup_runs {
+                Phase::Warmup
+            } else {
+                Phase::Measured
+            },
+            seed: request.seeds[k as usize % request.seeds.len()],
+        })
+}
+
+fn render(
+    args: &[String],
+    request: &Request,
+    seed: u64,
+    dir: &Path,
+    workload: &Workload,
+) -> Result<Vec<String>> {
+    let dir = dir.to_str().ok_or("capture path must be UTF-8")?;
+    let ext = workload
+        .outputs
+        .iter()
+        .find(|output| output.placeholder == OutputPlaceholder::Output)
+        .map(|output| output.container.extension());
+    args.iter()
+        .map(|arg| substitute(arg, request, seed, dir, ext))
+        .collect()
+}
+
+fn preflight(plan: &Plan) -> Result<Preflight> {
+    let w = &plan.workload;
+    let r = &plan.runner;
     let program = program(resolve_program(&r.program)?)?;
     let setup_program = r
         .setup
@@ -638,47 +720,41 @@ fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
             Ok::<_, String>(path)
         })
         .transpose()?;
-    let ext = w
-        .outputs
-        .iter()
-        .find(|o| o.placeholder == OutputPlaceholder::Output)
-        .map(|o| o.container.extension());
-    let render = |args: &[String], req: &Request, seed, dir: &str| -> Result<Vec<String>> {
-        args.iter()
-            .map(|arg| substitute(arg, req, seed, dir, ext))
-            .collect()
-    };
     let setup_args = r
         .setup
         .as_ref()
-        .map(|s| {
-            render(&s.args, &w.request, w.request.seeds[0], "setup")
-                .map_err(|e| format!("runner.setup.args: {e}"))
+        .map(|setup| {
+            render(
+                &setup.args,
+                &w.request,
+                w.request.seeds[0],
+                Path::new("setup"),
+                w,
+            )
+            .map_err(|error| format!("runner.setup.args: {error}"))
         })
         .transpose()?;
     let mut samples = Vec::new();
     let (mut warmup_runs, mut measured_runs, mut wall_clock_allowance_ms) = (0u64, 0u64, 0u64);
-    for cell in &w.cells {
-        let req = cell.request.as_ref().unwrap_or(&w.request);
-        warmup_runs += u64::from(cell.warmup_runs);
-        measured_runs += u64::from(cell.measured_runs);
-        for k in 0..cell.warmup_runs + cell.measured_runs {
-            let seed = req.seeds[k as usize % req.seeds.len()];
-            let dir = format!("run-{:06}", samples.len());
-            samples.push(Sample {
-                cell: cell.id.clone(),
-                phase: if k < cell.warmup_runs {
-                    "warmup"
-                } else {
-                    "measured"
-                },
-                seed,
-                args: render(&r.args, req, seed, &dir)
-                    .map_err(|e| format!("cell {}.args: {e}", cell.id))?,
-            });
-            wall_clock_allowance_ms +=
-                u64::from(w.limits.run_deadline_ms) + u64::from(cell.pause_between_runs_ms);
+    for sample in schedule(w) {
+        match sample.phase {
+            Phase::Warmup => warmup_runs += 1,
+            Phase::Measured => measured_runs += 1,
         }
+        samples.push(Sample {
+            cell: sample.cell.id.clone(),
+            phase: sample.phase,
+            seed: sample.seed,
+            args: render(
+                &r.args,
+                sample.request,
+                sample.seed,
+                Path::new(&sample.directory()),
+                w,
+            )?,
+        });
+        wall_clock_allowance_ms +=
+            u64::from(w.limits.run_deadline_ms) + u64::from(sample.cell.pause_between_runs_ms);
     }
     if let Some(s) = &r.setup {
         wall_clock_allowance_ms += u64::from(s.deadline_ms.unwrap_or(w.limits.setup_deadline_ms));
@@ -687,17 +763,17 @@ fn preflight(workload: &Path, runner: &Path) -> Result<Preflight> {
         version: 1,
         kind: "media-preflight-v1",
         claim: "offline-declared-media-plan-admission-launches-nothing",
-        support: "experimental-extension-first-released-v0.9",
+        support: SUPPORT,
         execution: r.execution,
-        workload_sha256: evidence::digest(&wb),
+        workload_sha256: evidence::digest(&plan.workload_bytes),
         workload_typed_sha256: evidence::digest(
             &serde_json::to_vec(&w).map_err(|e| e.to_string())?,
         ),
-        runner_sha256: evidence::digest(&rb),
+        runner_sha256: evidence::digest(&plan.runner_bytes),
         program,
         setup_program,
         setup_args,
-        env: r.env,
+        env: r.env.clone(),
         cwd,
         cache_paths: r
             .cache
@@ -724,9 +800,45 @@ pub enum Command {
         #[arg(long)]
         runner: PathBuf,
     },
+    /// Capture serial fresh-process image samples.
+    Capture {
+        #[arg(long)]
+        workload: PathBuf,
+        #[arg(long)]
+        runner: PathBuf,
+        #[arg(long)]
+        deployment: PathBuf,
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Recheck retained evidence without launching a runner.
+    Inspect { dir: PathBuf },
 }
 pub fn execute(command: Command) -> Result<u8> {
-    let Command::Preflight { workload, runner } = command;
-    crate::print_json(&preflight(&workload, &runner)?)?;
+    match command {
+        Command::Preflight { workload, runner } => {
+            crate::print_json(&preflight(&load_plan(&workload, &runner)?)?)?;
+        }
+        Command::Capture {
+            workload,
+            runner,
+            deployment,
+            slot,
+            out,
+        } => {
+            let report = capture::capture(&workload, &runner, &deployment, &slot, &out)?;
+            let code = report.exit_code();
+            crate::print_json(&report)?;
+            return Ok(code);
+        }
+        Command::Inspect { dir } => {
+            let report = capture::inspect(&dir)?;
+            let code = report.exit_code();
+            crate::print_json(&report)?;
+            return Ok(code);
+        }
+    }
     Ok(0)
 }

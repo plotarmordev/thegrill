@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- Add experimental [`media preflight`](MEDIA.md) for image CLI workload and
-  runner validation, program hashes, sample argv and a wall-clock allowance.
-  Media capture, inspect and compare are not available.
+- Add experimental image CLI [`media preflight|capture|inspect`](MEDIA.md):
+  declaration admission, serial process capture on Linux/macOS, setup and cache
+  observations, retained failures and bounded outputs, PNG/JPEG container checks
+  and offline descriptive inspection. Compare remains planned.
 
 ## Version 0.8.0 — concurrency verdicts
 

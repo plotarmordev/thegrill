@@ -2147,6 +2147,13 @@ fn external_program_retains_failed_raw_bytes_and_output_caps() {
             receipt["program_output"][format!("{stream}_truncated")],
             true
         );
+        assert!(
+            receipt["failure"]
+                .as_str()
+                .unwrap()
+                .contains("raw output is truncated; retained prefixes only"),
+            "{receipt}"
+        );
     }
 }
 
