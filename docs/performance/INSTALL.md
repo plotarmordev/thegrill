@@ -14,6 +14,12 @@ never substitute a moving branch or local staging hashes. Retain earlier
 published releases and their original pins for historical studies. Installing
 v0.8.0 does not reinterpret old receipts or qualify new backend claims.
 
+The experimental image [media CLI](MEDIA.md) ships from
+[v0.9.0](RELEASE-NOTES.md#version-090--experimental-image-benchmarking).
+That release is in preparation; the download commands remain pinned to the
+published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
+containing the media CLI until publication.
+
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
 startup, retention and microbench Python modules under `tools/`. Keep all of

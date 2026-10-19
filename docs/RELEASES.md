@@ -2,8 +2,8 @@
 
 Release preparation is not publication. No tag or release is created by the
 staging script, pull-request workflow, manual staging dispatch or installed
-smoke helper. Maintainer approval is required before the first real release.
-Version `0.1.0` is prepared, not a claim that a public download exists.
+smoke helper. Maintainer approval is required before publication.
+Version `0.9.0` is in preparation, not a claim that a public download exists.
 
 Staging artifacts are retained on the Actions run for reviewers with access,
 subject to repository authentication and artifact retention. They are not
