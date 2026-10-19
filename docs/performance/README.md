@@ -10,7 +10,6 @@ baseline/check workflow. Their local-process producer and CPU fixtures do not
 qualify real recipe startup, hidden-warmup suppression or persistent model KV.
 
 Experimental image CLI benchmarking has a separate [media contract](MEDIA.md).
-Only `media preflight` is available; it does not start a process.
 
 ## Baseline, change, check
 

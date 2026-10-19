@@ -1,95 +1,84 @@
 # Media CLI benchmarking
 
-Status: experimental, **preflight only** in this release. `capture`, offline
-`inspect` and envelope `compare` are planned, not available. Audio and video
-return a “not supported yet” error. No media process is started by preflight.
+`media preflight` is experimental and image-only. It prints JSON without starting
+processes or creating directories. Audio and video are not supported yet.
 
-```
-grill-perf media preflight --workload W.json --runner R.json [--json]
+```text
+grill-perf media preflight --workload W.json --runner R.json
 ```
 
-Preflight admits closed JSON objects, rejects unknown and duplicate fields,
-resolves program symlinks, hashes the resolved bytes, and prints each planned
-sample's argv, phase and seed. It reports raw workload/runner hashes, the typed
-workload hash, warmup and measured counts, and a per-capture wall-clock allowance:
-run deadlines plus declared pauses after each run, plus setup's deadline when
-present. This is a declared work ceiling, not a guarantee against filesystem or
-OS stalls. Output paths are relative projections into a future capture directory;
-preflight creates no directories. Exit status is success for an admitted plan,
-error for invalid input or unavailable program bytes; CLI usage follows the
-existing command convention. JSON contains the same plan as text, with separate
-fields for environment additions, working directory and declared cache paths.
+The report contains raw workload/runner hashes, a typed workload hash, resolved
+program hashes, each sample's argv, phase and seed, and counts. Its wall-clock
+allowance sums run deadlines, pauses after every run and the setup deadline when
+setup is declared; filesystem and OS stalls can exceed it. Output paths are
+projections relative to a future capture directory, not executable capture argv.
+Exit codes: **0** admitted, **1** rejected or unreadable, **2** CLI usage error.
 
 ## Documents
 
-The shared `media-workload-v1` document declares `version`, `name`, image
-`modality`, `request`, `outputs`, `cells`, `slots`, `limits` and `gates`.
-The per-arm `media-runner-v1` declaration separately owns `version`, `id`,
-`program`, `args`, `env`, nullable `cwd` and `setup`, `cache`, nullable `markers`
-and `probe`, and `pins`. Workload data never selects an executable.
+Both documents require their `kind` (`media-workload-v1` or `media-runner-v1`)
+and `version: 1`. Records are JSON objects; unknown/duplicate fields and positional
+records are rejected. Files and resolved programs are bounded to 4 MiB. Optional
+fields are omitted, not null; absent optional workload fields are omitted from
+typed serialization so later optional additions need not change existing hashes.
 
-Requests contain `prompt`, nullable `negative_prompt`, `seeds`, `width`, `height`,
-`steps`, nullable `guidance_milli`, and `images_per_run`. Image requests reject
-non-null `frames`, `fps`, `duration_us` and `sample_rate`. A cell's optional
-`request` replaces the whole request, never merges it. Cells declare `id`,
-`warmup_runs`, `measured_runs` and optional `pause_between_runs_ms` (default zero).
-Gates name a cell, `end_to_end_us`, `max_adverse_bps` and
-`max_reference_spread_bps`. Outputs declare `placeholder`, `container` (`png` or
-`jpeg`) and `expect: {width, height}`; placeholders are unique `output` or `output_dir`.
-`{output}` may appear at most once in argv and only for a single image per run.
-Multiple images require `{output_dir}` instead; collection from that directory
-belongs to the planned capture command, not preflight.
-Limits declare `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
+The shared workload declares `name`, `modality: image`, `request`, `outputs`,
+`cells`, `slots`, `limits` and `gates`. Names and IDs use ASCII letters, digits,
+`-_.`, with length 1–64. Requests contain `prompt`, `seeds`, `width`, `height`,
+`steps`, `images_per_run`, optional `negative_prompt` and optional
+`guidance_milli` (descriptive only; no guidance substitution). Bounds: prompts
+are control-free and at most 16 KiB (no newlines/tabs), seeds 1–16, canvas
+1–16384, steps 1–1000, images per run 1–64.
+
+Cells (1–64) declare `id`, `warmup_runs` (0–20), `measured_runs` (1–100), optional
+`pause_between_runs_ms` (default zero) and optional `request`, which replaces the
+whole request. Slots declare unique `id` and `arm`: `a`, `b`, `a2`, optionally
+`b2`. Gates (1–16) name unique declared cells, `metric: end_to_end_us`,
+`max_adverse_bps` (0–9999) and `max_reference_spread_bps` (0–1000000).
+Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 `stdout_bytes` and `stderr_bytes`.
 
-Runner argv uses only `{prompt}`, `{negative_prompt}`, `{seed}`, `{width}`,
-`{height}`, `{steps}`, `{frames}`, `{fps}`, `{duration_s}`, `{sample_rate}`,
-`{output}`, `{output_dir}` and `{marker_file}`. Modality-inapplicable placeholders
-and unknown placeholders fail preflight. Substitution is single-pass; prompt
-text is not a second template. Arguments remain separate strings, including
-spaces, quotes and shell syntax. Planned execution is direct exec, never a
-shell. Program declarations are file paths, not PATH searches. Only leading
-`~` path expansion is supported. Environment additions supplement the inherited
-environment; inherited values are not recorded.
+Outputs declare unique `placeholder` (`output` or `output_dir`), `container`
+(`png` or `jpeg`) and `expect: {width, height}` with the same canvas bounds.
+At least one is required. The declared set must equal the output placeholders
+used in runner argv. `{output}` occurs only once and only for a single image;
+multiple images require only `{output_dir}`. The file extension comes from the
+`output` declaration, not the directory declaration.
 
-Setup declares `args`, optional `program` (defaults to the runner program), and
-optional `deadline_ms` bounded by the workload setup deadline. It is planned
-once before warmups and excluded from measurements. Cache declares
-`declared_state: cold|warm|unknown` and `paths`; no cache is inspected or purged
-by preflight. Pins declare `path` and `sha256`; preflight checks their form but
-does not verify their bytes. Marker collection and external probes are planned;
-non-null probes and enabled markers are rejected now.
+The per-arm runner owns `id`, `program`, `args`, `env`, `execution`, `cache`,
+`pins`, optional `cwd` and optional `setup`. `execution` is `in-process`,
+`delegates-to-resident-service` or `unknown`. Programs must be executable regular
+files; relative paths resolve against the invoking directory, not `cwd`, without
+PATH search. Leading `~` expands to HOME. A declared `cwd` must exist as a directory.
+Setup declares `args`, optional `program` (defaults to the runner program) and
+optional `deadline_ms` (defaults to, and cannot exceed, the workload setup limit).
+Cache declares `declared_state: cold|warm|unknown` and `paths`; preflight does not
+inspect or purge caches. Pins contain `path` and `sha256`; only their form is checked.
 
-## Planned measurement contract
+Only argv is templated: `{prompt}`, `{negative_prompt}`, `{seed}`, `{width}`,
+`{height}`, `{steps}`, `{output}`, `{output_dir}`. Substitution is single-pass;
+spaces, quotes and shell syntax stay literal in their argv element. An absent
+negative prompt substitutes an empty string without removing the element.
+Unknown or unclosed placeholders fail. There is no literal opening-brace escape;
+JSON-valued arguments need an adapter. Env values and paths are not templates.
+Non-image fields, marker fields/placeholders and probes are not admitted.
 
-Each sample starts a fresh process; samples run serially. `execution` must be
-`in-process`, `delegates-to-resident-service` or `unknown`, and accompanies
-end-to-end numbers: a fresh CLI process does not prove a fresh model load.
-Warmups and failures are retained, warmups excluded from every statistic, and
-failed samples never retried, dropped or replaced. Progress-output truncation
-is a retained observation rather than an artifact-validation failure.
+## Planned
 
-Slots declare `id` and `arm`: A/B/A2, optionally A/B/B2/A2. Each capture contains
-its arm's measured samples. Directional gates require at least three measured
-samples per arm, following System One, not microbench's three acquisitions per
-role with repeated iterations inside each acquisition. Smaller admitted plans
-are descriptive only. Candidate envelopes pool B and B2; reference envelopes
-pool A and A2. Excess reference spread or missing eligible samples is
-INCONCLUSIVE, not evidence of equality.
+Capture, offline inspect and compare are **not available**. Capture will publish
+a receipt before work, use direct exec (no shell), start a fresh process per
+sample and serialize runs. Setup will run before warmups, outside measurement;
+warmups and failures will be retained, warmups excluded, and failures never
+retried or replaced. Declared env additions will supplement inherited values
+without recording the inherited environment. Cache observations will accompany
+declared labels; a fresh CLI will not prove a fresh model load.
 
-The planned capture publishes a receipt before work, retains exact declarations
-and outputs, and observes declared cache paths before/after setup and after runs.
-Observed cache growth during measurement withholds a directional verdict.
-Offline inspect rechecks retained bytes. The sole initial gate is
-`end_to_end_us` (spawn to observed exit, lower is better); rates and setup time
-are descriptive. Container validation will be labelled `container_checked`,
-never `decoded`; neither hashes nor structural checks establish output quality.
+Comparison will use A/B/A2 or A/B/B2/A2 and require at least three measured samples
+per arm inside a capture (System One convention), not microbench's acquisitions
+per role. Only `end_to_end_us` will gate direction. Container validation will be
+`container_checked`, never `decoded`. Same-checkpoint comparisons will permit
+envelope direction; changed-model or unavailable identity will remain
+INCONCLUSIVE without a quality claim. Offline inspect will recheck retained bytes.
 
-Comparison uses existing deployment declarations. A and A2 must match runner
-bytes, program hash and deployment; B must differ. A same-checkpoint axis can
-support envelope direction. A changed-model axis remains INCONCLUSIVE and
-makes no quality comparison; unavailable model identity also withholds direction.
-
-Prompts, program paths, declared environment values and outputs are private
-evidence, not a public export. Preflight output itself can expose these values.
-Do not publish it without review.
+Prompts, program paths, declared env values and outputs are private evidence,
+not a public export. Review preflight output before sharing it.

@@ -1,5 +1,11 @@
 # Performance release notes
 
+## Unreleased
+
+- Add experimental [`media preflight`](MEDIA.md) for image CLI workload and
+  runner validation, program hashes, sample argv and a wall-clock allowance.
+  Media capture, inspect and compare are not available.
+
 ## Version 0.8.0 — concurrency verdicts
 
 - Add `portable-c2-v1`, `portable-c4-v1` and `portable-c8-v1`:

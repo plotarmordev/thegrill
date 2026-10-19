@@ -2487,18 +2487,10 @@ fn run_program(_: &Path, _: &[String], _: &Path, _: Duration) -> ProgramRun {
 /// Hash an explicitly declared program file. Symlinks are resolved first
 /// because interpreters and launchers are commonly symlinked; the digest is of
 /// the resolved bytes.
-fn hash_program(path: &Path) -> Result<String> {
+pub(crate) fn hash_program(path: &Path) -> Result<String> {
     let resolved = std::fs::canonicalize(path)
         .map_err(|e| format!("resolve program {}: {e}", path.display()))?;
-    let metadata = std::fs::metadata(&resolved).map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > FILE_CAP as u64 {
-        return Err(format!(
-            "program is not a bounded regular file: {}",
-            path.display()
-        ));
-    }
-    let bytes = std::fs::read(&resolved).map_err(|e| format!("read program: {e}"))?;
-    Ok(evidence::digest(&bytes))
+    evidence::hash_file(&resolved, FILE_CAP)
 }
 
 // ---------------------------------------------------------------------------
