@@ -9,7 +9,7 @@
 //! failure, not a measurement.
 
 use crate::{
-    envelope::{self, Direction, EnvelopeDecision, EnvelopeReason, Rational},
+    envelope::{self, Direction, EnvelopeDecision, Rational},
     evidence,
     model::{Deployment, Phase, REQUEST_CAP, Result, Status},
     policy::Outcome,
@@ -1695,15 +1695,6 @@ pub struct Comparison {
     pub outcome: Outcome,
 }
 
-fn reason_outcome(reason: EnvelopeReason) -> Outcome {
-    match reason {
-        EnvelopeReason::InvalidRational
-        | EnvelopeReason::InvalidBounds
-        | EnvelopeReason::ArithmeticOverflow { .. } => Outcome::Error,
-        _ => Outcome::Inconclusive,
-    }
-}
-
 fn arm_samples(gate: &Gate, arms: &[Vec<Loaded>; 3]) -> ([Vec<Rational>; 3], bool) {
     let mut samples: [Vec<Rational>; 3] = std::array::from_fn(|_| Vec::new());
     let mut complete = arms.iter().all(|list| !list.is_empty());
@@ -1801,13 +1792,13 @@ fn gate_outcome(gate: &Gate, arms: &[Vec<Loaded>; 3]) -> GateResult {
                     };
                 }
                 Err(reason) => {
-                    result.outcome = reason_outcome(reason);
+                    result.outcome = reason.into();
                     result.reason = Some(format!("{reason:?}"));
                 }
             }
         }
         (Err(reason), _) | (_, Err(reason)) => {
-            result.outcome = reason_outcome(reason);
+            result.outcome = reason.into();
             result.reason = Some(format!("{reason:?}"));
         }
     }

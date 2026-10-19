@@ -1,3 +1,4 @@
+pub(super) mod compare;
 use super::cache::{self, Observation};
 use super::*;
 use crate::{
@@ -27,7 +28,7 @@ struct Collector {
     source: String,
     sha256: String,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Platform {
     os: String,
@@ -179,6 +180,7 @@ struct SetupRecord {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Run {
+    receipt_sha256: String,
     cell: String,
     phase: Phase,
     seed: u64,
@@ -196,9 +198,25 @@ struct Manifest {
     version: u32,
     kind: String,
     status: CaptureStatus,
+    finished_unix_ms: u64,
+    elapsed_ms: u64,
     runs: usize,
     files: BTreeMap<String, String>,
     evidence_sha256: String,
+}
+impl Manifest {
+    fn digest(&self) -> Result<String> {
+        // The digest covers the complete manifest body, excluding only itself.
+        json_digest(&(
+            self.version,
+            &self.kind,
+            self.status,
+            self.finished_unix_ms,
+            self.elapsed_ms,
+            self.runs,
+            &self.files,
+        ))
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -482,6 +500,7 @@ fn reason_for(status: Status) -> Option<Reason> {
 struct Session<'a> {
     plan: &'a Plan,
     receipt: &'a Receipt,
+    receipt_sha256: &'a str,
     guard: &'a Guard,
 }
 impl Session<'_> {
@@ -616,6 +635,7 @@ impl Session<'_> {
         outputs.reasons.sort();
         outputs.reasons.dedup();
         let record = Run {
+            receipt_sha256: self.receipt_sha256.into(),
             cell: sample.cell.id.clone(),
             phase: sample.phase,
             seed: sample.seed,
@@ -666,6 +686,7 @@ fn make_receipt(
     deployment: &[u8],
     slot: Slot,
     root: &Path,
+    started_unix_ms: u64,
 ) -> Result<Receipt> {
     Ok(Receipt {
         version: 1,
@@ -695,7 +716,7 @@ fn make_receipt(
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
         },
-        started_unix_ms: crate::metrics::unix_ms(),
+        started_unix_ms,
         projection_root: root.into(),
     })
 }
@@ -722,11 +743,20 @@ pub(super) fn capture(
     let guard = Guard::install()?;
     evidence::fresh(out)?;
     let root = fs::canonicalize(out).map_err(|error| error.to_string())?;
-    let receipt = make_receipt(&plan, admitted, &deployment_bytes, slot, &root)?;
+    let started = Instant::now();
+    let receipt = make_receipt(
+        &plan,
+        admitted,
+        &deployment_bytes,
+        slot,
+        &root,
+        crate::metrics::unix_ms(),
+    )?;
     evidence::write(&root.join("workload.json"), &plan.workload_bytes)?;
     evidence::write(&root.join("runner.json"), &plan.runner_bytes)?;
     evidence::write(&root.join("deployment.json"), &deployment_bytes)?;
     evidence::publish(&root, "receipt.json", &receipt)?;
+    let receipt_sha256 = evidence::hash_file(&root.join("receipt.json"), FILE_CAP)?;
     evidence::publish(
         &root,
         "cache-before.json",
@@ -735,6 +765,7 @@ pub(super) fn capture(
     let session = Session {
         plan: &plan,
         receipt: &receipt,
+        receipt_sha256: &receipt_sha256,
         guard: &guard,
     };
     let setup = plan
@@ -770,8 +801,17 @@ pub(super) fn capture(
         "cache-after.json",
         &cache::observe(&receipt.cache_paths),
     )?;
-    let digest = publish_manifest(&root, status, runs.len(), setup.is_some())?;
-    Ok(inspection(&plan, receipt, status, runs, setup, digest))
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis())
+        .map_err(|_| "capture interval exceeds timestamp range")?;
+    let digest = publish_manifest(
+        &root,
+        status,
+        runs.len(),
+        setup.is_some(),
+        crate::metrics::unix_ms(),
+        elapsed_ms,
+    )?;
+    Ok(inspection(&plan, &receipt, status, runs, setup, digest))
 }
 
 fn manifest_names(runs: usize, setup: bool) -> Vec<String> {
@@ -793,6 +833,8 @@ fn publish_manifest(
     status: CaptureStatus,
     runs: usize,
     setup: bool,
+    finished_unix_ms: u64,
+    elapsed_ms: u64,
 ) -> Result<String> {
     let mut files = BTreeMap::new();
     for name in manifest_names(runs, setup) {
@@ -801,15 +843,17 @@ fn publish_manifest(
             evidence::hash_file(&root.join(name), FILE_CAP)?,
         );
     }
-    let evidence_sha256 = json_digest(&files)?;
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         version: 1,
         kind: "media-capture-complete-v1".into(),
         status,
+        finished_unix_ms,
+        elapsed_ms,
         runs,
         files,
-        evidence_sha256,
+        evidence_sha256: String::new(),
     };
+    manifest.evidence_sha256 = manifest.digest()?;
     evidence::publish(root, "capture.json", &manifest)?;
     Ok(manifest.evidence_sha256)
 }
@@ -819,7 +863,7 @@ fn check_manifest(root: &Path) -> Result<Manifest> {
     if manifest.kind != "media-capture-complete-v1" || manifest.version != 1 {
         return Err("invalid media capture manifest".into());
     }
-    if manifest.evidence_sha256 != json_digest(&manifest.files)? {
+    if manifest.evidence_sha256 != manifest.digest()? {
         return Err("capture manifest digest mismatch".into());
     }
     Ok(manifest)
@@ -979,7 +1023,7 @@ fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Res
     Ok(())
 }
 
-fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<()> {
+fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<Deployment> {
     if receipt.kind != "media-capture-v1"
         || receipt.version != 1
         || receipt.support != SUPPORT
@@ -997,7 +1041,8 @@ fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<(
         return Err("media receipt declaration mismatch".into());
     }
     let declaration: Deployment = parse(deployment)?;
-    declaration.validate()
+    declaration.validate()?;
+    Ok(declaration)
 }
 fn inspect_setup(
     root: &Path,
@@ -1055,17 +1100,36 @@ fn inspect_setup(
 }
 
 pub(super) fn inspect(root: &Path) -> Result<Inspection> {
+    Ok(load(root)?.inspection)
+}
+
+struct Loaded {
+    plan: Plan,
+    receipt: Receipt,
+    deployment: Deployment,
+    finished_unix_ms: u64,
+    inspection: Inspection,
+}
+
+fn load(root: &Path) -> Result<Loaded> {
     let manifest = check_manifest(root)?;
     let plan = plan_from_bytes(
         verified_bytes(root, "workload.json", &manifest)?,
         verified_bytes(root, "runner.json", &manifest)?,
     )?;
     let receipt: Receipt = verified_json(root, "receipt.json", &manifest)?;
-    verify_receipt(
+    let receipt_sha256 = manifest
+        .files
+        .get("receipt.json")
+        .expect("verified receipt entry");
+    let deployment = verify_receipt(
         &receipt,
         &plan,
         &verified_bytes(root, "deployment.json", &manifest)?,
     )?;
+    if manifest.finished_unix_ms < receipt.started_unix_ms {
+        return Err("capture completion precedes its start".into());
+    }
     if manifest.runs > schedule(&plan.workload).count() {
         return Err("capture run count exceeds plan".into());
     }
@@ -1099,6 +1163,9 @@ pub(super) fn inspect(root: &Path) -> Result<Inspection> {
             return Err("sample reservation projection mismatch".into());
         }
         let run: Run = verified_json(root, &format!("{prefix}/run.json"), &manifest)?;
+        if &run.receipt_sha256 != receipt_sha256 {
+            return Err("run record is bound to a different capture receipt".into());
+        }
         verify_run(&root.join(prefix), &run, &sample, &plan)?;
         let previous = runs
             .last()
@@ -1122,19 +1189,45 @@ pub(super) fn inspect(root: &Path) -> Result<Inspection> {
     {
         return Err("capture status mismatch".into());
     }
-    Ok(inspection(
+    let process_us = runs
+        .iter()
+        .map(|run| u128::from(run.process.end_to_end_us))
+        .sum::<u128>()
+        + setup
+            .as_ref()
+            .map_or(0, |setup| u128::from(setup.process.end_to_end_us));
+    if process_us > u128::from(manifest.elapsed_ms) * 1000 {
+        return Err("capture elapsed time is shorter than its process durations".into());
+    }
+    // Allow clock drift and slew without treating time spent suspended as overlap.
+    let tolerance_ms = 1000 + manifest.elapsed_ms / 1000;
+    if manifest.finished_unix_ms - receipt.started_unix_ms
+        < manifest.elapsed_ms.saturating_sub(tolerance_ms)
+    {
+        return Err(
+            "capture wall-clock interval is shorter than elapsed time beyond tolerance".into(),
+        );
+    }
+    let inspection = inspection(
         &plan,
-        receipt,
+        &receipt,
         manifest.status,
         runs,
         setup,
         manifest.evidence_sha256,
-    ))
+    );
+    Ok(Loaded {
+        plan,
+        receipt,
+        deployment,
+        finished_unix_ms: manifest.finished_unix_ms,
+        inspection,
+    })
 }
 
 fn inspection(
     plan: &Plan,
-    receipt: Receipt,
+    receipt: &Receipt,
     status: CaptureStatus,
     runs: Vec<Run>,
     setup: Option<SetupRecord>,
@@ -1144,7 +1237,7 @@ fn inspection(
         .workload
         .cells
         .iter()
-        .map(|cell| summarize(cell, &runs))
+        .map(|cell| summarize(cell, runs.iter()))
         .collect();
     Inspection {
         version: 1,
@@ -1153,7 +1246,7 @@ fn inspection(
         support: SUPPORT.into(),
         status,
         execution: receipt.execution,
-        slot: receipt.slot,
+        slot: receipt.slot.clone(),
         cells,
         cache_mutated_during_measurement: if runs
             .iter()
@@ -1190,11 +1283,25 @@ fn cache_reason(growth: Option<bool>) -> Option<Reason> {
     }
 }
 
-fn summarize(cell: &Cell, runs: &[Run]) -> CellSummary {
-    let matching = runs
-        .iter()
-        .filter(|run| run.cell == cell.id)
-        .collect::<Vec<_>>();
+fn hashes_by_seed<'a>(runs: impl Iterator<Item = &'a Run>) -> BTreeMap<u64, Vec<Vec<&'a str>>> {
+    let mut seeds = BTreeMap::<u64, Vec<Vec<&str>>>::new();
+    for run in runs.filter(|run| run.phase == Phase::Measured && run.eligible) {
+        seeds.entry(run.seed).or_default().push(
+            run.outputs
+                .iter()
+                .map(|output| output.sha256.as_str())
+                .collect(),
+        );
+    }
+    seeds
+}
+
+fn identical_hashes(outputs: &[Vec<&str>]) -> bool {
+    outputs.windows(2).all(|pair| pair[0] == pair[1])
+}
+
+fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummary {
+    let matching = runs.filter(|run| run.cell == cell.id).collect::<Vec<_>>();
     let measured = matching
         .iter()
         .copied()
@@ -1215,16 +1322,9 @@ fn summarize(cell: &Cell, runs: &[Run]) -> CellSummary {
             max: *times.iter().max().expect("nonempty median"),
         });
     let mut reasons = BTreeMap::new();
-    let mut seeds = BTreeMap::<u64, Vec<Vec<&str>>>::new();
+    let seeds = hashes_by_seed(measured.iter().copied());
     for run in &measured {
-        if run.eligible {
-            seeds.entry(run.seed).or_default().push(
-                run.outputs
-                    .iter()
-                    .map(|output| output.sha256.as_str())
-                    .collect(),
-            );
-        } else {
+        if !run.eligible {
             for reason in &run.reasons {
                 *reasons.entry(*reason).or_default() += 1;
             }
@@ -1235,8 +1335,7 @@ fn summarize(cell: &Cell, runs: &[Run]) -> CellSummary {
         .map(|(seed, outputs)| Determinism {
             seed,
             n: outputs.len(),
-            deterministic: (outputs.len() > 1)
-                .then(|| outputs.windows(2).all(|pair| pair[0] == pair[1])),
+            deterministic: (outputs.len() > 1).then(|| identical_hashes(&outputs)),
         })
         .collect();
     CellSummary {
@@ -1260,14 +1359,17 @@ mod tests {
             .into_iter()
             .map(|name| (name, "0".repeat(64)))
             .collect();
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             version: 1,
             kind: "media-capture-complete-v1".into(),
             status: CaptureStatus::Complete,
+            finished_unix_ms: crate::metrics::unix_ms(),
+            elapsed_ms: 0,
             runs,
-            evidence_sha256: json_digest(&files).unwrap(),
+            evidence_sha256: String::new(),
             files,
         };
+        manifest.evidence_sha256 = manifest.digest().unwrap();
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         assert!(bytes.len() <= FILE_CAP);
         let root = std::env::temp_dir().join(format!(
@@ -1281,7 +1383,7 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(read.runs, runs);
         assert_eq!(read.files.len(), runs * 2 + TOP_FILES.len() + 2);
-        assert_eq!(read.evidence_sha256, json_digest(&read.files).unwrap());
+        assert_eq!(read.evidence_sha256, read.digest().unwrap());
     }
 
     #[test]

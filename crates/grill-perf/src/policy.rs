@@ -401,6 +401,17 @@ impl Outcome {
         }
     }
 }
+
+impl From<EnvelopeReason> for Outcome {
+    fn from(reason: EnvelopeReason) -> Self {
+        match reason {
+            EnvelopeReason::InvalidRational
+            | EnvelopeReason::InvalidBounds
+            | EnvelopeReason::ArithmeticOverflow { .. } => Self::Error,
+            _ => Self::Inconclusive,
+        }
+    }
+}
 #[derive(Serialize)]
 struct Coverage {
     expected_waves: u32,

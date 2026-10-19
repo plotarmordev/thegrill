@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- Add experimental image CLI [`media preflight|capture|inspect`](MEDIA.md):
+- Add experimental image CLI [`media preflight|capture|inspect|compare`](MEDIA.md):
   declaration admission, serial process capture on Linux/macOS, setup and cache
-  observations, retained failures and bounded outputs, PNG/JPEG container checks
-  and offline descriptive inspection. Compare remains planned.
+  observations, retained failures and bounded outputs, PNG/JPEG container checks,
+  offline inspection and verified A/B/A2 or A/B/B2/A2 envelope comparison.
+  Changed-model and unavailable-identity comparisons withhold direction;
+  output quality is not compared.
 
 ## Version 0.8.0 — concurrency verdicts
 

@@ -1998,12 +1998,7 @@ fn compare_inner(plan: &Path, groups: [&[PathBuf]; 3], result: &mut Decision) ->
                 gate.adverse_bounds = Some(assessment.adverse_bounds);
             }
             Err(reason) => {
-                gate.decision = match reason {
-                    envelope::EnvelopeReason::ArithmeticOverflow { .. }
-                    | envelope::EnvelopeReason::InvalidRational
-                    | envelope::EnvelopeReason::InvalidBounds => Outcome::Error,
-                    _ => Outcome::Inconclusive,
-                };
+                gate.decision = reason.into();
                 gate.reasons.push(format!("{reason:?}"));
             }
         }

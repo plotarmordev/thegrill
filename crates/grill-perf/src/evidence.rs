@@ -951,7 +951,11 @@ pub struct ReferenceIdentity {
     pub reasons: Vec<String>,
     pub scope: &'static str,
 }
-pub(crate) fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
+fn declared_identity(
+    a: Option<&Deployment>,
+    a2: Option<&Deployment>,
+    plan_declarations: &[(&str, &str, &str)],
+) -> ReferenceIdentity {
     let mut reasons = Vec::new();
     let mut mismatch = false;
     let mut declaration = |name: &str, a: Option<&str>, a2: Option<&str>| match (
@@ -976,10 +980,9 @@ pub(crate) fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
             }
         }
     };
-    declaration("model", Some(&a.model), Some(&a2.model));
-    declaration("endpoint", Some(&a.endpoint), Some(&a2.endpoint));
-    let a = a.deployment.as_ref();
-    let a2 = a2.deployment.as_ref();
+    for (name, left, right) in plan_declarations {
+        declaration(name, Some(left), Some(right));
+    }
     declaration(
         "model_revision",
         a.and_then(|d| d.model_revision.as_deref()),
@@ -1011,6 +1014,21 @@ pub(crate) fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
         reasons,
         scope: "Matching declarations do not verify server restoration, cache state, timing order or causal effect.",
     }
+}
+
+pub(crate) fn deployment_identity(a: &Deployment, a2: &Deployment) -> ReferenceIdentity {
+    declared_identity(Some(a), Some(a2), &[])
+}
+
+pub(crate) fn reference_identity(a: &Plan, a2: &Plan) -> ReferenceIdentity {
+    declared_identity(
+        a.deployment.as_ref(),
+        a2.deployment.as_ref(),
+        &[
+            ("model", &a.model, &a2.model),
+            ("endpoint", &a.endpoint, &a2.endpoint),
+        ],
+    )
 }
 fn output_amounts_match(a: &CellSummary, b: &CellSummary) -> bool {
     a.lane_completion_tokens

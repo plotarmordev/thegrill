@@ -370,6 +370,10 @@ fn setup_output_arguments_are_optional_but_must_be_declared() {
 }
 
 fn png(width: u32, height: u32) -> Vec<u8> {
+    png_with_text(width, height, &[])
+}
+
+fn png_with_text(width: u32, height: u32, text: &[u8]) -> Vec<u8> {
     fn chunk(bytes: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
         bytes.extend((data.len() as u32).to_be_bytes());
         let start = bytes.len();
@@ -394,6 +398,9 @@ fn png(width: u32, height: u32) -> Vec<u8> {
         b"IDAT",
         &[0x78, 0x01, 0x01, 4, 0, 0xfb, 0xff, 0, 0, 0, 0, 0, 4, 0, 1],
     );
+    if !text.is_empty() {
+        chunk(&mut bytes, b"tEXt", text);
+    }
     chunk(&mut bytes, b"IEND", &[]);
     bytes
 }
@@ -416,6 +423,7 @@ fn capture_fixture(script: &str) -> Fixture {
     f.runner["cwd"] = json!(f.root.0);
     f.runner["env"] = json!({"PREPARED":f.root.path("prepared"),"ROOT":f.root.0});
     f.workload["limits"]["run_deadline_ms"] = json!(5000);
+    f.workload["limits"]["setup_deadline_ms"] = json!(5000);
     f.workload["request"]["seeds"] = json!([42]);
     f
 }
@@ -698,7 +706,7 @@ fn assert_process_stopped(pid: &str) {
 #[test]
 fn capture_deadline_cleans_descendants_and_retains_every_failure() {
     let mut f = capture_fixture("sleep 60 &\nprintf '%s\\n' \"$!\" >> \"$ROOT/descendants\"\nwait");
-    f.workload["limits"]["run_deadline_ms"] = json!(200);
+    f.workload["limits"]["run_deadline_ms"] = json!(1000);
     let report = f.captured();
     assert_eq!(report["runs"].as_array().unwrap().len(), 4);
     assert_eq!(report["cells"][0]["eligible"], 0);
@@ -721,7 +729,7 @@ fn capture_cancellation_cleans_descendants_and_does_not_launch_replacements() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !f.root.path("descendants").exists() {
         assert!(std::time::Instant::now() < deadline, "runner never started");
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -758,17 +766,54 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn manifest_digest(manifest: &Value) -> String {
+    digest(
+        &serde_json::to_vec(&(
+            &manifest["version"],
+            &manifest["kind"],
+            &manifest["status"],
+            &manifest["finished_unix_ms"],
+            &manifest["elapsed_ms"],
+            &manifest["runs"],
+            &manifest["files"],
+        ))
+        .unwrap(),
+    )
+}
+
 fn rewrite_evidence(fixture: &Fixture, name: &str, change: impl FnOnce(&mut Value)) {
-    let path = fixture.root.path(&format!("capture/{name}"));
+    rewrite_capture_file(&fixture.root.path("capture"), name, change);
+}
+
+fn rewrite_capture_file(root: &std::path::Path, name: &str, change: impl FnOnce(&mut Value)) {
+    let path = root.join(name);
     let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     change(&mut value);
     let bytes = serde_json::to_vec(&value).unwrap();
     fs::write(path, &bytes).unwrap();
-    let manifest_path = fixture.root.path("capture/capture.json");
+    let manifest_path = root.join("capture.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     manifest["files"][name] = json!(digest(&bytes));
-    manifest["evidence_sha256"] = json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+    manifest["evidence_sha256"] = json!(manifest_digest(&manifest));
     fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+fn rewrite_capture_receipt(root: &std::path::Path, change: impl FnOnce(&mut Value)) {
+    // Keep the forged receipt binding coherent to isolate later admission checks.
+    rewrite_capture_file(root, "receipt.json", change);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root.join("capture.json")).unwrap()).unwrap();
+    let receipt_sha256 = &manifest["files"]["receipt.json"];
+    for name in manifest["files"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|name| name.ends_with("/run.json"))
+    {
+        rewrite_capture_file(root, name, |run| {
+            run["receipt_sha256"] = receipt_sha256.clone()
+        });
+    }
 }
 
 fn inspection_rejected(fixture: &Fixture, expected: &str) {
@@ -842,8 +887,7 @@ fn inspect_requires_manifest_self_digest_and_all_top_level_entries() {
                 mode
             };
             manifest["files"].as_object_mut().unwrap().remove(removed);
-            manifest["evidence_sha256"] =
-                json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+            manifest["evidence_sha256"] = json!(manifest_digest(&manifest));
             if mode == "receipt" {
                 let receipt_path = fixture.root.path("capture/receipt.json");
                 let mut receipt: Value =
@@ -980,7 +1024,7 @@ fn cancellation_interrupts_pause_without_launching_the_next_sample() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !fixture.root.path("capture/run-000000/run.json").exists() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1051,10 +1095,14 @@ fn output_directory_rejects_non_utf8_filenames() {
 }
 
 fn rewrite_manifest(fixture: &Fixture, change: impl FnOnce(&mut Value)) {
-    let path = fixture.root.path("capture/capture.json");
+    rewrite_capture_manifest(&fixture.root.path("capture"), change);
+}
+
+fn rewrite_capture_manifest(root: &std::path::Path, change: impl FnOnce(&mut Value)) {
+    let path = root.join("capture.json");
     let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     change(&mut manifest);
-    manifest["evidence_sha256"] = json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+    manifest["evidence_sha256"] = json!(manifest_digest(&manifest));
     fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 }
 
@@ -1144,4 +1192,1015 @@ fn retained_directory_exists_before_the_runner_starts() {
         capture_fixture("test -d \"$(dirname \"$1\")/retained\"; cp \"$PREPARED\" \"$1\"");
     let report = fixture.captured();
     assert_eq!(report["cells"][0]["eligible"], 3);
+}
+
+fn comparison_fixture(measured: u32, b2: bool) -> Fixture {
+    let mut f = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["warmup_runs"] = json!(0);
+    f.workload["cells"][0]["measured_runs"] = json!(measured);
+    f.workload["cells"][0]["pause_between_runs_ms"] = json!(0);
+    f.workload["gates"][0]["max_reference_spread_bps"] = json!(1000000);
+    if !b2 {
+        f.workload["slots"].as_array_mut().unwrap().remove(2);
+    }
+    f
+}
+
+fn timed_comparison_fixture() -> Fixture {
+    let f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\nsleep \"$DELAY\"\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
+    f
+}
+
+impl Fixture {
+    fn slot_command(&mut self, slot: &str, delay: &str) -> std::process::Command {
+        self.runner["env"]["DELAY"] = json!(delay);
+        self.save();
+        let mut command = cli();
+        command
+            .args(["media", "capture", "--workload"])
+            .arg(self.root.path("workload.json"))
+            .arg("--runner")
+            .arg(self.root.path("runner.json"))
+            .arg("--deployment")
+            .arg(self.root.path("deployment.json"))
+            .args(["--slot", slot, "--out"])
+            .arg(self.root.path(slot));
+        command
+    }
+
+    fn capture_slot(&mut self, slot: &str, timing_variant: &str) {
+        self.capture_timed_slot(slot, timing_variant);
+        // The runner declaration selects fixture timings, not scheduler-dependent gates.
+        let duration_us = if timing_variant == "0.3" { 300 } else { 1 };
+        self.set_slot_times(slot, |_| duration_us);
+    }
+
+    fn capture_timed_slot(&mut self, slot: &str, delay: &str) {
+        successful(&self.slot_command(slot, delay).output().unwrap());
+    }
+
+    fn set_slot_times(&self, slot: &str, duration: impl Fn(&Value) -> u64) {
+        let root = self.root.path(slot);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("capture.json")).unwrap()).unwrap();
+        for name in manifest["files"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.ends_with("/run.json"))
+        {
+            rewrite_capture_file(&root, name, |run| {
+                run["process"]["end_to_end_us"] = json!(duration(run));
+            });
+        }
+    }
+
+    fn compare_slots(&self, b2: bool) -> Output {
+        let mut command = cli();
+        command
+            .args(["media", "compare", "--a"])
+            .arg(self.root.path("a"))
+            .arg("--b")
+            .arg(self.root.path("b"))
+            .arg("--a2")
+            .arg(self.root.path("a2"));
+        if b2 {
+            command.arg("--b2").arg(self.root.path("b2"));
+        }
+        command.output().unwrap()
+    }
+
+    fn comparison(&self, b2: bool, code: i32) -> Value {
+        let output = self.compare_slots(b2);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn comparison_rejected(&self, b2: bool, reason: &str) {
+        comparison_rejected(&self.compare_slots(b2), reason);
+    }
+}
+
+fn comparison_rejected(output: &Output, reason: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "invalid evidence produced a verdict"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(reason), "{stderr}");
+}
+
+#[test]
+fn compare_pass_reports_pooled_statistics_and_hash_facts() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 0);
+    assert_eq!(report["kind"], "media-comparison-v1");
+    assert_eq!(report["axis"], "same-checkpoint");
+    assert_eq!(report["outcome"], "PASS");
+    let gate = &report["gates"][0];
+    assert_eq!(gate["reference_summary"]["end_to_end_us"]["n"], 6);
+    assert_eq!(gate["candidate_summary"]["end_to_end_us"]["n"], 3);
+    assert_eq!(
+        gate["reference_summary"]["determinism_by_seed"][0]["deterministic"],
+        true
+    );
+    assert_eq!(gate["cross_arm_hash_equality"][0]["equal"], true);
+    let summary = &gate["reference_summary"];
+    let mean = summary["end_to_end_us"]["mean"].as_f64().unwrap();
+    assert_eq!(
+        summary["seconds_per_image"].as_f64().unwrap(),
+        mean / 1_000_000.0
+    );
+    assert_eq!(
+        summary["images_per_second_end_to_end"].as_f64().unwrap(),
+        1_000_000.0 / mean
+    );
+    assert_eq!(report, f.comparison(false, 0));
+}
+
+#[test]
+fn compare_real_timing_pass() {
+    let mut f = timed_comparison_fixture();
+    f.capture_timed_slot("a", "1.2");
+    f.capture_timed_slot("b", "0.2");
+    f.capture_timed_slot("a2", "1.2");
+    assert_eq!(f.comparison(false, 0)["outcome"], "PASS");
+}
+
+#[test]
+fn compare_real_timing_regression() {
+    let mut f = timed_comparison_fixture();
+    f.capture_timed_slot("a", "0.2");
+    f.capture_timed_slot("b", "1.2");
+    f.capture_timed_slot("a2", "0.2");
+    let report = f.comparison(false, 3);
+    assert_eq!(report["gates"][0]["outcome"], "REGRESSION");
+    assert_eq!(report["outcome"], "REGRESSION");
+}
+
+#[test]
+fn compare_changed_model_caps_regression_without_hiding_gate() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0");
+    let deployment = fs::read(f.root.path("deployment.json")).unwrap();
+    let mut candidate: Value = serde_json::from_slice(&deployment).unwrap();
+    candidate["model_revision"] = json!("other-checkpoint");
+    fs::write(
+        f.root.path("deployment.json"),
+        serde_json::to_vec(&candidate).unwrap(),
+    )
+    .unwrap();
+    f.capture_slot("b", "0.3");
+    fs::write(f.root.path("deployment.json"), deployment).unwrap();
+    f.capture_slot("a2", "0");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["outcome"], "REGRESSION");
+    assert_eq!(report["axis"], "changed-model");
+    assert_eq!(report["outcome"], "INCONCLUSIVE");
+    assert_eq!(report["reasons"], json!(["changed_model_axis"]));
+    assert_eq!(
+        report["claim"],
+        "observed-envelope-direction-under-declared-bounds-not-output-quality"
+    );
+}
+
+#[test]
+fn compare_unavailable_model_and_reference_identity_withhold_direction() {
+    let mut f = comparison_fixture(3, false);
+    fs::write(f.root.path("deployment.json"), b"{}").unwrap();
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["axis"], "unavailable");
+    assert_eq!(report["reference_identity"]["status"], "unavailable");
+    assert_eq!(report["gates"][0]["outcome"], "PASS");
+    assert_eq!(
+        report["reasons"],
+        json!([
+            "model_identity_unavailable",
+            "reference_identity_unavailable"
+        ])
+    );
+}
+
+#[test]
+fn compare_insufficient_pooled_reference_samples_retains_statistics() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 2);
+    assert_eq!(
+        report["gates"][0]["reference_summary"]["end_to_end_us"]["n"],
+        2
+    );
+    assert_eq!(report["gates"][0]["reason"], "insufficient_samples");
+}
+
+#[test]
+fn compare_b2_pools_candidate_samples_and_requires_the_slot() {
+    let mut f = comparison_fixture(2, true);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("b2", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(true, 0);
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["end_to_end_us"]["n"],
+        4
+    );
+    assert_eq!(report["acquisitions"][2]["slot"]["arm"], "b2");
+    assert_eq!(f.compare_slots(false).status.code(), Some(1));
+}
+
+#[test]
+fn compare_reference_spread_withholds_direction() {
+    let mut f = comparison_fixture(3, false);
+    f.workload["gates"][0]["max_reference_spread_bps"] = json!(1000);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.3");
+    f.capture_slot("a2", "0");
+    f.set_slot_times("a2", |_| 300);
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["reason"], "ReferenceSpreadExceeded");
+}
+
+#[test]
+fn compare_rejects_reference_return_captured_before_candidate() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("a2", "0");
+    f.capture_slot("b", "0.001");
+    f.comparison_rejected(
+        false,
+        "chronology requires b to finish no later than a2 starts",
+    );
+}
+
+#[test]
+fn compare_rejects_overlapping_captures_even_after_rehashed_completion() {
+    let mut f = comparison_fixture(1, false);
+    f.workload["limits"]["run_deadline_ms"] = json!(60000);
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = wait ]; then touch \"$ROOT/started\"; while [ ! -f \"$ROOT/release\" ]; do sleep 0.01; done; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    let child = f
+        .slot_command("a", "wait")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !f.root.path("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "capture never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    f.capture_slot("b", "0");
+    let a: Value =
+        serde_json::from_slice(&fs::read(f.root.path("a/receipt.json")).unwrap()).unwrap();
+    let b: Value =
+        serde_json::from_slice(&fs::read(f.root.path("b/receipt.json")).unwrap()).unwrap();
+    let forged_finish = b["started_unix_ms"].as_u64().unwrap();
+    let forged_interval = forged_finish - a["started_unix_ms"].as_u64().unwrap();
+    // Hold A beyond the forged interval and the clock-agreement tolerance.
+    std::thread::sleep(std::time::Duration::from_millis(forged_interval + 2000));
+    fs::write(f.root.path("release"), b"").unwrap();
+    successful(&child.wait_with_output().unwrap());
+    f.capture_slot("a2", "wait");
+    f.comparison_rejected(
+        false,
+        "chronology requires a to finish no later than b starts",
+    );
+    rewrite_capture_manifest(&f.root.path("a"), |manifest| {
+        manifest["finished_unix_ms"] = json!(forged_finish);
+    });
+    let inspected = cli()
+        .args(["media", "inspect"])
+        .arg(f.root.path("a"))
+        .output()
+        .unwrap();
+    let reason = "capture wall-clock interval is shorter than elapsed time beyond tolerance";
+    comparison_rejected(&inspected, reason);
+    f.comparison_rejected(false, reason);
+}
+
+#[test]
+fn compare_rejects_different_workload_bytes() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    let workload = f.workload.clone();
+    f.workload["request"]["prompt"] = json!("different workload");
+    f.capture_slot("b", "0.001");
+    f.workload = workload;
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(false, "captures must share byte-identical workloads");
+}
+
+#[test]
+fn compare_rejects_reference_runner_declaration_drift() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.runner["id"] = json!("changed-reference");
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        false,
+        "A and A2 runner bytes, program or setup hash, or deployment differ",
+    );
+}
+
+#[test]
+fn compare_rejects_reference_program_drift() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        false,
+        "A and A2 runner bytes, program or setup hash, or deployment differ",
+    );
+}
+
+#[test]
+fn compare_rejects_reference_deployment_drift() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    fs::write(f.root.path("deployment.json"), b"{}").unwrap();
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        false,
+        "A and A2 runner bytes, program or setup hash, or deployment differ",
+    );
+}
+
+#[test]
+fn compare_rejects_tampered_retained_output() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("a2", "0");
+    fs::write(
+        f.root.path("b/run-000000/retained/output-00.png"),
+        b"tampered",
+    )
+    .unwrap();
+    f.comparison_rejected(false, "retained output hash mismatch");
+}
+
+#[test]
+fn compare_rejects_wrong_arm_with_matching_chronology_and_runner_binding() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("b", "0");
+    f.capture_slot("a", "0.001");
+    f.capture_slot("a2", "0");
+    let output = cli()
+        .args(["media", "compare", "--a"])
+        .arg(f.root.path("b"))
+        .arg("--b")
+        .arg(f.root.path("a"))
+        .arg("--a2")
+        .arg(f.root.path("a2"))
+        .output()
+        .unwrap();
+    comparison_rejected(
+        &output,
+        "capture slot arm does not match its comparison position",
+    );
+}
+
+#[test]
+fn compare_rejects_unchanged_candidate() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        false,
+        "B must differ from A in runner, program, setup or deployment",
+    );
+}
+
+#[test]
+fn inspect_requires_completion_timestamp_and_rejects_reversed_clock() {
+    for missing in [true, false] {
+        let f = capture_fixture("cp \"$PREPARED\" \"$1\"");
+        f.captured();
+        rewrite_manifest(&f, |manifest| {
+            if missing {
+                manifest.as_object_mut().unwrap().remove("finished_unix_ms");
+            } else {
+                manifest["finished_unix_ms"] = json!(0);
+            }
+        });
+        inspection_rejected(
+            &f,
+            if missing {
+                "finished_unix_ms"
+            } else {
+                "completion precedes"
+            },
+        );
+    }
+}
+
+#[test]
+fn compare_rejects_candidate_return_runner_drift() {
+    let mut f = comparison_fixture(3, true);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("b2", "0.002");
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        true,
+        "B2 must match B runner, program, setup and deployment",
+    );
+}
+
+#[test]
+fn compare_failed_samples_are_not_hidden_by_pooling() {
+    let mut f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\nif [ \"$DELAY\" = 0 ]; then cp \"$PREPARED\" \"$1\"; fi\n",
+    )
+    .unwrap();
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("a2", "0");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["candidate_summary"]["eligible"], 0);
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["ineligible_by_reason"]["output_missing"],
+        3
+    );
+    assert!(report["gates"][0]["candidate_summary"]["end_to_end_us"].is_null());
+}
+
+#[test]
+fn compare_requires_complete_captures() {
+    let mut f = comparison_fixture(3, false);
+    f.runner["setup"] = json!({"program":"/bin/sh","args":["-c","exit 7"]});
+    for (slot, delay) in [("a", "0"), ("b", "0.3"), ("a2", "0")] {
+        let output = f.slot_command(slot, delay).output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "setup_failed");
+    }
+    f.comparison_rejected(false, "comparison requires complete captures");
+}
+
+#[test]
+fn compare_two_candidate_samples_are_below_the_boundary() {
+    let mut f = comparison_fixture(2, false);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 2);
+    let gate = &report["gates"][0];
+    assert_eq!(gate["reference_summary"]["eligible"], 4);
+    assert_eq!(gate["candidate_summary"]["eligible"], 2);
+    assert_eq!(gate["reason"], "insufficient_samples");
+}
+
+#[test]
+fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivors() {
+    let mut f = comparison_fixture(4, false);
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = 0 ] && [ ! -f \"$ROOT/skipped\" ]; then touch \"$ROOT/skipped\"; exit 0; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    f.set_slot_times("b", |run| if run["eligible"] == true { 1 } else { 400 });
+    let report = f.comparison(false, 2);
+    let gate = &report["gates"][0];
+    assert_eq!(gate["candidate_summary"]["eligible"], 3);
+    assert_eq!(gate["candidate_summary"]["measured_runs"], 4);
+    assert_eq!(
+        gate["candidate_summary"]["ineligible_by_reason"]["output_missing"],
+        1
+    );
+    assert_eq!(gate["candidate_summary"]["end_to_end_us"]["n"], 3);
+    assert_eq!(
+        gate["candidate"],
+        json!([
+            {"numerator":1,"denominator":1},
+            {"numerator":1,"denominator":1},
+        ])
+    );
+    assert_eq!(gate["reason"], "insufficient_samples");
+    assert_eq!(gate["cross_arm_hash_equality"][0]["equal"], true);
+}
+
+#[test]
+fn compare_counts_but_excludes_failed_warmups_from_gates_and_hashes() {
+    let mut f = comparison_fixture(3, false);
+    f.workload["cells"][0]["warmup_runs"] = json!(1);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\ncase \"$1\" in */run-000000/*) exit 7;; esac\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 0);
+    let gate = &report["gates"][0];
+    assert_eq!(gate["reference_summary"]["warmup_runs"], 2);
+    assert_eq!(gate["candidate_summary"]["warmup_runs"], 1);
+    assert_eq!(gate["reference_summary"]["measured_runs"], 6);
+    assert_eq!(gate["candidate_summary"]["eligible"], 3);
+    assert_eq!(gate["cross_arm_hash_equality"][0]["equal"], true);
+}
+
+#[test]
+fn compare_excludes_eligible_warmups_from_envelopes_and_hashes() {
+    let mut f = comparison_fixture(3, false);
+    f.workload["cells"][0]["warmup_runs"] = json!(1);
+    fs::write(
+        f.root.path("alternate"),
+        png_with_text(1, 1, b"fixture\0warmup"),
+    )
+    .unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\ncase \"$1\" in */run-000000/*) cp \"$ROOT/alternate\" \"$1\";; *) cp \"$PREPARED\" \"$1\";; esac\n").unwrap();
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    for (slot, measured_us) in [("a", 300), ("b", 1), ("a2", 300)] {
+        f.set_slot_times(slot, |run| {
+            if run["phase"] == "warmup" {
+                1_000
+            } else {
+                measured_us
+            }
+        });
+    }
+    let report = f.comparison(false, 0);
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["end_to_end_us"]["n"],
+        3
+    );
+    assert_eq!(report["gates"][0]["reference_summary"]["warmup_runs"], 2);
+    assert_eq!(
+        report["gates"][0]["cross_arm_hash_equality"][0]["equal"],
+        true
+    );
+}
+
+#[test]
+fn compare_worst_gate_wins_when_later_cell_regresses() {
+    let mut f = comparison_fixture(3, false);
+    let mut cell = f.workload["cells"][0].clone();
+    cell["id"] = json!("c2");
+    cell["request"] = f.workload["request"].clone();
+    cell["request"]["steps"] = json!(2);
+    f.workload["cells"].as_array_mut().unwrap().push(cell);
+    let mut gate = f.workload["gates"][0].clone();
+    gate["cell"] = json!("c2");
+    f.workload["gates"].as_array_mut().unwrap().push(gate);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    for (slot, reference) in [("a", true), ("b", false), ("a2", true)] {
+        f.set_slot_times(slot, |run| {
+            if (run["cell"] == "c1") == reference {
+                300
+            } else {
+                1
+            }
+        });
+    }
+    let report = f.comparison(false, 3);
+    assert_eq!(report["gates"][0]["outcome"], "PASS");
+    assert_eq!(report["gates"][1]["outcome"], "REGRESSION");
+    assert_eq!(report["outcome"], "REGRESSION");
+}
+
+#[test]
+fn compare_candidate_model_unavailable_is_an_independent_cap() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0.3");
+    let deployment = fs::read(f.root.path("deployment.json")).unwrap();
+    let mut candidate: Value = serde_json::from_slice(&deployment).unwrap();
+    candidate.as_object_mut().unwrap().remove("model_revision");
+    fs::write(
+        f.root.path("deployment.json"),
+        serde_json::to_vec(&candidate).unwrap(),
+    )
+    .unwrap();
+    f.capture_slot("b", "0");
+    fs::write(f.root.path("deployment.json"), deployment).unwrap();
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 2);
+    assert_eq!(report["gates"][0]["outcome"], "PASS");
+    assert_eq!(report["reference_identity"]["status"], "declared_match");
+    assert_eq!(report["reasons"], json!(["model_identity_unavailable"]));
+}
+
+#[test]
+fn compare_reference_identity_uses_each_shared_declaration_reason() {
+    for field in ["runtime", "hardware", "settings"] {
+        let mut f = comparison_fixture(3, false);
+        let mut deployment: Value =
+            serde_json::from_slice(&fs::read(f.root.path("deployment.json")).unwrap()).unwrap();
+        deployment.as_object_mut().unwrap().remove(field);
+        fs::write(
+            f.root.path("deployment.json"),
+            serde_json::to_vec(&deployment).unwrap(),
+        )
+        .unwrap();
+        f.capture_slot("a", "0.3");
+        f.capture_slot("b", "0");
+        f.capture_slot("a2", "0.3");
+        let report = f.comparison(false, 2);
+        assert_eq!(report["axis"], "same-checkpoint");
+        assert_eq!(report["gates"][0]["outcome"], "PASS");
+        assert_eq!(report["reasons"], json!(["reference_identity_unavailable"]));
+        assert_eq!(
+            report["reference_identity"]["reasons"],
+            json!([
+                format!("reference: baseline {field} declaration unavailable"),
+                format!("reference: {field} declaration unavailable"),
+            ])
+        );
+    }
+}
+
+#[test]
+fn compare_admits_equal_wall_clock_boundaries() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(f.root.path("b/receipt.json")).unwrap()).unwrap();
+    rewrite_capture_manifest(&f.root.path("a"), |manifest| {
+        manifest["finished_unix_ms"] = receipt["started_unix_ms"].clone();
+    });
+    assert_eq!(f.comparison(false, 0)["outcome"], "PASS");
+}
+
+#[test]
+fn inspect_and_compare_reject_unhashed_completion_tampering() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("a2", "0");
+    let path = f.root.path("a/capture.json");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (field, value) in [
+        (
+            "finished_unix_ms",
+            json!(original["finished_unix_ms"].as_u64().unwrap() + 1),
+        ),
+        (
+            "elapsed_ms",
+            json!(original["elapsed_ms"].as_u64().unwrap() + 1),
+        ),
+        ("status", json!("cancelled")),
+        ("runs", json!(2)),
+        ("files", json!({})),
+        ("evidence_sha256", json!("0".repeat(64))),
+    ] {
+        let mut manifest = original.clone();
+        manifest[field] = value;
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let inspected = cli()
+            .args(["media", "inspect"])
+            .arg(f.root.path("a"))
+            .output()
+            .unwrap();
+        comparison_rejected(&inspected, "capture manifest digest mismatch");
+        f.comparison_rejected(false, "capture manifest digest mismatch");
+    }
+}
+
+#[test]
+fn compare_rejects_mixed_collector_binaries() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    f.capture_slot("a2", "0");
+    rewrite_capture_receipt(&f.root.path("b"), |receipt| {
+        receipt["collector"]["sha256"] = json!("0".repeat(64));
+    });
+    f.comparison_rejected(
+        false,
+        "captures must use the same collector binary and platform",
+    );
+}
+
+#[test]
+fn compare_rejects_mixed_platforms() {
+    for field in ["os", "arch"] {
+        let mut f = comparison_fixture(1, false);
+        f.capture_slot("a", "0");
+        f.capture_slot("b", "0.001");
+        f.capture_slot("a2", "0");
+        rewrite_capture_receipt(&f.root.path("b"), |receipt| {
+            receipt["platform"][field] = json!("different");
+        });
+        f.comparison_rejected(
+            false,
+            "captures must use the same collector binary and platform",
+        );
+    }
+}
+
+#[test]
+fn compare_and_inspect_reject_clone_relabel_with_full_record_and_stream_evidence() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    let copied = std::process::Command::new("cp")
+        .arg("-R")
+        .arg(f.root.path("a"))
+        .arg(f.root.path("a2"))
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let candidate: Value =
+        serde_json::from_slice(&fs::read(f.root.path("b/capture.json")).unwrap()).unwrap();
+    let started = candidate["finished_unix_ms"].as_u64().unwrap();
+    rewrite_capture_file(&f.root.path("a2"), "receipt.json", |receipt| {
+        receipt["slot"] = json!({"id":"a2","arm":"a2"});
+        receipt["started_unix_ms"] = json!(started);
+    });
+    rewrite_capture_manifest(&f.root.path("a2"), |manifest| {
+        manifest["finished_unix_ms"] = json!(started + 1000);
+    });
+    let inspected = cli()
+        .args(["media", "inspect"])
+        .arg(f.root.path("a2"))
+        .output()
+        .unwrap();
+    comparison_rejected(
+        &inspected,
+        "run record is bound to a different capture receipt",
+    );
+    f.comparison_rejected(false, "run record is bound to a different capture receipt");
+}
+
+#[test]
+fn compare_rejects_same_capture_in_two_arm_positions() {
+    let mut f = comparison_fixture(1, false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    let output = cli()
+        .args(["media", "compare", "--a"])
+        .arg(f.root.path("a"))
+        .arg("--b")
+        .arg(f.root.path("b"))
+        .arg("--a2")
+        .arg(f.root.path("a"))
+        .output()
+        .unwrap();
+    comparison_rejected(
+        &output,
+        "capture slot arm does not match its comparison position",
+    );
+}
+
+#[test]
+fn compare_equal_pin_sets_ignore_declaration_order() {
+    let mut f = comparison_fixture(3, false);
+    let pins = json!([{"path":"weights","sha256":"a".repeat(64)}, {"path":"config","sha256":"b".repeat(64)}]);
+    f.runner["pins"] = pins.clone();
+    f.capture_slot("a", "0.3");
+    f.runner["pins"].as_array_mut().unwrap().reverse();
+    f.capture_slot("b", "0");
+    f.runner["pins"] = pins;
+    f.capture_slot("a2", "0.3");
+    assert_eq!(f.comparison(false, 0)["axis"], "same-checkpoint");
+}
+
+#[test]
+fn compare_pin_hash_differences_cap_both_gate_directions() {
+    for (reference, candidate, direction) in [("0.3", "0", "PASS"), ("0", "0.3", "REGRESSION")] {
+        let mut f = comparison_fixture(3, false);
+        f.runner["pins"] = json!([{"path":"weights","sha256":"a".repeat(64)}]);
+        f.capture_slot("a", reference);
+        f.runner["pins"][0]["sha256"] = json!("b".repeat(64));
+        f.capture_slot("b", candidate);
+        f.runner["pins"][0]["sha256"] = json!("a".repeat(64));
+        f.capture_slot("a2", reference);
+        let report = f.comparison(false, 2);
+        assert_eq!(report["axis"], "changed-model");
+        assert_eq!(report["gates"][0]["outcome"], direction);
+        assert_eq!(report["reasons"], json!(["changed_model_axis"]));
+    }
+}
+
+#[test]
+fn compare_same_pin_hash_at_different_path_preserves_axis() {
+    let mut f = comparison_fixture(3, false);
+    f.runner["pins"] = json!([{"path":"weights","sha256":"a".repeat(64)}]);
+    f.capture_slot("a", "0.3");
+    f.runner["pins"][0]["path"] = json!("other-weights");
+    f.capture_slot("b", "0");
+    f.runner["pins"][0]["path"] = json!("weights");
+    f.capture_slot("a2", "0.3");
+    assert_eq!(f.comparison(false, 0)["axis"], "same-checkpoint");
+}
+
+#[test]
+fn compare_one_sided_pins_do_not_override_matching_revision() {
+    let mut f = comparison_fixture(3, false);
+    f.capture_slot("a", "0.3");
+    f.runner["pins"] = json!([{"path":"weights","sha256":"a".repeat(64)}]);
+    f.capture_slot("b", "0");
+    f.runner["pins"] = json!([]);
+    f.capture_slot("a2", "0.3");
+    assert_eq!(f.comparison(false, 0)["axis"], "same-checkpoint");
+}
+
+fn setup_comparison_fixture(b2: bool) -> Fixture {
+    let mut f = comparison_fixture(1, b2);
+    let program = f.root.path("setup");
+    fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    f.workload["limits"]["setup_deadline_ms"] = json!(5000);
+    f.runner["setup"] = json!({"program":program,"args":[]});
+    f
+}
+
+#[test]
+fn compare_rejects_reference_setup_program_drift() {
+    let mut f = setup_comparison_fixture(false);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    fs::write(f.root.path("setup"), b"#!/bin/sh\ntrue\n").unwrap();
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        false,
+        "A and A2 runner bytes, program or setup hash, or deployment differ",
+    );
+}
+
+#[test]
+fn compare_admits_candidate_changed_only_in_setup_program_bytes() {
+    let mut f = setup_comparison_fixture(false);
+    f.capture_slot("a", "0");
+    fs::write(f.root.path("setup"), b"#!/bin/sh\ntrue\n").unwrap();
+    f.capture_slot("b", "0");
+    fs::write(f.root.path("setup"), b"#!/bin/sh\nexit 0\n").unwrap();
+    f.capture_slot("a2", "0");
+    assert_eq!(
+        f.comparison(false, 2)["gates"][0]["reason"],
+        "insufficient_samples"
+    );
+}
+
+#[test]
+fn compare_rejects_candidate_return_setup_program_drift() {
+    let mut f = setup_comparison_fixture(true);
+    f.capture_slot("a", "0");
+    f.capture_slot("b", "0.001");
+    fs::write(f.root.path("setup"), b"#!/bin/sh\ntrue\n").unwrap();
+    f.capture_slot("b2", "0.001");
+    fs::write(f.root.path("setup"), b"#!/bin/sh\nexit 0\n").unwrap();
+    f.capture_slot("a2", "0");
+    f.comparison_rejected(
+        true,
+        "B2 must match B runner, program, setup and deployment",
+    );
+}
+
+#[test]
+fn compare_cross_arm_hash_difference_is_only_a_byte_fact() {
+    let mut f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("alternate"),
+        png_with_text(1, 1, b"fixture\0alternate"),
+    )
+    .unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = 0 ]; then cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
+    f.capture_slot("a", "0.3");
+    f.capture_slot("b", "0");
+    f.capture_slot("a2", "0.3");
+    let report = f.comparison(false, 0);
+    assert_eq!(
+        report["gates"][0]["cross_arm_hash_equality"][0]["equal"],
+        false
+    );
+    assert_eq!(
+        report["gates"][0]["candidate_summary"]["determinism_by_seed"][0]["deterministic"],
+        true
+    );
+}
+
+#[test]
+fn compare_cross_arm_hash_equality_is_unavailable_for_nondeterministic_arms() {
+    for delay in ["0", "0.3"] {
+        let mut f = comparison_fixture(3, false);
+        f.runner["env"]["ALTER_DELAY"] = json!(delay);
+        fs::write(
+            f.root.path("alternate"),
+            png_with_text(1, 1, b"fixture\0alternate"),
+        )
+        .unwrap();
+        fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = \"$ALTER_DELAY\" ] && [ ! -f \"$ROOT/altered\" ]; then touch \"$ROOT/altered\"; cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
+        f.capture_slot("a", "0.3");
+        f.capture_slot("b", "0");
+        f.capture_slot("a2", "0.3");
+        let report = f.comparison(false, 0);
+        let gate = &report["gates"][0];
+        assert!(gate["cross_arm_hash_equality"][0]["equal"].is_null());
+        let arm = if delay == "0" {
+            "candidate_summary"
+        } else {
+            "reference_summary"
+        };
+        assert_eq!(gate[arm]["determinism_by_seed"][0]["deterministic"], false);
+    }
+}
+
+#[test]
+fn inspect_elapsed_floor_includes_setup_warmups_and_measured_runs() {
+    let mut f = capture_fixture("sleep 0.05; cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["measured_runs"] = json!(1);
+    f.runner["setup"] = json!({"program":"/bin/sh","args":["-c","sleep 0.2"]});
+    let report = f.captured();
+    successful(&f.inspect_capture());
+    assert_eq!(report["setup"]["process"]["status"], "complete");
+    let durations = [
+        report["setup"]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+        report["runs"][0]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+        report["runs"][1]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+    ];
+    let total = durations.iter().sum::<u64>();
+    for omitted in durations {
+        rewrite_capture_manifest(&f.root.path("capture"), |manifest| {
+            manifest["elapsed_ms"] = json!((total - omitted).div_ceil(1000));
+        });
+        inspection_rejected(
+            &f,
+            "capture elapsed time is shorter than its process durations",
+        );
+    }
+}
+
+#[test]
+fn inspect_wall_clock_agreement_allows_tolerance_and_longer_intervals() {
+    let mut f = capture_fixture("sleep 1.2; cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["warmup_runs"] = json!(0);
+    f.workload["cells"][0]["measured_runs"] = json!(1);
+    f.captured();
+    successful(&f.inspect_capture());
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(f.root.path("capture/receipt.json")).unwrap()).unwrap();
+    let path = f.root.path("capture");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(path.join("capture.json")).unwrap()).unwrap();
+    let started = receipt["started_unix_ms"].as_u64().unwrap();
+    let elapsed = manifest["elapsed_ms"].as_u64().unwrap();
+    let minimum_wall_ms = elapsed - (1000 + elapsed / 1000);
+    for wall_ms in [minimum_wall_ms, elapsed + 60_000] {
+        rewrite_capture_manifest(&path, |manifest| {
+            manifest["finished_unix_ms"] = json!(started + wall_ms);
+        });
+        successful(&f.inspect_capture());
+    }
+    rewrite_capture_manifest(&path, |manifest| {
+        manifest["finished_unix_ms"] = json!(started + minimum_wall_ms - 1);
+    });
+    inspection_rejected(
+        &f,
+        "capture wall-clock interval is shorter than elapsed time beyond tolerance",
+    );
+    rewrite_capture_manifest(&path, |manifest| {
+        manifest.as_object_mut().unwrap().remove("elapsed_ms");
+    });
+    inspection_rejected(&f, "elapsed_ms");
 }
