@@ -6,19 +6,12 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.8.0** experimental release.
-It adds the [concurrency built-ins](#concurrency-claim) `portable-c2-v1`,
-`portable-c4-v1` and `portable-c8-v1`; existing measurements and their meaning are
-unchanged from v0.7.0. Use its exact version/target, checksum and build receipt;
-never substitute a moving branch or local staging hashes. Retain earlier
-published releases and their original pins for historical studies. Installing
-v0.8.0 does not reinterpret old receipts or qualify new backend claims.
-
-The experimental image [media CLI](MEDIA.md) ships from
-[v0.9.0](RELEASE-NOTES.md#version-090--experimental-image-benchmarking).
-That release is in preparation; the download commands remain pinned to the
-published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
-containing the media CLI until publication.
+The download commands below select the published **v0.9.0** experimental release.
+It adds the experimental image [media CLI](MEDIA.md); existing measurements and
+their meaning are unchanged from v0.8.0. Use its exact version/target, checksum
+and build receipt; never substitute a moving branch or local staging hashes.
+Retain earlier published releases and their original pins for historical studies.
+Installing v0.9.0 does not reinterpret old receipts or qualify new backend claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -35,8 +28,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.8.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.8.0),
-from reviewed source `b4d179a855a18ea706781e6d613357783ef790d0`.
+The published prerelease is [**v0.9.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.9.0),
+from reviewed source `4d24b845d4e209cbbad8f8b8fc332047e2450a3f`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -67,8 +60,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.8.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.8.0
+VERSION=0.9.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.9.0
 ```
 
 ```sh
