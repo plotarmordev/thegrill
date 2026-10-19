@@ -199,6 +199,7 @@ struct Manifest {
     kind: String,
     status: CaptureStatus,
     finished_unix_ms: u64,
+    elapsed_ms: u64,
     runs: usize,
     files: BTreeMap<String, String>,
     evidence_sha256: String,
@@ -211,6 +212,7 @@ impl Manifest {
             &self.kind,
             self.status,
             self.finished_unix_ms,
+            self.elapsed_ms,
             self.runs,
             &self.files,
         ))
@@ -801,11 +803,14 @@ pub(super) fn capture(
     )?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis())
         .map_err(|_| "capture interval exceeds timestamp range")?;
-    let finished_unix_ms = receipt
-        .started_unix_ms
-        .checked_add(elapsed_ms)
-        .ok_or("capture completion timestamp overflow")?;
-    let digest = publish_manifest(&root, status, runs.len(), setup.is_some(), finished_unix_ms)?;
+    let digest = publish_manifest(
+        &root,
+        status,
+        runs.len(),
+        setup.is_some(),
+        crate::metrics::unix_ms(),
+        elapsed_ms,
+    )?;
     Ok(inspection(&plan, &receipt, status, runs, setup, digest))
 }
 
@@ -829,6 +834,7 @@ fn publish_manifest(
     runs: usize,
     setup: bool,
     finished_unix_ms: u64,
+    elapsed_ms: u64,
 ) -> Result<String> {
     let mut files = BTreeMap::new();
     for name in manifest_names(runs, setup) {
@@ -842,6 +848,7 @@ fn publish_manifest(
         kind: "media-capture-complete-v1".into(),
         status,
         finished_unix_ms,
+        elapsed_ms,
         runs,
         files,
         evidence_sha256: String::new(),
@@ -1182,18 +1189,23 @@ fn load(root: &Path) -> Result<Loaded> {
     {
         return Err("capture status mismatch".into());
     }
-    let measured_us = runs
+    let process_us = runs
         .iter()
-        .filter(|run| run.phase == Phase::Measured)
         .map(|run| u128::from(run.process.end_to_end_us))
         .sum::<u128>()
         + setup
             .as_ref()
             .map_or(0, |setup| u128::from(setup.process.end_to_end_us));
-    // Completion is start plus monotonic elapsed time, at millisecond resolution.
-    if measured_us / 1000 > u128::from(manifest.finished_unix_ms - receipt.started_unix_ms) {
+    if process_us > u128::from(manifest.elapsed_ms) * 1000 {
+        return Err("capture elapsed time is shorter than its process durations".into());
+    }
+    // Allow clock drift and slew without treating time spent suspended as overlap.
+    let tolerance_ms = 1000 + manifest.elapsed_ms / 1000;
+    if manifest.finished_unix_ms - receipt.started_unix_ms
+        < manifest.elapsed_ms.saturating_sub(tolerance_ms)
+    {
         return Err(
-            "capture interval is shorter than its measured and setup process durations".into(),
+            "capture wall-clock interval is shorter than elapsed time beyond tolerance".into(),
         );
     }
     let inspection = inspection(
@@ -1352,6 +1364,7 @@ mod tests {
             kind: "media-capture-complete-v1".into(),
             status: CaptureStatus::Complete,
             finished_unix_ms: crate::metrics::unix_ms(),
+            elapsed_ms: 0,
             runs,
             evidence_sha256: String::new(),
             files,

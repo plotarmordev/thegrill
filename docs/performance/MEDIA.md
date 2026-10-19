@@ -126,13 +126,13 @@ or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
 incomplete or inconsistent evidence; individual sample failures remain visible
 inside an otherwise completed capture.
 
-Capture completion records require `finished_unix_ms`: the receipt's
-`started_unix_ms` plus elapsed monotonic time from capture start, not a second
-wall-clock reading. The evidence digest covers the entire completion record
-except the digest itself, including status, run count and completion time.
-Inspect rejects missing completion times, completion before start, and intervals
-shorter than the sum of measured and setup process durations at millisecond
-resolution. Setup runs inside this interval.
+Capture completion records require wall-clock `finished_unix_ms` and monotonic
+`elapsed_ms` from capture start; the evidence digest covers the entire record
+except the digest itself.
+Inspect requires all process durations (setup, warmups and measured runs) to fit
+within `elapsed_ms`, completion not to precede start, and the wall-clock interval
+to be at least `elapsed_ms - (1000 + elapsed_ms / 1000)` milliseconds, allowing
+clock drift and slew while a suspended machine may have a longer wall interval.
 
 ## Compare
 
@@ -147,8 +147,8 @@ program and setup-program hashes, and deployment; B must differ in at least one
 of those, and B2 must match B. Runner bytes include setup arguments.
 
 Comparison requires A to finish no later than B starts, then B2 if declared,
-then A2. Starts are wall-clock readings, so clock steps can make ordering fail
-closed.
+then A2. These comparisons use only wall-clock readings, so clock steps can make
+ordering fail closed.
 Incomplete captures and admission failures are INVALID errors, never performance
 verdicts.
 

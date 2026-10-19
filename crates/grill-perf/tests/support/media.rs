@@ -706,7 +706,7 @@ fn assert_process_stopped(pid: &str) {
 #[test]
 fn capture_deadline_cleans_descendants_and_retains_every_failure() {
     let mut f = capture_fixture("sleep 60 &\nprintf '%s\\n' \"$!\" >> \"$ROOT/descendants\"\nwait");
-    f.workload["limits"]["run_deadline_ms"] = json!(5000);
+    f.workload["limits"]["run_deadline_ms"] = json!(1000);
     let report = f.captured();
     assert_eq!(report["runs"].as_array().unwrap().len(), 4);
     assert_eq!(report["cells"][0]["eligible"], 0);
@@ -773,6 +773,7 @@ fn manifest_digest(manifest: &Value) -> String {
             &manifest["kind"],
             &manifest["status"],
             &manifest["finished_unix_ms"],
+            &manifest["elapsed_ms"],
             &manifest["runs"],
             &manifest["files"],
         ))
@@ -1482,8 +1483,8 @@ fn compare_rejects_overlapping_captures_even_after_rehashed_completion() {
         serde_json::from_slice(&fs::read(f.root.path("b/receipt.json")).unwrap()).unwrap();
     let forged_finish = b["started_unix_ms"].as_u64().unwrap();
     let forged_interval = forged_finish - a["started_unix_ms"].as_u64().unwrap();
-    // Hold A beyond the forged interval regardless of collector launch overhead.
-    std::thread::sleep(std::time::Duration::from_millis(forged_interval + 10));
+    // Hold A beyond the forged interval and the clock-agreement tolerance.
+    std::thread::sleep(std::time::Duration::from_millis(forged_interval + 2000));
     fs::write(f.root.path("release"), b"").unwrap();
     successful(&child.wait_with_output().unwrap());
     f.capture_slot("a2", "wait");
@@ -1499,7 +1500,7 @@ fn compare_rejects_overlapping_captures_even_after_rehashed_completion() {
         .arg(f.root.path("a"))
         .output()
         .unwrap();
-    let reason = "capture interval is shorter than its measured and setup process durations";
+    let reason = "capture wall-clock interval is shorter than elapsed time beyond tolerance";
     comparison_rejected(&inspected, reason);
     f.comparison_rejected(false, reason);
 }
@@ -1877,6 +1878,10 @@ fn inspect_and_compare_reject_unhashed_completion_tampering() {
             "finished_unix_ms",
             json!(original["finished_unix_ms"].as_u64().unwrap() + 1),
         ),
+        (
+            "elapsed_ms",
+            json!(original["elapsed_ms"].as_u64().unwrap() + 1),
+        ),
         ("status", json!("cancelled")),
         ("runs", json!(2)),
         ("files", json!({})),
@@ -2136,25 +2141,66 @@ fn compare_cross_arm_hash_equality_is_unavailable_for_nondeterministic_arms() {
 }
 
 #[test]
-fn inspect_interval_floor_includes_setup_inside_the_capture() {
-    let mut f = capture_fixture("cp \"$PREPARED\" \"$1\"");
-    f.workload["cells"][0]["warmup_runs"] = json!(0);
+fn inspect_elapsed_floor_includes_setup_warmups_and_measured_runs() {
+    let mut f = capture_fixture("sleep 0.05; cp \"$PREPARED\" \"$1\"");
     f.workload["cells"][0]["measured_runs"] = json!(1);
     f.runner["setup"] = json!({"program":"/bin/sh","args":["-c","sleep 0.2"]});
     let report = f.captured();
+    successful(&f.inspect_capture());
     assert_eq!(report["setup"]["process"]["status"], "complete");
-    let measured_ms = report["runs"][0]["process"]["end_to_end_us"]
-        .as_u64()
-        .unwrap()
-        / 1000;
+    let durations = [
+        report["setup"]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+        report["runs"][0]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+        report["runs"][1]["process"]["end_to_end_us"]
+            .as_u64()
+            .unwrap(),
+    ];
+    let total = durations.iter().sum::<u64>();
+    for omitted in durations {
+        rewrite_capture_manifest(&f.root.path("capture"), |manifest| {
+            manifest["elapsed_ms"] = json!((total - omitted).div_ceil(1000));
+        });
+        inspection_rejected(
+            &f,
+            "capture elapsed time is shorter than its process durations",
+        );
+    }
+}
+
+#[test]
+fn inspect_wall_clock_agreement_allows_tolerance_and_longer_intervals() {
+    let mut f = capture_fixture("sleep 1.2; cp \"$PREPARED\" \"$1\"");
+    f.workload["cells"][0]["warmup_runs"] = json!(0);
+    f.workload["cells"][0]["measured_runs"] = json!(1);
+    f.captured();
+    successful(&f.inspect_capture());
     let receipt: Value =
         serde_json::from_slice(&fs::read(f.root.path("capture/receipt.json")).unwrap()).unwrap();
-    rewrite_capture_manifest(&f.root.path("capture"), |manifest| {
-        manifest["finished_unix_ms"] =
-            json!(receipt["started_unix_ms"].as_u64().unwrap() + measured_ms + 1);
+    let path = f.root.path("capture");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(path.join("capture.json")).unwrap()).unwrap();
+    let started = receipt["started_unix_ms"].as_u64().unwrap();
+    let elapsed = manifest["elapsed_ms"].as_u64().unwrap();
+    let minimum_wall_ms = elapsed - (1000 + elapsed / 1000);
+    for wall_ms in [minimum_wall_ms, elapsed + 60_000] {
+        rewrite_capture_manifest(&path, |manifest| {
+            manifest["finished_unix_ms"] = json!(started + wall_ms);
+        });
+        successful(&f.inspect_capture());
+    }
+    rewrite_capture_manifest(&path, |manifest| {
+        manifest["finished_unix_ms"] = json!(started + minimum_wall_ms - 1);
     });
     inspection_rejected(
         &f,
-        "capture interval is shorter than its measured and setup process durations",
+        "capture wall-clock interval is shorter than elapsed time beyond tolerance",
     );
+    rewrite_capture_manifest(&path, |manifest| {
+        manifest.as_object_mut().unwrap().remove("elapsed_ms");
+    });
+    inspection_rejected(&f, "elapsed_ms");
 }
