@@ -1,4 +1,5 @@
-//! Offline admission for operator-declared media processes; never launches a runner.
+//! Admission and retained evidence for operator-declared image processes.
+mod capture;
 use crate::{
     evidence,
     model::{FILE_CAP, Result, identifier, present},
@@ -43,9 +44,9 @@ impl OutputPlaceholder {
         }
     }
 }
-#[derive(Deserialize, Serialize, Copy, Clone)]
+#[derive(Debug, Deserialize, Serialize, Copy, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum Container {
+pub(crate) enum Container {
     Png,
     Jpeg,
 }
@@ -724,9 +725,43 @@ pub enum Command {
         #[arg(long)]
         runner: PathBuf,
     },
+    /// Capture serial fresh-process image samples.
+    Capture {
+        #[arg(long)]
+        workload: PathBuf,
+        #[arg(long)]
+        runner: PathBuf,
+        #[arg(long)]
+        deployment: PathBuf,
+        #[arg(long)]
+        slot: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Recheck retained evidence without launching a runner.
+    Inspect { dir: PathBuf },
 }
 pub fn execute(command: Command) -> Result<u8> {
-    let Command::Preflight { workload, runner } = command;
-    crate::print_json(&preflight(&workload, &runner)?)?;
+    match command {
+        Command::Preflight { workload, runner } => {
+            crate::print_json(&preflight(&workload, &runner)?)?;
+        }
+        Command::Capture {
+            workload,
+            runner,
+            deployment,
+            slot,
+            out,
+        } => {
+            crate::print_json(&capture::capture(
+                &workload,
+                &runner,
+                &deployment,
+                &slot,
+                &out,
+            )?)?;
+        }
+        Command::Inspect { dir } => crate::print_json(&capture::inspect(&dir)?)?,
+    }
     Ok(0)
 }

@@ -1,7 +1,8 @@
 # Media CLI benchmarking
 
-`media preflight` is experimental and image-only. It prints JSON without starting
-processes or creating directories. Audio and video are not supported yet.
+`media preflight`, `media capture` and `media inspect` are experimental and
+image-only. Capture supports Linux and macOS; audio and video are not supported.
+Preflight prints JSON without starting processes or creating directories.
 
 ```text
 grill-perf media preflight --workload W.json --runner R.json
@@ -64,21 +65,62 @@ Unknown or unclosed placeholders fail. There is no literal opening-brace escape;
 JSON-valued arguments need an adapter. Env values and paths are not templates.
 Non-image fields, marker fields/placeholders and probes are not admitted.
 
+## Capture and inspect
+
+```text
+grill-perf media capture --workload W.json --runner R.json --deployment D.json --slot a --out capture
+grill-perf media inspect capture
+```
+
+Capture publishes the declarations and receipt before setup or sample execution.
+It uses direct exec, declared environment additions and cwd, and an owned process
+group per invocation. Runs are serial, with the declared pause after each run;
+deadlines and cancellation kill the owned group, including descendants that
+remain in it. A runner can escape the group; this is not a sandbox.
+
+Optional setup runs once before warmups and has separate timing and streams.
+Every sample has a reservation, status, exit code, Grill-monotonic
+`end_to_end_us`, retained stdout/stderr prefixes and truncation flags. Truncation
+is nonfatal. Failures are retained, never retried or replaced; cancellation also
+records unstarted samples as cancelled. Warmups are excluded from summaries.
+One capture contains the measured samples for one declared slot.
+
+`{output}` names a collector-owned file. `{output_dir}` is a fresh empty directory
+that must contain exactly `images_per_run` direct regular files, with no symlinks,
+subdirectories or hidden-file exceptions; all names are retained in lexical byte
+order with their original filename bytes recorded. Invalid counts or entry types
+make the sample ineligible rather than selecting a subset.
+
+Bounded output files are copied into each run's `retained/` directory with SHA-256
+hashes. PNG signature, IHDR, chunk CRCs and terminal IEND, or JPEG SOI, SOF
+dimensions and terminal EOI are checked by content, not extension. Validation is
+`container_checked`, never `decoded`; it does not establish pixel correctness or
+quality. Eligibility requires successful exit within the deadline and every
+expected output with matching dimensions and count. Oversized or missing files
+are recorded as failures, not loaded into retained output buffers.
+
+Declared cache paths are observed before setup, after setup and after runs:
+existence, regular-file count, bytes and newest mtime. Walks are bounded and do
+not follow symlinks; incomplete observations carry errors. Growth during measured
+runs is recorded separately from setup/warmup changes. Nothing is flushed or
+purged, and a fresh CLI does not prove a fresh model load. The execution
+declaration accompanies timing reports.
+
+Inspect launches nothing and requires no original runner or cache files. It
+rechecks retained hashes, sample argv projections and container validations,
+then reports measured timing count, minimum, median, mean and maximum, eligible
+count and determinism by seed among eligible samples. Timing summaries include
+failed measured samples; warmups and setup are excluded. A seed with no repeat
+has unavailable determinism. These are descriptive observations, not a verdict.
+Capture and inspect print JSON and exit successfully even when samples failed;
+unreadable, incomplete or inconsistent evidence is an error.
+
 ## Planned
 
-Capture, offline inspect and compare are **not available**. Capture will publish
-a receipt before work, use direct exec (no shell), start a fresh process per
-sample and serialize runs. Setup will run before warmups, outside measurement;
-warmups and failures will be retained, warmups excluded, and failures never
-retried or replaced. Declared env additions will supplement inherited values
-without recording the inherited environment. Cache observations will accompany
-declared labels; a fresh CLI will not prove a fresh model load.
-
-Comparison will use A/B/A2 or A/B/B2/A2 and require at least three measured samples
-per arm inside a capture. Only `end_to_end_us` will gate direction. Container
-validation will be `container_checked`, never `decoded`. Same-checkpoint comparisons will permit
-envelope direction; changed-model or unavailable identity will remain
-INCONCLUSIVE without a quality claim. Offline inspect will recheck retained bytes.
+Compare remains unavailable. It will use A/B/A2 or A/B/B2/A2 and require at least
+three measured samples per arm. Only `end_to_end_us` will gate direction.
+Same-checkpoint comparisons will permit envelope direction; changed-model or
+unavailable identity will remain INCONCLUSIVE without a quality claim.
 
 Prompts, program paths, declared env values and outputs are private evidence,
 not a public export. Review preflight output before sharing it.

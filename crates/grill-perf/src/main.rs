@@ -3,6 +3,7 @@ mod bundle;
 mod capacity;
 mod envelope;
 mod evidence;
+mod imagefile;
 mod lifecycle;
 mod media;
 mod metrics;
