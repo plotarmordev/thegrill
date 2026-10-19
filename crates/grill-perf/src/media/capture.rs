@@ -110,19 +110,33 @@ enum Reason {
     Cancelled,
     CancelledBeforeLaunch,
     CaptureFailed,
+    CacheMutatedDuringMeasurement,
+    CacheObservationIncomplete,
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ValidationLabel {
+    Invalid,
+    ContainerChecked,
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ValidationReason {
+    Container { failure: crate::imagefile::Failure },
+    OutputDimensions,
 }
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Validation {
-    label: String,
+    label: ValidationLabel,
     container: Container,
     width: Option<u32>,
     height: Option<u32>,
-    reason: Option<String>,
+    reason: Option<ValidationReason>,
 }
 impl Validation {
     fn valid(&self) -> bool {
-        self.label == "container_checked" && self.reason.is_none()
+        self.label == ValidationLabel::ContainerChecked && self.reason.is_none()
     }
 }
 #[derive(Deserialize, Serialize)]
@@ -174,7 +188,7 @@ struct Run {
     reasons: Vec<Reason>,
     details: Vec<String>,
     cache_after: Vec<Observation>,
-    cache_mutated_during_measurement: bool,
+    cache_mutated_during_measurement: Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -226,7 +240,7 @@ pub(super) struct Inspection {
     cells: Vec<CellSummary>,
     runs: Vec<Run>,
     setup: Option<SetupRecord>,
-    cache_mutated_during_measurement: bool,
+    cache_mutated_during_measurement: Option<bool>,
     evidence_sha256: String,
 }
 impl Inspection {
@@ -260,7 +274,7 @@ fn reservation(sample: &Scheduled<'_>, plan: &Plan, root: &Path) -> Result<Reser
 }
 fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
     let mut result = Validation {
-        label: "invalid".into(),
+        label: ValidationLabel::Invalid,
         container: declaration.container,
         width: None,
         height: None,
@@ -273,12 +287,12 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
             if checked.width == declaration.expect.width
                 && checked.height == declaration.expect.height
             {
-                result.label = "container_checked".into();
+                result.label = ValidationLabel::ContainerChecked;
             } else {
-                result.reason = Some("output_dimensions".into());
+                result.reason = Some(ValidationReason::OutputDimensions);
             }
         }
-        Err(error) => result.reason = Some(error.as_str().into()),
+        Err(failure) => result.reason = Some(ValidationReason::Container { failure }),
     }
     result
 }
@@ -369,6 +383,19 @@ struct Outputs {
     reasons: Vec<Reason>,
     details: Vec<String>,
 }
+fn expected_outputs(output: &Output, request: &Request, args: &[String], setup: bool) -> u32 {
+    if setup
+        && !args
+            .iter()
+            .any(|arg| arg.contains(&format!("{{{}}}", output.placeholder.name())))
+    {
+        0
+    } else if output.placeholder == OutputPlaceholder::Output {
+        1
+    } else {
+        request.images_per_run
+    }
+}
 fn collect_outputs(
     dir: &Path,
     workload: &Workload,
@@ -379,17 +406,13 @@ fn collect_outputs(
     let cap = usize::try_from(workload.limits.output_bytes)
         .map_err(|_| "output_bytes exceeds platform size")?;
     let mut result = Outputs::default();
-    let selected = workload.outputs.iter().enumerate().filter(|(_, output)| {
-        !setup
-            || args
-                .iter()
-                .any(|arg| arg.contains(&format!("{{{}}}", output.placeholder.name())))
-    });
-    for (declaration_index, declaration) in selected {
-        if !dir.join("retained").exists() {
-            evidence::fresh(&dir.join("retained"))?;
+    evidence::directory(&dir.join("retained"))?;
+    for (declaration_index, declaration) in workload.outputs.iter().enumerate() {
+        let count = expected_outputs(declaration, request, args, setup);
+        if count == 0 {
+            continue;
         }
-        let sources = match output_sources(dir, declaration, request.images_per_run) {
+        let sources = match output_sources(dir, declaration, count) {
             Ok(paths) => paths,
             Err(reason) => {
                 result.reasons.push(reason);
@@ -508,9 +531,7 @@ impl Session<'_> {
             status,
             spawned: output.spawned,
             failure,
-            detail: output
-                .failure
-                .map(|text| text.replace(program.path.to_string_lossy().as_ref(), "<program>")),
+            detail: output.failure,
             stdout: Stream {
                 sha256: evidence::digest(&output.stdout),
                 bytes: output.stdout.len(),
@@ -586,20 +607,25 @@ impl Session<'_> {
         if let Some(reason) = reason_for(process.status) {
             outputs.reasons.push(reason);
         }
+        let cache_after = cache::observe(&self.receipt.cache_paths);
+        let cache_mutated_during_measurement =
+            measurement_growth(sample.phase, previous, &cache_after);
+        if let Some(reason) = cache_reason(cache_mutated_during_measurement) {
+            outputs.reasons.push(reason);
+        }
         outputs.reasons.sort();
         outputs.reasons.dedup();
-        let cache_after = cache::observe(&self.receipt.cache_paths);
         let record = Run {
             cell: sample.cell.id.clone(),
             phase: sample.phase,
             seed: sample.seed,
-            eligible: process.status == Status::Complete,
+            eligible: process.status == Status::Complete
+                && cache_mutated_during_measurement == Some(false),
             process,
             outputs: outputs.retained,
             reasons: outputs.reasons,
             details: outputs.details,
-            cache_mutated_during_measurement: sample.phase == Phase::Measured
-                && cache::grew(previous, &cache_after),
+            cache_mutated_during_measurement,
             cache_after,
         };
         evidence::publish(&dir, "run.json", &record)?;
@@ -608,6 +634,7 @@ impl Session<'_> {
 }
 fn prepare_directory(dir: &Path, args: &[String]) -> Result<()> {
     evidence::fresh(dir)?;
+    evidence::fresh(&dir.join("retained"))?;
     if args.iter().any(|arg| arg.contains("{output_dir}")) {
         evidence::fresh(&dir.join("out"))?;
     }
@@ -629,7 +656,7 @@ fn pause(ms: u32) {
         if remaining.is_zero() {
             break;
         }
-        std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        std::thread::sleep(remaining.min(process::PROGRAM_POLL));
     }
 }
 
@@ -637,16 +664,9 @@ fn make_receipt(
     plan: &Plan,
     admitted: Preflight,
     deployment: &[u8],
-    slot: &str,
+    slot: Slot,
     root: &Path,
 ) -> Result<Receipt> {
-    let slot = plan
-        .workload
-        .slots
-        .iter()
-        .find(|selected| selected.id == slot)
-        .ok_or("undeclared capture slot")?
-        .clone();
     Ok(Receipt {
         version: 1,
         kind: "media-capture-v1".into(),
@@ -670,7 +690,7 @@ fn make_receipt(
             sha256: evidence::binary_digest()?,
         },
         clock: "grill-monotonic".into(),
-        poll_interval_us: 2000,
+        poll_interval_us: process::PROGRAM_POLL.as_micros() as u64,
         platform: Platform {
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -687,19 +707,18 @@ pub(super) fn capture(
     slot: &str,
     out: &Path,
 ) -> Result<Inspection> {
-    let plan = preflight(workload, runner)?;
-    let admitted = admit(&plan)?;
+    let plan = load_plan(workload, runner)?;
+    let admitted = preflight(&plan)?;
     let deployment_bytes = evidence::read(deployment, FILE_CAP)?;
     let declaration: Deployment = parse(&deployment_bytes)?;
     declaration.validate()?;
-    if !plan
+    let slot = plan
         .workload
         .slots
         .iter()
-        .any(|selected| selected.id == slot)
-    {
-        return Err("undeclared capture slot".into());
-    }
+        .find(|selected| selected.id == slot)
+        .ok_or("undeclared capture slot")?
+        .clone();
     let guard = Guard::install()?;
     evidence::fresh(out)?;
     let root = fs::canonicalize(out).map_err(|error| error.to_string())?;
@@ -841,7 +860,9 @@ fn verified_observations(root: &Path, name: &str, manifest: &Manifest) -> Result
         .as_array()
         .ok_or("cache observations must be an array")?
     {
-        reject_positional_records(observation)?;
+        if !observation.is_object() {
+            return Err("cache observations must be JSON objects".into());
+        }
     }
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
@@ -921,20 +942,10 @@ fn output_counts_match(
     args: &[String],
     setup: bool,
 ) -> bool {
-    counts.iter().zip(&workload.outputs).all(|(count, output)| {
-        let selected = !setup
-            || args
-                .iter()
-                .any(|arg| arg.contains(&format!("{{{}}}", output.placeholder.name())));
-        let expected = if !selected {
-            0
-        } else if output.placeholder == OutputPlaceholder::Output {
-            1
-        } else {
-            request.images_per_run
-        };
-        *count == expected
-    })
+    counts
+        .iter()
+        .zip(&workload.outputs)
+        .all(|(count, output)| *count == expected_outputs(output, request, args, setup))
 }
 fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Result<()> {
     let workload = &plan.workload;
@@ -946,14 +957,22 @@ fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Res
     )?;
     let counts = verify_outputs(dir, &run.outputs, workload)?;
     let eligible = run.process.status == Status::Complete
-        && run.process.exit_status == Some(0)
-        && run.process.failure.is_none()
-        && run.process.end_to_end_us < u64::from(workload.limits.run_deadline_ms) * 1000
         && run.reasons.is_empty()
         && output_counts_match(&counts, workload, sample.request, &plan.runner.args, false)
-        && run.outputs.iter().all(|output| output.validation.valid());
-    if run.eligible != eligible || (run.process.status == Status::Complete && !eligible) {
+        && run.outputs.iter().all(|output| output.validation.valid())
+        && run.cache_mutated_during_measurement == Some(false);
+    if run.eligible != eligible {
         return Err("sample eligibility mismatch".into());
+    }
+    for reason in [
+        Reason::CacheMutatedDuringMeasurement,
+        Reason::CacheObservationIncomplete,
+    ] {
+        if run.reasons.contains(&reason)
+            != (cache_reason(run.cache_mutated_during_measurement) == Some(reason))
+        {
+            return Err("cache eligibility reason mismatch".into());
+        }
     }
     if run.cell != sample.cell.id || run.phase != sample.phase || run.seed != sample.seed {
         return Err("sample schedule mismatch".into());
@@ -1086,7 +1105,7 @@ pub(super) fn inspect(root: &Path) -> Result<Inspection> {
             .last()
             .map_or(after_setup.as_slice(), |run| &run.cache_after);
         if run.cache_mutated_during_measurement
-            != (sample.phase == Phase::Measured && cache::grew(previous, &run.cache_after))
+            != measurement_growth(sample.phase, previous, &run.cache_after)
         {
             return Err("cache growth observation mismatch".into());
         }
@@ -1137,12 +1156,38 @@ fn inspection(
         execution: receipt.execution,
         slot: receipt.slot,
         cells,
-        cache_mutated_during_measurement: runs
+        cache_mutated_during_measurement: if runs
             .iter()
-            .any(|run| run.cache_mutated_during_measurement),
+            .any(|run| run.cache_mutated_during_measurement == Some(true))
+        {
+            Some(true)
+        } else if runs
+            .iter()
+            .any(|run| run.cache_mutated_during_measurement.is_none())
+        {
+            None
+        } else {
+            Some(false)
+        },
         runs,
         setup,
         evidence_sha256,
+    }
+}
+
+fn measurement_growth(phase: Phase, before: &[Observation], after: &[Observation]) -> Option<bool> {
+    if phase == Phase::Measured {
+        cache::grew(before, after)
+    } else {
+        Some(false)
+    }
+}
+
+fn cache_reason(growth: Option<bool>) -> Option<Reason> {
+    match growth {
+        Some(false) => None,
+        Some(true) => Some(Reason::CacheMutatedDuringMeasurement),
+        None => Some(Reason::CacheObservationIncomplete),
     }
 }
 

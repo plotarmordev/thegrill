@@ -618,7 +618,7 @@ struct Plan {
     runner_bytes: Vec<u8>,
 }
 
-fn preflight(workload: &Path, runner: &Path) -> Result<Plan> {
+fn load_plan(workload: &Path, runner: &Path) -> Result<Plan> {
     let workload_bytes = evidence::read(workload, FILE_CAP)?;
     let runner_bytes = evidence::read(runner, FILE_CAP)?;
     plan_from_bytes(workload_bytes, runner_bytes)
@@ -689,7 +689,7 @@ fn render(
         .collect()
 }
 
-fn admit(plan: &Plan) -> Result<Preflight> {
+fn preflight(plan: &Plan) -> Result<Preflight> {
     let w = &plan.workload;
     let r = &plan.runner;
     let program = program(resolve_program(&r.program)?)?;
@@ -819,7 +819,7 @@ pub enum Command {
 pub fn execute(command: Command) -> Result<u8> {
     match command {
         Command::Preflight { workload, runner } => {
-            crate::print_json(&admit(&preflight(&workload, &runner)?)?)?;
+            crate::print_json(&preflight(&load_plan(&workload, &runner)?)?)?;
         }
         Command::Capture {
             workload,

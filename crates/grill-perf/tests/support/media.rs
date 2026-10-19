@@ -647,6 +647,13 @@ fn capture_records_measurement_cache_growth_separately_from_setup() {
     assert_eq!(report["runs"][1]["cache_mutated_during_measurement"], true);
     assert_eq!(report["runs"][1]["cache_after"][0]["bytes"], 7);
     assert_eq!(report["runs"][1]["cache_after"][0]["complete"], true);
+    assert_eq!(report["cells"][0]["eligible"], 0);
+    assert!(report["cells"][0]["end_to_end_us"].is_null());
+    assert_eq!(
+        report["cells"][0]["ineligible_by_reason"]["cache_mutated_during_measurement"],
+        3
+    );
+    successful(&f.inspect_capture());
     let before: Value =
         serde_json::from_slice(&fs::read(f.root.path("capture/cache-before.json")).unwrap())
             .unwrap();
@@ -740,6 +747,8 @@ fn capture_cancellation_cleans_descendants_and_does_not_launch_replacements() {
     let pids = fs::read_to_string(f.root.path("descendants")).unwrap();
     assert_eq!(pids.lines().count(), 1);
     assert_process_stopped(pids.trim());
+    rewrite_manifest(&f, |manifest| manifest["status"] = json!("complete"));
+    inspection_rejected(&f, "capture status mismatch");
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -883,6 +892,8 @@ fn failed_setup_retains_evidence_stops_samples_and_exits_nonzero() {
         report,
         serde_json::from_slice::<Value>(&inspection.stdout).unwrap()
     );
+    rewrite_manifest(&fixture, |manifest| manifest["status"] = json!("complete"));
+    inspection_rejected(&fixture, "capture status mismatch");
 }
 
 #[test]
@@ -982,7 +993,7 @@ fn cancellation_interrupts_pause_without_launching_the_next_sample() {
 }
 
 #[test]
-fn spawn_failure_and_output_errors_have_codes_without_paths() {
+fn spawn_failure_has_machine_codes_and_separate_diagnostics() {
     let fixture = capture_fixture("true");
     fs::write(fixture.root.path("runner"), b"#!/missing-interpreter\n").unwrap();
     let report = fixture.captured();
@@ -994,13 +1005,7 @@ fn spawn_failure_and_output_errors_have_codes_without_paths() {
             run["process"]["detail"]
                 .as_str()
                 .unwrap()
-                .contains("<program>")
-        );
-        assert!(
-            !run["process"]["detail"]
-                .as_str()
-                .unwrap()
-                .contains(fixture.root.0.to_str().unwrap())
+                .contains("spawn ")
         );
         assert!(
             run["reasons"]
@@ -1012,6 +1017,8 @@ fn spawn_failure_and_output_errors_have_codes_without_paths() {
     }
 }
 
+// APFS refuses non-UTF-8 names, so only Linux can create this fixture.
+#[cfg(target_os = "linux")]
 #[test]
 fn output_directory_rejects_non_utf8_filenames() {
     let mut fixture = capture_fixture("name=$(printf '\\377'); cp \"$PREPARED\" \"$1/$name\"");
@@ -1025,4 +1032,100 @@ fn output_directory_rejects_non_utf8_filenames() {
             .unwrap()
             .contains(&json!("output_non_utf8"))
     );
+}
+
+fn rewrite_manifest(fixture: &Fixture, change: impl FnOnce(&mut Value)) {
+    let path = fixture.root.path("capture/capture.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    change(&mut manifest);
+    manifest["evidence_sha256"] = json!(digest(&serde_json::to_vec(&manifest["files"]).unwrap()));
+    fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn inspect_checks_json_file_hashes_without_manifest_rewriting() {
+    let fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    fixture.captured();
+    let path = fixture.root.path("capture/run-000001/run.json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    record["process"]["end_to_end_us"] =
+        json!(record["process"]["end_to_end_us"].as_u64().unwrap() + 1);
+    fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    inspection_rejected(&fixture, "retained evidence hash mismatch");
+}
+
+#[test]
+fn inspect_rechecks_forged_container_validation_with_matching_hashes() {
+    let fixture = capture_fixture("printf malformed > \"$1\"");
+    fixture.captured();
+    rewrite_evidence(&fixture, "run-000001/run.json", |record| {
+        record["process"]["status"] = json!("complete");
+        record["eligible"] = json!(true);
+        record["reasons"] = json!([]);
+        record["outputs"][0]["validation"] = json!({
+            "label":"container_checked", "container":"png", "width":1, "height":1, "reason":null
+        });
+    });
+    inspection_rejected(&fixture, "retained output validation mismatch");
+}
+
+#[test]
+fn inspect_rechecks_setup_process_success_with_matching_hashes() {
+    let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    fixture.runner["setup"] = json!({"program":"/bin/sh","args":["-c","true"]});
+    fixture.captured();
+    rewrite_evidence(&fixture, "setup/setup.json", |record| {
+        record["process"]["exit_status"] = json!(7);
+    });
+    inspection_rejected(&fixture, "process eligibility mismatch");
+}
+
+#[test]
+fn inspect_rejects_extra_manifest_members_with_matching_hashes() {
+    let fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    fixture.captured();
+    fs::write(fixture.root.path("capture/unexpected.json"), b"{}").unwrap();
+    rewrite_manifest(&fixture, |manifest| {
+        manifest["files"]["unexpected.json"] = json!(digest(b"{}"));
+    });
+    inspection_rejected(&fixture, "manifest completeness mismatch");
+}
+
+#[test]
+fn incomplete_cache_observation_withholds_measured_eligibility() {
+    let mut fixture = capture_fixture("cp \"$PREPARED\" \"$1\"");
+    let mut deepest = fixture.root.path("cache");
+    for _ in 0..66 {
+        deepest.push("next");
+    }
+    fs::create_dir_all(deepest).unwrap();
+    fixture.runner["cache"]["paths"] = json!([fixture.root.path("cache")]);
+    let report = fixture.captured();
+    assert!(report["cache_mutated_during_measurement"].is_null());
+    assert_eq!(report["cells"][0]["eligible"], 0);
+    assert!(report["cells"][0]["end_to_end_us"].is_null());
+    assert_eq!(
+        report["cells"][0]["ineligible_by_reason"]["cache_observation_incomplete"],
+        3
+    );
+    for record in &report["runs"].as_array().unwrap()[1..] {
+        assert_eq!(record["process"]["status"], "complete");
+        assert_eq!(record["eligible"], false);
+        assert!(record["cache_mutated_during_measurement"].is_null());
+        assert_eq!(record["cache_after"][0]["complete"], false);
+    }
+    let inspected = fixture.inspect_capture();
+    successful(&inspected);
+    assert_eq!(
+        report,
+        serde_json::from_slice::<Value>(&inspected.stdout).unwrap()
+    );
+}
+
+#[test]
+fn retained_directory_exists_before_the_runner_starts() {
+    let fixture =
+        capture_fixture("test -d \"$(dirname \"$1\")/retained\"; cp \"$PREPARED\" \"$1\"");
+    let report = fixture.captured();
+    assert_eq!(report["cells"][0]["eligible"], 3);
 }

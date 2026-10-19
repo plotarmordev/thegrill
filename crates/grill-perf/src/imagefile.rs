@@ -7,7 +7,8 @@ pub(crate) struct Checked {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Failure {
     BadSignature,
     Truncated,
@@ -24,27 +25,6 @@ pub(crate) enum Failure {
     InvalidHeader,
     MissingIdat,
     MissingSos,
-}
-impl Failure {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::BadSignature => "bad_signature",
-            Self::Truncated => "truncated",
-            Self::CrcMismatch => "crc_mismatch",
-            Self::MissingIhdr => "missing_ihdr",
-            Self::MissingIend => "missing_iend",
-            Self::TrailingBytes => "trailing_bytes",
-            Self::MissingSof => "missing_sof",
-            Self::MissingEoi => "missing_eoi",
-            Self::ZeroDimension => "zero_dimension",
-            Self::InvalidLength => "invalid_length",
-            Self::InvalidMarker => "invalid_marker",
-            Self::DuplicateIhdr => "duplicate_ihdr",
-            Self::InvalidHeader => "invalid_header",
-            Self::MissingIdat => "missing_idat",
-            Self::MissingSos => "missing_sos",
-        }
-    }
 }
 
 pub(crate) fn check(bytes: &[u8], kind: Container) -> Result<Checked, Failure> {
@@ -321,12 +301,7 @@ mod tests {
             ),
         ];
         for (bytes, reason) in cases {
-            assert_eq!(
-                check(&bytes, Container::Png),
-                Err(reason),
-                "{}",
-                reason.as_str()
-            );
+            assert_eq!(check(&bytes, Container::Png), Err(reason), "{reason:?}");
         }
     }
     #[test]
@@ -393,12 +368,7 @@ mod tests {
             ),
         ];
         for (bytes, reason) in cases {
-            assert_eq!(
-                check(&bytes, Container::Jpeg),
-                Err(reason),
-                "{}",
-                reason.as_str()
-            );
+            assert_eq!(check(&bytes, Container::Jpeg), Err(reason), "{reason:?}");
         }
     }
     #[test]

@@ -102,11 +102,12 @@ Oversized and missing outputs are recorded as failures.
 
 Declared cache paths are observed before setup, after setup and after runs:
 existence, regular-file count, bytes, newest mtime and symlink metadata/targets.
-Symlinks are recorded without following them or stopping the walk. Walks are
-bounded; incomplete observations are labelled and do not establish growth.
-Measured cache growth is separate from setup/warmup changes. Nothing is flushed
-or purged, and a fresh CLI does not prove a fresh model load. Reports retain the
-runner's `execution` declaration.
+Symlinks are recorded without following them or stopping the walk. Incomplete
+bounded comparisons report `cache_mutated_during_measurement` as `null` (unknown),
+not `false`. Both observed growth and unknown growth withhold measured-sample
+eligibility. Setup/warmup changes are separate. Nothing is flushed or purged,
+and a fresh CLI does not prove a fresh model load. Reports retain the runner's
+`execution` declaration.
 
 Inspect launches nothing and requires no original runner or cache files. It
 rechecks retained hashes, reservations and container validations. Timing count,

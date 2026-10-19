@@ -123,13 +123,16 @@ fn walk(
     Ok(())
 }
 
-pub(super) fn grew(before: &[Observation], after: &[Observation]) -> bool {
-    before.iter().zip(after).any(|(a, b)| {
-        a.complete
-            && b.complete
-            && (b.bytes > a.bytes
-                || b.files > a.files
-                || b.symlinks > a.symlinks
-                || (!a.exists && b.exists))
-    })
+pub(super) fn grew(before: &[Observation], after: &[Observation]) -> Option<bool> {
+    if before.len() != after.len()
+        || before
+            .iter()
+            .zip(after)
+            .any(|(a, b)| !a.complete || !b.complete || a.path != b.path)
+    {
+        return None;
+    }
+    Some(before.iter().zip(after).any(|(a, b)| {
+        b.bytes > a.bytes || b.files > a.files || b.symlinks > a.symlinks || (!a.exists && b.exists)
+    }))
 }
