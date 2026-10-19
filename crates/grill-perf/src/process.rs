@@ -4,7 +4,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// Polling cadence and cleanup allowance, not real-time guarantees.
-const PROGRAM_POLL: Duration = Duration::from_millis(2);
+pub(crate) const PROGRAM_POLL: Duration = Duration::from_millis(2);
 const PROGRAM_CLEANUP: Duration = Duration::from_millis(100);
 
 pub struct Request<'a> {
