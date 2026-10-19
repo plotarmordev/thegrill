@@ -10,6 +10,8 @@ mod microbench;
 mod model;
 mod outputs;
 mod policy;
+#[cfg(unix)]
+mod process;
 mod prose;
 mod resources;
 mod retention;

@@ -65,10 +65,10 @@ use crate::evidence;
 use crate::metrics;
 use crate::model::{FILE_CAP, OrNull, Result};
 use crate::policy::Outcome;
+#[cfg(target_os = "linux")]
+use crate::process::program_signals;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const KIND: &str = "microbench-artifact-v1";
@@ -81,11 +81,6 @@ pub const VERSION: u32 = 1;
 pub const OUTPUT_CAP: usize = 1024 * 1024;
 /// Bounded retained stderr for every operator program.
 pub const STDERR_CAP: usize = 64 * 1024;
-/// Polling cadence and post-signal drain/reap allowance, not real-time guarantees.
-#[cfg(target_os = "linux")]
-const PROGRAM_POLL: Duration = Duration::from_millis(2);
-#[cfg(target_os = "linux")]
-const PROGRAM_CLEANUP: Duration = Duration::from_millis(100);
 /// Bounded significant digits in a retained decimal value.
 pub const DECIMAL_DIGITS: usize = 32;
 /// Bounded decimal exponent magnitude in a retained scientific value.
@@ -2147,8 +2142,6 @@ struct ProgramRun {
     stderr: Vec<u8>,
     stdout_truncated: bool,
     stderr_truncated: bool,
-    #[cfg(target_os = "linux")]
-    status: Option<i32>,
     failure: Option<String>,
     elapsed_ms: u64,
 }
@@ -2175,152 +2168,6 @@ impl ProgramRun {
     }
 }
 
-/// Scoped to the synchronous external-capture command, including publication.
-/// Existing serving collectors own their separate process-wide signal latch.
-#[cfg(target_os = "linux")]
-mod program_signals {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    static ACTIVE: Mutex<()> = Mutex::new(());
-    static CANCELLED: AtomicBool = AtomicBool::new(false);
-
-    extern "C" fn cancel(_: libc::c_int) {
-        CANCELLED.store(true, Ordering::SeqCst);
-    }
-
-    pub fn cancelled() -> bool {
-        CANCELLED.load(Ordering::SeqCst)
-    }
-
-    pub struct Guard {
-        previous: Vec<(libc::c_int, libc::sigaction)>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Guard {
-        pub fn install() -> crate::model::Result<Self> {
-            let lock = ACTIVE
-                .try_lock()
-                .map_err(|_| "external capture already active")?;
-            CANCELLED.store(false, Ordering::SeqCst);
-            let mut guard = Self {
-                previous: Vec::new(),
-                _lock: lock,
-            };
-            // Auto-reaping or a competing SIGCHLD handler can release the PID/PGID.
-            // SAFETY: sigaction is plain C data; all-zero is a valid value.
-            let mut chld: libc::sigaction = unsafe { std::mem::zeroed() };
-            // SAFETY: a null new action only queries into the owned out-parameter.
-            if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut chld) } != 0
-                || chld.sa_sigaction != libc::SIG_DFL
-                || chld.sa_flags & libc::SA_NOCLDWAIT != 0
-            {
-                return Err("external capture requires a waitable child leader".into());
-            }
-            for signal in [libc::SIGINT, libc::SIGTERM] {
-                // SAFETY: sigaction is plain C data; all-zero is a valid value.
-                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-                action.sa_sigaction = cancel as *const () as libc::sighandler_t;
-                // SAFETY: initializes the mask of the owned action.
-                unsafe { libc::sigemptyset(&mut action.sa_mask) };
-                // SAFETY: sigaction is plain C data; all-zero is a valid value.
-                let mut previous = unsafe { std::mem::zeroed() };
-                // SAFETY: `cancel` only performs an atomic store, so it is
-                // async-signal-safe; both pointers are live locals.
-                if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
-                    return Err(format!(
-                        "install capture signal handler: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                guard.previous.push((signal, previous));
-            }
-            Ok(guard)
-        }
-    }
-
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            for (signal, previous) in self.previous.iter().rev() {
-                // SAFETY: restores the action saved when this signal was installed.
-                unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn nonblocking(stream: &impl std::os::fd::AsRawFd) -> std::io::Result<()> {
-    let fd = stream.as_raw_fd();
-    // SAFETY: fcntl only operates on the fd borrowed from `stream` for this call.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    // SAFETY: as above; the new flags extend the flags just read.
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// At most 16 reads per stream per tick, so a busy writer cannot starve the timer.
-#[cfg(target_os = "linux")]
-fn drain(
-    stream: &mut impl std::io::Read,
-    bytes: &mut Vec<u8>,
-    cap: usize,
-    truncated: &mut bool,
-    done: &mut bool,
-) -> std::io::Result<()> {
-    if *done {
-        return Ok(());
-    }
-    let mut buffer = [0_u8; 8192];
-    for _ in 0..16 {
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                *done = true;
-                break;
-            }
-            Ok(count) => {
-                let retained = count.min(cap - bytes.len());
-                bytes.extend_from_slice(&buffer[..retained]);
-                *truncated |= retained < count;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => break,
-            Err(error) => {
-                *truncated = true;
-                *done = true;
-                return Err(error);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Observe exit without reaping: the owned leader reserves its PID and PGID.
-#[cfg(target_os = "linux")]
-fn leader_exited(pid: u32) -> std::io::Result<bool> {
-    // SAFETY: siginfo_t is plain C data; all-zero is a valid value.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: WNOWAIT observes without reaping; `info` is an owned out-parameter.
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: waitid succeeded with WNOHANG, so si_pid is set (zero when no change).
-    Ok(unsafe { info.si_pid() } != 0)
-}
-
-/// Launch only PROGRAM [extra..] --plan PLAN. No shell interpretation.
-/// No wait/reader joins: cleanup has its own finite drain/reap allowance.
 #[cfg(target_os = "linux")]
 fn run_program(
     program: &Path,
@@ -2328,150 +2175,32 @@ fn run_program(
     plan_path: &Path,
     deadline: Duration,
 ) -> ProgramRun {
-    use std::os::unix::process::CommandExt;
-    let started = Instant::now();
-    let mut run = ProgramRun::default();
-    if program_signals::cancelled() {
-        run.fail("collector cancelled before program launch");
-        return run;
+    let argv: Vec<std::ffi::OsString> = extra
+        .iter()
+        .map(std::ffi::OsString::from)
+        .chain([
+            std::ffi::OsString::from("--plan"),
+            plan_path.as_os_str().to_owned(),
+        ])
+        .collect();
+    let run = crate::process::run(&crate::process::Request {
+        program,
+        argv: &argv,
+        env: &[],
+        cwd: None,
+        deadline,
+        stdout_cap: OUTPUT_CAP,
+        stderr_cap: STDERR_CAP,
+        truncation_fatal: true,
+    });
+    ProgramRun {
+        stdout: run.stdout,
+        stderr: run.stderr,
+        stdout_truncated: run.stdout_truncated,
+        stderr_truncated: run.stderr_truncated,
+        failure: run.failure,
+        elapsed_ms: run.elapsed_ms,
     }
-    let mut child = match Command::new(program)
-        .args(extra)
-        .arg("--plan")
-        .arg(plan_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            run.fail(format!("spawn {}: {error}", program.display()));
-            run.elapsed_ms = started.elapsed().as_millis() as u64;
-            return run;
-        }
-    };
-    let pid = child.id();
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
-    let mut out_done = false;
-    let mut err_done = false;
-    if let Err(error) = nonblocking(&stdout) {
-        run.fail(format!("stdout nonblocking setup: {error}"));
-        run.stdout_truncated = true;
-        out_done = true; // Never read a descriptor whose nonblocking setup failed.
-    }
-    if let Err(error) = nonblocking(&stderr) {
-        run.fail(format!("stderr nonblocking setup: {error}"));
-        run.stderr_truncated = true;
-        err_done = true;
-    }
-    let mut cleanup_started = None;
-    let mut reaped = false;
-    let mut cancellation_recorded = false;
-    loop {
-        if let Err(error) = drain(
-            &mut stdout,
-            &mut run.stdout,
-            OUTPUT_CAP,
-            &mut run.stdout_truncated,
-            &mut out_done,
-        ) {
-            run.fail(format!("stdout read failed: {error}"));
-        }
-        if let Err(error) = drain(
-            &mut stderr,
-            &mut run.stderr,
-            STDERR_CAP,
-            &mut run.stderr_truncated,
-            &mut err_done,
-        ) {
-            run.fail(format!("stderr read failed: {error}"));
-        }
-        if program_signals::cancelled() && !cancellation_recorded {
-            run.fail("collector cancelled by SIGINT or SIGTERM");
-            cancellation_recorded = true;
-        }
-        if cleanup_started.is_none() {
-            if run.stdout_truncated || run.stderr_truncated {
-                run.fail("program stdout/stderr capture truncated (cap or read/setup failure)");
-            }
-            if started.elapsed() >= deadline {
-                run.fail(format!(
-                    "program exceeded the declared {} ms deadline",
-                    deadline.as_millis()
-                ));
-            }
-            let exited = match leader_exited(pid) {
-                Ok(exited) => exited,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => false,
-                Err(error) => {
-                    // In particular ECHILD means identity is no longer reserved.
-                    // Never signal a numeric PID/PGID after that loss of ownership.
-                    run.fail(format!(
-                        "observe owned leader failed; group not signalled: {error}"
-                    ));
-                    break;
-                }
-            };
-            if exited || run.failure.is_some() {
-                // This is the ONLY group signal. WNOWAIT above kept the leader
-                // unreaped even on normal exit; no try_wait occurs before it.
-                // SAFETY: kill takes plain integers; the unreaped leader keeps
-                // its PGID reserved, so the signal cannot reach a reused group.
-                if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
-                    run.fail(format!(
-                        "owned group cleanup signal failed: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                cleanup_started = Some(Instant::now());
-            }
-        }
-        if let Some(cleanup) = cleanup_started {
-            // No further group signals are permitted after this reap.
-            if !reaped {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        run.status = status.code();
-                        reaped = true;
-                    }
-                    Ok(None) => (),
-                    Err(error) => {
-                        run.fail(format!("owned leader reap failed: {error}"));
-                        break;
-                    }
-                }
-            }
-            if reaped && out_done && err_done {
-                break;
-            }
-            if cleanup.elapsed() >= PROGRAM_CLEANUP {
-                if !reaped {
-                    run.fail("owned leader not reaped within 100 ms cleanup allowance");
-                }
-                break;
-            }
-        }
-        std::thread::sleep(PROGRAM_POLL);
-    }
-    if !out_done {
-        run.stdout_truncated = true;
-        run.fail("stdout drainage incomplete at cleanup boundary");
-    }
-    if !err_done {
-        run.stderr_truncated = true;
-        run.fail("stderr drainage incomplete at cleanup boundary");
-    }
-    if run.stdout_truncated || run.stderr_truncated {
-        run.fail("raw output is truncated; retained prefixes only");
-    }
-    if run.status != Some(0) {
-        run.fail(format!("program exited with status {:?}", run.status));
-    }
-    run.elapsed_ms = started.elapsed().as_millis() as u64;
-    run
 }
 
 #[cfg(not(target_os = "linux"))]
