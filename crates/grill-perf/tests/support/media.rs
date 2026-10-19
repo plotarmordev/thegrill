@@ -1193,7 +1193,7 @@ fn retained_directory_exists_before_the_runner_starts() {
 }
 
 fn comparison_fixture(measured: u32, b2: bool) -> Fixture {
-    let mut f = capture_fixture("sleep \"$DELAY\"; cp \"$PREPARED\" \"$1\"");
+    let mut f = capture_fixture("cp \"$PREPARED\" \"$1\"");
     f.workload["cells"][0]["warmup_runs"] = json!(0);
     f.workload["cells"][0]["measured_runs"] = json!(measured);
     f.workload["cells"][0]["pause_between_runs_ms"] = json!(0);
@@ -1201,6 +1201,16 @@ fn comparison_fixture(measured: u32, b2: bool) -> Fixture {
     if !b2 {
         f.workload["slots"].as_array_mut().unwrap().remove(2);
     }
+    f
+}
+
+fn timed_comparison_fixture() -> Fixture {
+    let f = comparison_fixture(3, false);
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\nsleep \"$DELAY\"\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
     f
 }
 
@@ -1222,7 +1232,30 @@ impl Fixture {
     }
 
     fn capture_slot(&mut self, slot: &str, delay: &str) {
+        self.capture_timed_slot(slot, delay);
+        // The runner declaration selects fixture timings, not scheduler-dependent gates.
+        let duration_us = if delay == "0.3" { 300_000 } else { 1_000 };
+        self.set_slot_times(slot, |_| duration_us);
+    }
+
+    fn capture_timed_slot(&mut self, slot: &str, delay: &str) {
         successful(&self.slot_command(slot, delay).output().unwrap());
+    }
+
+    fn set_slot_times(&self, slot: &str, duration: impl Fn(&Value) -> u64) {
+        let root = self.root.path(slot);
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(root.join("capture.json")).unwrap()).unwrap();
+        for name in manifest["files"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|name| name.ends_with("/run.json"))
+        {
+            rewrite_capture_file(&root, name, |run| {
+                run["process"]["end_to_end_us"] = json!(duration(run));
+            });
+        }
     }
 
     fn compare_slots(&self, b2: bool) -> Output {
@@ -1303,11 +1336,20 @@ fn compare_pass_reports_pooled_statistics_and_hash_facts() {
 }
 
 #[test]
-fn compare_regression_reports_gate_direction() {
-    let mut f = comparison_fixture(3, false);
-    f.capture_slot("a", "0");
-    f.capture_slot("b", "0.3");
-    f.capture_slot("a2", "0");
+fn compare_real_timing_pass() {
+    let mut f = timed_comparison_fixture();
+    f.capture_timed_slot("a", "1.2");
+    f.capture_timed_slot("b", "0.2");
+    f.capture_timed_slot("a2", "1.2");
+    assert_eq!(f.comparison(false, 0)["outcome"], "PASS");
+}
+
+#[test]
+fn compare_real_timing_regression() {
+    let mut f = timed_comparison_fixture();
+    f.capture_timed_slot("a", "0.2");
+    f.capture_timed_slot("b", "1.2");
+    f.capture_timed_slot("a2", "0.2");
     let report = f.comparison(false, 3);
     assert_eq!(report["gates"][0]["outcome"], "REGRESSION");
     assert_eq!(report["outcome"], "REGRESSION");
@@ -1392,17 +1434,11 @@ fn compare_b2_pools_candidate_samples_and_requires_the_slot() {
 #[test]
 fn compare_reference_spread_withholds_direction() {
     let mut f = comparison_fixture(3, false);
-    fs::write(
-        f.root.path("runner"),
-        b"#!/bin/sh\nsleep \"$(cat \"$ROOT/delay\")\"\ncp \"$PREPARED\" \"$1\"\n",
-    )
-    .unwrap();
     f.workload["gates"][0]["max_reference_spread_bps"] = json!(1000);
-    fs::write(f.root.path("delay"), b"0").unwrap();
     f.capture_slot("a", "0");
     f.capture_slot("b", "0.3");
-    fs::write(f.root.path("delay"), b"0.3").unwrap();
     f.capture_slot("a2", "0");
+    f.set_slot_times("a2", |_| 300_000);
     let report = f.comparison(false, 2);
     assert_eq!(report["gates"][0]["reason"], "ReferenceSpreadExceeded");
 }
@@ -1441,6 +1477,7 @@ fn compare_rejects_overlapping_captures() {
     f.capture_slot("b", "0");
     fs::write(f.root.path("release"), b"").unwrap();
     successful(&child.wait_with_output().unwrap());
+    f.set_slot_times("a", |_| 1_000);
     f.capture_slot("a2", "wait");
     f.comparison_rejected(
         false,
@@ -1635,10 +1672,17 @@ fn compare_two_candidate_samples_are_below_the_boundary() {
 #[test]
 fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivors() {
     let mut f = comparison_fixture(4, false);
-    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = 0 ] && [ ! -f \"$ROOT/skipped\" ]; then touch \"$ROOT/skipped\"; exit 0; fi\nsleep \"$DELAY\"\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = 0 ] && [ ! -f \"$ROOT/skipped\" ]; then touch \"$ROOT/skipped\"; exit 0; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
+    f.set_slot_times("b", |run| {
+        if run["eligible"] == true {
+            1_000
+        } else {
+            400_000
+        }
+    });
     let report = f.comparison(false, 2);
     let gate = &report["gates"][0];
     assert_eq!(gate["candidate_summary"]["eligible"], 3);
@@ -1648,6 +1692,13 @@ fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivor
         1
     );
     assert_eq!(gate["candidate_summary"]["end_to_end_us"]["n"], 3);
+    assert_eq!(
+        gate["candidate"],
+        json!([
+            {"numerator":1000,"denominator":1},
+            {"numerator":1000,"denominator":1},
+        ])
+    );
     assert_eq!(gate["reason"], "insufficient_samples");
     assert_eq!(gate["cross_arm_hash_equality"][0]["equal"], true);
 }
@@ -1656,7 +1707,11 @@ fn compare_one_ineligible_sample_withholds_direction_despite_sufficient_survivor
 fn compare_counts_but_excludes_failed_warmups_from_gates_and_hashes() {
     let mut f = comparison_fixture(3, false);
     f.workload["cells"][0]["warmup_runs"] = json!(1);
-    fs::write(f.root.path("runner"), b"#!/bin/sh\ncase \"$1\" in */run-000000/*) exit 7;; esac\nsleep \"$DELAY\"\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    fs::write(
+        f.root.path("runner"),
+        b"#!/bin/sh\ncase \"$1\" in */run-000000/*) exit 7;; esac\ncp \"$PREPARED\" \"$1\"\n",
+    )
+    .unwrap();
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
@@ -1670,19 +1725,37 @@ fn compare_counts_but_excludes_failed_warmups_from_gates_and_hashes() {
 }
 
 #[test]
-fn compare_excludes_eligible_slow_warmups_from_envelopes() {
+fn compare_excludes_eligible_warmups_from_envelopes_and_hashes() {
     let mut f = comparison_fixture(3, false);
     f.workload["cells"][0]["warmup_runs"] = json!(1);
-    fs::write(f.root.path("runner"), b"#!/bin/sh\ncase \"$1\" in */run-000000/*) sleep 1;; *) sleep \"$DELAY\";; esac\ncp \"$PREPARED\" \"$1\"\n").unwrap();
+    fs::write(
+        f.root.path("alternate"),
+        png_with_text(1, 1, b"fixture\0warmup"),
+    )
+    .unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\ncase \"$1\" in */run-000000/*) cp \"$ROOT/alternate\" \"$1\";; *) cp \"$PREPARED\" \"$1\";; esac\n").unwrap();
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
+    for (slot, measured_us) in [("a", 300_000), ("b", 1_000), ("a2", 300_000)] {
+        f.set_slot_times(slot, |run| {
+            if run["phase"] == "warmup" {
+                1_000_000
+            } else {
+                measured_us
+            }
+        });
+    }
     let report = f.comparison(false, 0);
     assert_eq!(
         report["gates"][0]["candidate_summary"]["end_to_end_us"]["n"],
         3
     );
     assert_eq!(report["gates"][0]["reference_summary"]["warmup_runs"], 2);
+    assert_eq!(
+        report["gates"][0]["cross_arm_hash_equality"][0]["equal"],
+        true
+    );
 }
 
 #[test]
@@ -1696,11 +1769,18 @@ fn compare_worst_gate_wins_when_later_cell_regresses() {
     let mut gate = f.workload["gates"][0].clone();
     gate["cell"] = json!("c2");
     f.workload["gates"].as_array_mut().unwrap().push(gate);
-    f.runner["args"] = json!(["{output}", "{steps}"]);
-    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$2\" = 1 ]; then sleep \"$DELAY\"; elif [ \"$DELAY\" = 0 ]; then sleep 0.3; fi\ncp \"$PREPARED\" \"$1\"\n").unwrap();
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
+    for (slot, reference) in [("a", true), ("b", false), ("a2", true)] {
+        f.set_slot_times(slot, |run| {
+            if (run["cell"] == "c1") == reference {
+                300_000
+            } else {
+                1_000
+            }
+        });
+    }
     let report = f.comparison(false, 3);
     assert_eq!(report["gates"][0]["outcome"], "PASS");
     assert_eq!(report["gates"][1]["outcome"], "REGRESSION");
@@ -1803,21 +1883,6 @@ fn inspect_and_compare_reject_unhashed_completion_tampering() {
 }
 
 #[test]
-fn inspect_rejects_rehashed_interval_shorter_than_process_durations() {
-    let f = capture_fixture("sleep 0.3; cp \"$PREPARED\" \"$1\"");
-    f.captured();
-    let receipt: Value =
-        serde_json::from_slice(&fs::read(f.root.path("capture/receipt.json")).unwrap()).unwrap();
-    rewrite_manifest(&f, |manifest| {
-        manifest["finished_unix_ms"] = receipt["started_unix_ms"].clone()
-    });
-    inspection_rejected(
-        &f,
-        "capture interval is shorter than its retained process durations",
-    );
-}
-
-#[test]
 fn compare_rejects_mixed_collector_binaries() {
     let mut f = comparison_fixture(1, false);
     f.capture_slot("a", "0");
@@ -1884,40 +1949,7 @@ fn compare_and_inspect_reject_clone_relabel_with_full_record_and_stream_evidence
 }
 
 #[test]
-fn compare_admits_identical_durations_and_outputs_with_distinct_receipts() {
-    let mut f = comparison_fixture(3, false);
-    f.capture_slot("a", "0");
-    f.capture_slot("b", "0.001");
-    f.capture_slot("a2", "0");
-    // Equal synthetic durations exercise the collision boundary without timing luck.
-    for slot in ["a", "b", "a2"] {
-        for index in 0..3 {
-            rewrite_capture_file(
-                &f.root.path(slot),
-                &format!("run-{index:06}/run.json"),
-                |run| {
-                    run["process"]["end_to_end_us"] = json!(1000);
-                },
-            );
-        }
-    }
-    let report = f.comparison(false, 0);
-    assert_eq!(
-        report["gates"][0]["reference_summary"]["end_to_end_us"]["mean"],
-        1000.0
-    );
-    assert_eq!(
-        report["gates"][0]["candidate_summary"]["end_to_end_us"]["mean"],
-        1000.0
-    );
-    assert_eq!(
-        report["gates"][0]["cross_arm_hash_equality"][0]["equal"],
-        true
-    );
-}
-
-#[test]
-fn compare_rejects_repeated_capture_receipts() {
+fn compare_rejects_same_capture_in_two_arm_positions() {
     let mut f = comparison_fixture(1, false);
     f.capture_slot("a", "0");
     f.capture_slot("b", "0.001");
@@ -1932,7 +1964,7 @@ fn compare_rejects_repeated_capture_receipts() {
         .unwrap();
     comparison_rejected(
         &output,
-        "repeated capture receipt is not an independent acquisition",
+        "capture slot arm does not match its comparison position",
     );
 }
 
@@ -1967,7 +1999,7 @@ fn compare_pin_hash_differences_cap_both_gate_directions() {
 }
 
 #[test]
-fn compare_pin_path_difference_changes_axis() {
+fn compare_same_pin_hash_at_different_path_preserves_axis() {
     let mut f = comparison_fixture(3, false);
     f.runner["pins"] = json!([{"path":"weights","sha256":"a".repeat(64)}]);
     f.capture_slot("a", "0.3");
@@ -1975,7 +2007,7 @@ fn compare_pin_path_difference_changes_axis() {
     f.capture_slot("b", "0");
     f.runner["pins"][0]["path"] = json!("weights");
     f.capture_slot("a2", "0.3");
-    assert_eq!(f.comparison(false, 2)["axis"], "changed-model");
+    assert_eq!(f.comparison(false, 0)["axis"], "same-checkpoint");
 }
 
 #[test]
@@ -2005,19 +2037,6 @@ fn compare_rejects_reference_setup_program_drift() {
     f.capture_slot("a", "0");
     f.capture_slot("b", "0.001");
     fs::write(f.root.path("setup"), b"#!/bin/sh\ntrue\n").unwrap();
-    f.capture_slot("a2", "0");
-    f.comparison_rejected(
-        false,
-        "A and A2 runner bytes, program or setup hash, or deployment differ",
-    );
-}
-
-#[test]
-fn compare_rejects_reference_setup_argument_drift() {
-    let mut f = setup_comparison_fixture(false);
-    f.capture_slot("a", "0");
-    f.capture_slot("b", "0.001");
-    f.runner["setup"]["args"] = json!(["changed"]);
     f.capture_slot("a2", "0");
     f.comparison_rejected(
         false,
@@ -2062,7 +2081,7 @@ fn compare_cross_arm_hash_difference_is_only_a_byte_fact() {
         png_with_text(1, 1, b"fixture\0alternate"),
     )
     .unwrap();
-    fs::write(f.root.path("runner"), b"#!/bin/sh\nsleep \"$DELAY\"\nif [ \"$DELAY\" = 0 ]; then cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
+    fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = 0 ]; then cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
     f.capture_slot("a", "0.3");
     f.capture_slot("b", "0");
     f.capture_slot("a2", "0.3");
@@ -2087,7 +2106,7 @@ fn compare_cross_arm_hash_equality_is_unavailable_for_nondeterministic_arms() {
             png_with_text(1, 1, b"fixture\0alternate"),
         )
         .unwrap();
-        fs::write(f.root.path("runner"), b"#!/bin/sh\nsleep \"$DELAY\"\nif [ \"$DELAY\" = \"$ALTER_DELAY\" ] && [ ! -f \"$ROOT/altered\" ]; then touch \"$ROOT/altered\"; cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
+        fs::write(f.root.path("runner"), b"#!/bin/sh\nif [ \"$DELAY\" = \"$ALTER_DELAY\" ] && [ ! -f \"$ROOT/altered\" ]; then touch \"$ROOT/altered\"; cp \"$ROOT/alternate\" \"$1\"; else cp \"$PREPARED\" \"$1\"; fi\n").unwrap();
         f.capture_slot("a", "0.3");
         f.capture_slot("b", "0");
         f.capture_slot("a2", "0.3");

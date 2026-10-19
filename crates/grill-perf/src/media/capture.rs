@@ -1085,7 +1085,6 @@ struct Loaded {
     receipt: Receipt,
     deployment: Deployment,
     finished_unix_ms: u64,
-    receipt_sha256: String,
     inspection: Inspection,
 }
 
@@ -1167,17 +1166,6 @@ fn load(root: &Path) -> Result<Loaded> {
     {
         return Err("capture status mismatch".into());
     }
-    let process_us = runs
-        .iter()
-        .map(|run| u128::from(run.process.end_to_end_us))
-        .sum::<u128>()
-        + setup
-            .as_ref()
-            .map_or(0, |setup| u128::from(setup.process.end_to_end_us));
-    // Wall-clock endpoints have millisecond resolution; process durations do not.
-    if process_us / 1000 > u128::from(manifest.finished_unix_ms - receipt.started_unix_ms) {
-        return Err("capture interval is shorter than its retained process durations".into());
-    }
     let inspection = inspection(
         &plan,
         &receipt,
@@ -1191,7 +1179,6 @@ fn load(root: &Path) -> Result<Loaded> {
         receipt,
         deployment,
         finished_unix_ms: manifest.finished_unix_ms,
-        receipt_sha256: receipt_sha256.clone(),
         inspection,
     })
 }

@@ -115,8 +115,9 @@ own cache directory rather than a whole hub.
 Inspect launches nothing and requires no original runner or cache files. It
 rechecks retained hashes, reservations and container validations. Every run record
 binds its capture's receipt digest; inspect rejects records from another receipt.
-Timing count, minimum, median, mean and maximum cover only eligible measured samples; setup,
-warmups and failed samples are excluded. Ineligible counts are grouped by reason.
+Timing count, minimum, median, mean and maximum cover only eligible measured
+samples; setup, warmups and failed samples are excluded. Ineligible counts are
+grouped by reason.
 Determinism is reported by seed among eligible samples, unavailable without a
 repeat. These observations are descriptive, not a comparison verdict.
 
@@ -127,9 +128,8 @@ inside an otherwise completed capture.
 
 Capture completion records require `finished_unix_ms`. The evidence digest covers
 the entire completion record except the digest itself, including status, run
-count and completion time. Inspect rejects missing completion times, completion
-before the receipt's `started_unix_ms`, and intervals shorter than the retained
-process durations at millisecond resolution.
+count and completion time. Inspect rejects missing completion times or completion
+before the receipt's `started_unix_ms`.
 
 ## Compare
 
@@ -139,10 +139,9 @@ grill-perf media compare --a A --b B --a2 A2 [--b2 B2]
 
 Compare fully rechecks every capture through inspect before admitting it.
 All declared slots are required, with matching arms, byte-identical workloads,
-and the same collector binary and platform. Repeated capture receipts are rejected.
-A and A2 must match runner bytes, program and setup-program
-hashes, and deployment; B must differ in at least one of those, and B2 must match B.
-Runner bytes include setup arguments.
+and the same collector binary and platform. A and A2 must match runner bytes,
+program and setup-program hashes, and deployment; B must differ in at least one
+of those, and B2 must match B. Runner bytes include setup arguments.
 
 Comparison requires A to finish no later than B starts, then B2 if declared,
 then A2. This is wall-clock ordering, so clock steps can make it fail closed.
@@ -158,18 +157,19 @@ is INCONCLUSIVE. The worst gate outcome wins (ERROR > REGRESSION >
 INCONCLUSIVE > PASS), before the identity cap.
 
 Equal declared `model_revision` values select `same-checkpoint`, provided that
-when both runners declare pins their sets of `(path, sha256)` match. Different
+when both runners declare pins their sets of SHA-256 hashes match. Different
 revisions or pin sets select `changed-model`: gates remain visible, but the
 overall outcome is INCONCLUSIVE with `changed_model_axis`. Missing model
 identity or incomplete reference deployment declarations also withhold direction.
-The cap never hides an ERROR. Output quality is not compared.
+Output quality is not compared.
 
 The JSON report retains each capture's execution declaration and reports pooled
 sample counts, minimum, median, mean, maximum, ineligible counts by reason and
 within-arm determinism by seed. Seconds per image and images per second derive
 from mean eligible duration and declared image count; they are display values,
 not separate gates. Cross-arm hash equality is only a byte-equality fact; it is
-unavailable if either arm lacks eligible samples for the seed or is nondeterministic.
+unavailable if either arm lacks eligible samples for the seed or is
+nondeterministic.
 Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and
 **3** REGRESSION.
 

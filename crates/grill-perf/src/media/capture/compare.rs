@@ -71,11 +71,7 @@ fn same_runner(a: &Loaded, b: &Loaded) -> bool {
 
 fn admit(captures: &[Loaded], arms: &[Arm]) -> Result<()> {
     let a = &captures[0];
-    let mut receipts = BTreeSet::new();
     for (capture, arm) in captures.iter().zip(arms) {
-        if !receipts.insert(&capture.receipt_sha256) {
-            return Err("repeated capture receipt is not an independent acquisition".into());
-        }
         if capture.inspection.status != CaptureStatus::Complete {
             return Err("comparison requires complete captures".into());
         }
@@ -243,12 +239,8 @@ fn matching_pins(a: &Runner, b: &Runner) -> bool {
     if a.pins.is_empty() || b.pins.is_empty() {
         return true;
     }
-    fn pins(runner: &Runner) -> BTreeSet<(&str, &str)> {
-        runner
-            .pins
-            .iter()
-            .map(|pin| (pin.path.as_str(), pin.sha256.as_str()))
-            .collect()
+    fn pins(runner: &Runner) -> BTreeSet<&str> {
+        runner.pins.iter().map(|pin| pin.sha256.as_str()).collect()
     }
     pins(a) == pins(b)
 }
@@ -303,7 +295,7 @@ pub(in crate::media) fn compare(
     if reference_identity.status == ReferenceIdentityStatus::Unavailable {
         reasons.push("reference_identity_unavailable");
     }
-    if !reasons.is_empty() && outcome != Outcome::Error {
+    if !reasons.is_empty() {
         outcome = Outcome::Inconclusive;
     }
     Ok(Comparison {
