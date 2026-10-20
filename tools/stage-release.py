@@ -116,6 +116,7 @@ PRODUCERS = (
     "tools/kv-v2-pins.json",
     "tools/microbench/exl3_e3_grouped.py",
     "tools/microbench/nccl_allreduce_sum.py",
+    "tools/media/mflux_markers.py",
 )
 EXECUTABLES = {
     "bin/grill-perf", "tools/startup-runtime.py",

@@ -17,6 +17,12 @@ hashes. Retain earlier published releases and their original pins for historical
 studies. Installing v0.9.1 does not reinterpret old receipts or qualify new
 backend claims.
 
+Audio/video media workloads, runner markers and the post-kill pipe-drain fix ship from
+[v0.10.0](RELEASE-NOTES.md#version-0100--audio-video-and-runner-markers).
+That release is in preparation; the download commands remain pinned to the
+published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
+containing these changes until publication.
+
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
 startup, retention and microbench Python modules under `tools/`. Keep all of
