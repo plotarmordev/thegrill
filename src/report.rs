@@ -53,6 +53,13 @@ pub(crate) struct ResultCounts {
 }
 
 impl ResultCounts {
+    fn with_tool_calls(mut self, present: bool) -> Self {
+        if present {
+            self.invalid_tool_call.get_or_insert(0);
+        }
+        self
+    }
+
     fn record(&mut self, result: ResultKind) {
         let count = match result {
             ResultKind::Correct => &mut self.correct,
@@ -76,17 +83,14 @@ impl ResultCounts {
 
 /// Explanation of an observation, not a new grade or evidence promotion.
 pub(crate) fn attempt_result(attempt: &crate::store::LoadedAttempt) -> ResultKind {
-    if matches!(attempt.state, AttemptState::Invalid(_)) {
-        return ResultKind::InvalidEvidence;
-    }
-    if let Some(followup) = &attempt.followup {
-        return attempt_result(followup);
-    }
     let terminal = match &attempt.state {
         AttemptState::Invalid(_) => return ResultKind::InvalidEvidence,
         AttemptState::Terminal(t) => t,
         _ => return ResultKind::OtherUngraded,
     };
+    if let Some(followup) = &attempt.followup {
+        return attempt_result(followup);
+    }
     let stop = attempt
         .recovered_metadata
         .as_ref()
@@ -311,10 +315,6 @@ impl PairTally {
         self.right_results.record(right.result);
         record_tool_call(&mut self.left_tool_calls, left.tool_call, left.outcome);
         record_tool_call(&mut self.right_tool_calls, right.tool_call, right.outcome);
-        if left.tool_call.is_some() {
-            self.left_results.invalid_tool_call.get_or_insert(0);
-            self.right_results.invalid_tool_call.get_or_insert(0);
-        }
         match (left.outcome, right.outcome) {
             (Outcome::Unknown, _) | (_, Outcome::Unknown) => self.paired.either_unknown += 1,
             (Outcome::Success, Outcome::Success) => self.paired.both_success += 1,
@@ -343,8 +343,12 @@ impl PairTally {
             left,
             right,
             paired: self.paired,
-            left_results: self.left_results,
-            right_results: self.right_results,
+            left_results: self
+                .left_results
+                .with_tool_calls(self.left_tool_calls.is_some()),
+            right_results: self
+                .right_results
+                .with_tool_calls(self.right_tool_calls.is_some()),
             left_tool_calls: self.left_tool_calls,
             right_tool_calls: self.right_tool_calls,
         }
@@ -352,11 +356,6 @@ impl PairTally {
 }
 
 pub(crate) fn compare<'a>(a: &'a Verified, b: &'a Verified) -> Result<Comparison<'a>> {
-    if a.cases.first().is_some_and(|c| c.tool_call.is_some())
-        != b.cases.first().is_some_and(|c| c.tool_call.is_some())
-    {
-        return Err("incompatible legacy and tool-call profiles".into());
-    }
     for (label, left, right) in [
         ("tasks", &a.tasks, &b.tasks),
         ("target", &a.target, &b.target),
@@ -563,6 +562,7 @@ pub(crate) struct InspectedAttempt<'a> {
     pub outcome: Outcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolCall>,
+    // Outer presence marks a tool case; inner presence marks a started follow-up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub followup: Option<Option<Box<InspectedAttempt<'a>>>>,
 }
@@ -657,9 +657,6 @@ pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> 
     let mut usage_coverage = UsageCoverage::default();
     let mut result_counts = ResultCounts::default();
     let mut tool_calls = None;
-    if loaded.pack.version == 5 {
-        result_counts.invalid_tool_call = Some(0);
-    }
     let attempts = loaded
         .pack
         .cases
@@ -715,7 +712,7 @@ pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> 
         usage_status: "unvalidated-provider-snapshot",
         usage_semantics: "last-provider-snapshot-not-complete-or-validated-billing; verified-raw-recovery-for-complete-v1-absent-content; field-coverage-denominator-is-all-cases",
         usage_coverage,
-        result_counts,
+        result_counts: result_counts.with_tool_calls(tool_calls.is_some()),
         lifecycle: None,
         tool_calls,
     }
@@ -916,14 +913,6 @@ mod tests {
         assert_eq!(
             (a.success, a.wrong, a.malformed, a.refused, a.unknown),
             (1, 1, 1, 1, 1)
-        );
-        let mut legacy = fixture(&[Outcome::Success; 4]);
-        let tool_free = fixture(&[Outcome::Success; 4]);
-        legacy.cases[0].tool_call = Some(ToolCall::Absent);
-        assert!(
-            compare(&legacy, &tool_free)
-                .unwrap_err()
-                .contains("legacy and tool-call")
         );
     }
 }

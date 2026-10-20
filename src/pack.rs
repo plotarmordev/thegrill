@@ -227,6 +227,24 @@ fn provenance(source: &CaseProvenance) -> Result<()> {
     Ok(())
 }
 
+/// Shared bounds of the answer and call qualification lists; `what` names the
+/// list in errors.
+fn qualification_shape(q: &Qualification, what: &str) -> Result<()> {
+    if q.valid.is_empty() || q.valid.len() > 128 || q.wrong.is_empty() || q.wrong.len() > 128 {
+        return Err(format!("{what} requires 1..=128 valid and wrong artifacts"));
+    }
+    match q
+        .valid
+        .iter()
+        .chain(&q.wrong)
+        .find(|a| a.len() > ARTIFACT_CAP)
+    {
+        // The label is only built for the error.
+        Some(artifact) => text(artifact, ARTIFACT_CAP, true, &format!("{what} artifact")),
+        None => Ok(()),
+    }
+}
+
 /// Version 5 tool round: declared functions, the expected call and its own
 /// self-qualification through the call grader.
 fn tool(case: &Case) -> Result<()> {
@@ -274,12 +292,7 @@ fn tool(case: &Case) -> Result<()> {
             "case {id}: expected arguments require 1..=16 distinct JSON objects"
         ));
     }
-    if q.valid.is_empty() || q.valid.len() > 128 || q.wrong.is_empty() || q.wrong.len() > 128 {
-        return Err("call qualification requires 1..=128 valid and wrong artifacts".into());
-    }
-    for artifact in q.valid.iter().chain(&q.wrong) {
-        text(artifact, ARTIFACT_CAP, true, "call qualification artifact")?;
-    }
+    qualification_shape(q, "call qualification")?;
     let mut covered = [false; 16];
     for artifact in &q.valid {
         match grade::tool_call(artifact.as_bytes(), tool) {
@@ -393,12 +406,7 @@ pub(crate) fn admit(bytes: &[u8]) -> Result<Pack> {
             }
         }
         let q = &case.qualification;
-        if q.valid.is_empty() || q.valid.len() > 128 || q.wrong.is_empty() || q.wrong.len() > 128 {
-            return Err("qualification requires 1..=128 valid and wrong artifacts".into());
-        }
-        for artifact in q.valid.iter().chain(&q.wrong) {
-            text(artifact, ARTIFACT_CAP, true, "qualification artifact")?;
-        }
+        qualification_shape(q, "qualification")?;
         let mut qualified = HashSet::new();
         for artifact in &q.valid {
             if grade::grade(artifact.as_bytes(), &case.acceptance) != Outcome::Success {
@@ -501,6 +509,15 @@ pub(crate) fn protocol(protocol: &Protocol) -> Result<()> {
                 "known rendering requires template/tokenizer; unknown requires null/omitted".into(),
             );
         }
+    }
+    Ok(())
+}
+
+/// Tool packs (version 5) and the tool-call profile (v3) only pair with each
+/// other, wherever a pack meets a protocol.
+pub(crate) fn tool_profile(pack: &Pack, protocol: &Protocol) -> Result<()> {
+    if (pack.version == 5) != (protocol.profile == Profile::DeclaredChatCompletionsV3) {
+        return Err("tool packs require profile v3 and profile v3 requires a tool pack".into());
     }
     Ok(())
 }
@@ -944,10 +961,18 @@ mod tests {
                 "{field}"
             );
         }
-        let decoy = serde_json::json!({"name":"decoy","description":"d","parameters":{}});
+        // Nine distinct, otherwise valid declarations that keep the expected
+        // function, so only the count bound can reject them.
+        let mut nine = wire["cases"][0]["tool"]["functions"]
+            .as_array()
+            .unwrap()
+            .clone();
+        nine.extend((0..7).map(
+            |i| serde_json::json!({"name":format!("decoy{i}"),"description":"d","parameters":{}}),
+        ));
         let mut rejected: Vec<(&str, serde_json::Value)> = vec![
             ("/tool/functions", serde_json::json!([])),
-            ("/tool/functions", serde_json::Value::Array(vec![decoy; 9])),
+            ("/tool/functions", nine.into()),
             ("/tool/functions/1/name", "lookup_invoice".into()),
             ("/tool/functions/1/name", "lookup customer".into()),
             ("/tool/functions/1/name", "".into()),

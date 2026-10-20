@@ -339,7 +339,6 @@ pub(crate) struct LoadedAttempt {
     pub call: Option<String>,
     pub tool_call: Option<ToolCall>,
     pub followup: Option<Box<LoadedAttempt>>,
-    replay: Option<(String, usize)>,
     pub outcome: Outcome,
     pub recovered_metadata: Option<CompletionMetadata>,
 }
@@ -432,9 +431,10 @@ fn terminal_consistent(t: &Terminal, stream: bool, protocol: &Protocol) -> bool 
                     matches!(
                         t.stop,
                         Some(Finish::Stop | Finish::Length | Finish::ToolCalls)
-                    ) && t.final_artifact.is_none()
+                    )
                 } else {
-                    matches!(t.stop, Some(Finish::Stop | Finish::Length))
+                    (matches!(t.stop, Some(Finish::Stop | Finish::Length))
+                        || (t.version == 3 && t.stop == Some(Finish::ToolCalls)))
                         && t.final_artifact.is_some()
                 }
                 && (stream == body.terminal_offset.is_some())
@@ -470,8 +470,10 @@ fn terminal_consistent(t: &Terminal, stream: bool, protocol: &Protocol) -> bool 
         && (protocol.profile != Profile::DeclaredChatCompletionsV3 || t.version == 3)
         && (t.stop != Some(Finish::ToolCalls)
             || (t.version == 3
-                && (t.call.is_some()
-                    || matches!(t.reason, Reason::Refused | Reason::UnsupportedResponse))))
+                && matches!(
+                    t.reason,
+                    Reason::Committed | Reason::Refused | Reason::UnsupportedResponse
+                )))
         && t.call.as_ref().is_none_or(|c| {
             t.version == 3
                 && !stream
@@ -569,7 +571,7 @@ fn load_artifacts(
     terminal: &Terminal,
     case: &Case,
     loaded: &mut LoadedAttempt,
-) -> Result<(), &'static str> {
+) -> Result<Option<(String, usize)>, &'static str> {
     if terminal.version == 3
         && ((terminal.call.is_none() && exists(&dir.join("call.json")))
             || (terminal.final_artifact.is_none() && exists(&dir.join("final.txt"))))
@@ -615,11 +617,11 @@ fn load_artifacts(
         };
         if validity == ToolCall::Valid {
             let record =
-                transport::call_record(&bytes).map_err(|_| "validated call cannot be replayed")?;
-            loaded.replay = Some((
+                transport::call_record(&bytes).ok_or("validated call cannot be replayed")?;
+            return Ok(Some((
                 record.id,
                 alternative.ok_or("valid call has no alternative")?,
-            ));
+            )));
         }
     } else if loaded.tool_call.is_some()
         && (terminal.commitment == Commitment::Committed
@@ -627,10 +629,10 @@ fn load_artifacts(
     {
         loaded.tool_call = Some(ToolCall::Absent);
     }
-    Ok(())
+    Ok(None)
 }
 
-struct ExchangeProjection<'a> {
+struct ExchangeInput<'a> {
     attempt: u32,
     case: &'a Case,
     input: &'a str,
@@ -640,8 +642,12 @@ struct ExchangeProjection<'a> {
     calls: bool,
 }
 
-fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> LoadedAttempt {
-    let ExchangeProjection {
+fn load_exchange(
+    dir: &Path,
+    exchange: ExchangeInput<'_>,
+    raw: bool,
+) -> (LoadedAttempt, Option<(String, usize)>) {
+    let ExchangeInput {
         attempt,
         case,
         input,
@@ -649,7 +655,7 @@ fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> L
         plan_digest,
         body: expected_body,
         calls,
-    } = projection;
+    } = exchange;
     let mut loaded = LoadedAttempt {
         attempt,
         state: AttemptState::NotStarted,
@@ -657,18 +663,17 @@ fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> L
         terminal: None,
         artifact: None,
         call: None,
-        tool_call: (calls && case.tool.is_some()).then_some(ToolCall::Unknown),
+        tool_call: calls.then_some(ToolCall::Unknown),
         followup: None,
-        replay: None,
         outcome: Outcome::Unknown,
         recovered_metadata: None,
     };
     let invalid = |mut loaded: LoadedAttempt, what: &'static str| {
         loaded.state = AttemptState::Invalid(what);
-        loaded
+        (loaded, None)
     };
     if !exists(dir) {
-        return loaded;
+        return (loaded, None);
     }
     if directory(dir).is_err() {
         return invalid(loaded, "attempt entry is not a nonsymlink directory");
@@ -678,7 +683,7 @@ fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> L
         // Only an empty pre-reservation crash directory is honestly not started;
         // any surviving evidence without its reservation is corruption.
         return match fs::read_dir(dir).map(|mut entries| entries.next().is_none()) {
-            Ok(true) => loaded,
+            Ok(true) => (loaded, None),
             _ => invalid(loaded, "evidence without a reservation"),
         };
     }
@@ -711,7 +716,7 @@ fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> L
     let terminal_path = dir.join("terminal.json");
     if !exists(&terminal_path) {
         loaded.state = AttemptState::Unresolved;
-        return loaded;
+        return (loaded, None);
     }
     let Ok(terminal_bytes) = read(&terminal_path, TERMINAL_CAP) else {
         return invalid(loaded, "terminal unreadable, nonregular or oversized");
@@ -754,12 +759,13 @@ fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> L
             Err(_) => return invalid(loaded, "raw body evidence missing or mismatched"),
         }
     }
-    if let Err(why) = load_artifacts(dir, &terminal, case, &mut loaded) {
-        return invalid(loaded, why);
-    }
+    let replay = match load_artifacts(dir, &terminal, case, &mut loaded) {
+        Ok(replay) => replay,
+        Err(why) => return invalid(loaded, why),
+    };
     loaded.terminal = Some(identity::bytes("terminal-source", &terminal_bytes));
     loaded.state = AttemptState::Terminal(Box::new(terminal));
-    loaded
+    (loaded, replay)
 }
 
 fn load_attempt(
@@ -771,35 +777,34 @@ fn load_attempt(
     plan_digest: &str,
     raw: bool,
 ) -> LoadedAttempt {
-    let mut loaded = load_exchange(
+    let (mut loaded, replay) = load_exchange(
         dir,
-        ExchangeProjection {
+        ExchangeInput {
             attempt,
             case,
             input,
             plan,
             plan_digest,
-            body: transport::request_body(&plan.system.model, case, &plan.protocol).ok(),
+            body: transport::request_body(&plan.system.model, case, &plan.protocol, None).ok(),
             calls: case.tool.is_some(),
         },
         raw,
     );
-    if let Some((id, alternative)) = loaded.replay.take() {
+    if let Some((id, alternative)) = replay {
         let followup_dir = dir.join("followup");
-        let followup = load_exchange(
+        let (followup, _) = load_exchange(
             &followup_dir,
-            ExchangeProjection {
+            ExchangeInput {
                 attempt,
                 case,
                 input,
                 plan,
                 plan_digest,
-                body: transport::followup_body(
+                body: transport::request_body(
                     &plan.system.model,
                     case,
                     &plan.protocol,
-                    &id,
-                    alternative,
+                    Some((&id, alternative)),
                 )
                 .ok(),
                 calls: false,
@@ -837,9 +842,7 @@ pub(crate) fn load(path: &Path) -> Result<Loaded> {
     }
     pack::system(&plan.system)?;
     pack::protocol(&plan.protocol)?;
-    if (pack.version == 5) != (plan.protocol.profile == Profile::DeclaredChatCompletionsV3) {
-        return Err("tool pack and protocol profile disagree".into());
-    }
+    pack::tool_profile(&pack, &plan.protocol)?;
     // The bound endpoint and fixed transport declaration are recomputed from
     // the plan's own system/protocol, so a plan cannot describe a client that
     // this binary would not have built.
@@ -1110,7 +1113,7 @@ pub(crate) fn regrade(run: &Path, out: &Path) -> Result<RunView> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn protocol() -> Protocol {
@@ -1140,7 +1143,7 @@ mod tests {
         }
     }
 
-    fn terminal(body: &[u8], call: &[u8]) -> Terminal {
+    pub(crate) fn terminal(body: &[u8], call: &[u8]) -> Terminal {
         Terminal {
             version: 3,
             attempt: 0,
@@ -1239,5 +1242,161 @@ mod tests {
             &protocol,
             true
         ));
+    }
+
+    #[test]
+    fn direct_answer_with_tool_calls_stop_remains_gradeable() {
+        let protocol = protocol();
+        for content in [r#"{"total":22}"#, ""] {
+            for calls in ["[]", "null"] {
+                let body = format!(
+                    r#"{{"choices":[{{"message":{{"content":{},"tool_calls":{calls}}},"finish_reason":"tool_calls"}}]}}"#,
+                    serde_json::to_string(content).unwrap()
+                );
+                let mut terminal = terminal(body.as_bytes(), b"");
+                terminal.call = None;
+                terminal.final_artifact = Some(Artifact {
+                    bytes: content.len() as u64,
+                    sha256: identity::sha256(content.as_bytes()),
+                });
+                assert!(terminal_consistent(&terminal, false, &protocol));
+                assert!(delivery_matches(
+                    &terminal,
+                    body.as_bytes(),
+                    &protocol,
+                    true
+                ));
+                terminal.version = 2;
+                assert!(!terminal_consistent(&terminal, false, &protocol));
+            }
+        }
+    }
+
+    fn tool_fixture(call: &str) -> (Pack, Vec<String>, Plan) {
+        let pack_bytes = serde_json::to_vec(&serde_json::json!({
+            "version":5, "label":"synthetic", "worlds":["w"], "groups":["g"],
+            "cases":[{
+                "id":"synthetic", "world":"w", "group":"g",
+                "messages":[{"role":"user","content":"Look up the fixture."}],
+                "acceptance":{"kind":"json-exact","expected":{"total":22}},
+                "qualification":{"valid":["{\"total\":22}"],"wrong":["{\"total\":21}"]},
+                "provenance":{
+                    "repository":"https://example.org/tests", "revision":"a".repeat(40),
+                    "path":"synthetic.json", "sha256":"b".repeat(64), "item_id":"synthetic",
+                    "license":"Original synthetic fixture", "changes":["Synthetic test"]
+                },
+                "tool":{
+                    "functions":[{"name":"lookup","description":"Read the fixture.","parameters":{"type":"object"}}],
+                    "expected":{"name":"lookup","arguments":[{}]}, "result":"{\"total\":22}"
+                },
+                "call_qualification":{"valid":[call],"wrong":["[]"]}
+            }]
+        })).unwrap();
+        let pack = pack::admit(&pack_bytes).unwrap();
+        let (identities, inputs) = identity::pack(&pack, &pack_bytes).unwrap();
+        let plan = Plan {
+            version: 1,
+            claim: PlanClaim::ClientCollectionIntentNotAuthenticatedExecution,
+            pack: identities,
+            cases: 1,
+            system: System {
+                name: "fixture".into(),
+                model: "fixture".into(),
+                endpoint: Some("http://127.0.0.1:1/v1/chat/completions".into()),
+            },
+            protocol: protocol(),
+            transport: transport::plan_transport(true, false, None),
+            provenance: Provenance {
+                grill: "fixture".into(),
+                lockfile: String::new(),
+                os: "linux".into(),
+                arch: "fixture".into(),
+                started_unix_ms: 0,
+                pid: 0,
+            },
+            bound_bytes: 0,
+        };
+        (pack, inputs, plan)
+    }
+
+    #[test]
+    fn followup_rejects_call_artifact_without_raw_body_replay() {
+        let call =
+            r#"[{"id":"c","type":"function","function":{"name":"lookup","arguments":"{}"}}]"#;
+        let (pack, inputs, plan) = tool_fixture(call);
+        let case = &pack.cases[0];
+        let body =
+            transport::request_body(&plan.system.model, case, &plan.protocol, Some(("c", 0)))
+                .unwrap();
+        let reservation = Reservation {
+            version: 1,
+            attempt: 0,
+            case_id: case.id.clone(),
+            input: inputs[0].clone(),
+            plan: "fixture-plan".into(),
+            endpoint: plan.system.endpoint.clone().unwrap(),
+            method: "POST".into(),
+            headers: transport::headers(false),
+            auth_env: None,
+            request: identity::bytes("request", body.as_bytes()),
+            body: body.clone(),
+            started_unix_ms: 0,
+        };
+        let reservation_bytes = serde_json::to_vec(&reservation).unwrap();
+        let mut terminal = terminal(b"", call.as_bytes());
+        terminal.input = inputs[0].clone();
+        terminal.reservation = identity::bytes("reservation-source", &reservation_bytes);
+        terminal.request = reservation.request;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = loop {
+            let path = std::env::temp_dir().join(format!(
+                "grill-store-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => break Scratch(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("fixture directory: {error}"),
+            }
+        };
+        write_new(&scratch.0.join("reservation.json"), &reservation_bytes).unwrap();
+        write_new(
+            &scratch.0.join("terminal.json"),
+            &serde_json::to_vec(&terminal).unwrap(),
+        )
+        .unwrap();
+        write_new(&scratch.0.join("call.json"), call.as_bytes()).unwrap();
+        for calls in [true, false] {
+            let (loaded, replay) = load_exchange(
+                &scratch.0,
+                ExchangeInput {
+                    attempt: 0,
+                    case,
+                    input: &inputs[0],
+                    plan: &plan,
+                    plan_digest: "fixture-plan",
+                    body: Some(body.clone()),
+                    calls,
+                },
+                false,
+            );
+            if calls {
+                assert!(matches!(loaded.state, AttemptState::Terminal(_)));
+                assert_eq!(replay, Some(("c".into(), 0)));
+            } else {
+                assert!(matches!(
+                    loaded.state,
+                    AttemptState::Invalid("terminal is physically or semantically contradictory")
+                ));
+                assert!(replay.is_none());
+            }
+        }
     }
 }

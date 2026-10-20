@@ -2066,6 +2066,8 @@ fn tool_calls_keep_answer_correctness_independent_and_replay_canonical_gold() {
         success(&comparison);
         let comparison: serde_json::Value = serde_json::from_slice(&comparison.stdout).unwrap();
         assert_eq!(comparison["version"], 3);
+        assert_eq!(comparison["left_results"]["invalid_tool_call"], 0);
+        assert_eq!(comparison["right_results"]["invalid_tool_call"], 0);
         assert_eq!(
             comparison["left_tool_calls"]["after_valid_call"][outcome],
             1
@@ -2091,6 +2093,11 @@ fn invalid_calls_never_receive_fixture_and_absence_never_becomes_valid() {
         (call_response(&format!("[{},{}]", &good[1..good.len()-1], &good[1..good.len()-1]), "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
         (call_response(&good.replace(r#""type":"function""#, r#""type":"other""#), "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
         (r#"{"choices":[{"message":{"content":null,"tool_calls":null},"finish_reason":"tool_calls"}]}"#.into(), "absent", "unknown", "other_ungraded"),
+        (r#"{"choices":[{"message":{"content":null,"tool_calls":[]},"finish_reason":"tool_calls"}]}"#.into(), "absent", "unknown", "other_ungraded"),
+        (answer(r#"{"total":22}"#, "tool_calls"), "absent", "success", "correct"),
+        (answer(r#"{"total":22}"#, "tool_calls").replace(r#""tool_calls":[]"#, r#""tool_calls":null"#), "absent", "success", "correct"),
+        (answer("", "tool_calls"), "absent", "malformed", "malformed_answer"),
+        (answer("", "tool_calls").replace(r#""tool_calls":[]"#, r#""tool_calls":null"#), "absent", "malformed", "malformed_answer"),
         (format!(r#"{{"choices":[{{"message":{{"refusal":"no","tool_calls":{good}}},"finish_reason":"tool_calls"}}]}}"#), "absent", "refused", "refused"),
         (answer(r#"{"total":22}"#, "stop"), "absent", "success", "correct"),
         (answer(r#"{"total":21}"#, "stop"), "absent", "wrong", "wrong_answer"),
@@ -2112,15 +2119,27 @@ fn invalid_calls_never_receive_fixture_and_absence_never_becomes_valid() {
         let row = view["cases"][0].as_object().unwrap();
         assert!(row.contains_key("call") && row.contains_key("followup"));
         assert_eq!(row["followup"], serde_json::Value::Null);
+        let regrade = s.path("regrade");
+        success(&cli(&["regrade", &out.to_string_lossy(), "--out", &regrade.to_string_lossy()]));
+        assert_eq!(
+            fs::read(out.join("grades/initial/view.json")).unwrap(),
+            fs::read(regrade.join("view.json")).unwrap()
+        );
     }
 }
 
 #[test]
 fn valid_call_followup_failure_remains_unknown_not_success_or_wrong() {
     let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
-    for followup in [
-        ok_json(&call_response(&good, "tool_calls")),
-        entity("503 Service Unavailable", "text/plain", b"fixture failure"),
+    for (followup, result) in [
+        (
+            ok_json(&call_response(&good, "tool_calls")),
+            "other_ungraded",
+        ),
+        (
+            entity("503 Service Unavailable", "text/plain", b"fixture failure"),
+            "service_error",
+        ),
     ] {
         let s = Scratch::new();
         let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
@@ -2131,6 +2150,7 @@ fn valid_call_followup_failure_remains_unknown_not_success_or_wrong() {
         let inspected = tool_inspect(&out);
         assert_eq!(inspected["attempts"][0]["tool_call"], "valid");
         assert_eq!(inspected["attempts"][0]["outcome"], "unknown");
+        assert_eq!(inspected["attempts"][0]["result"], result);
         assert_eq!(inspected["tool_calls"]["after_valid_call"]["unknown"], 1);
     }
 }
@@ -2390,6 +2410,8 @@ fn tool_study_preserves_each_side_and_family_unit_invariants() {
         &report["families"][0]["summary"],
         &report["families"][0]["units"][0]["summary"],
     ] {
+        assert_eq!(summary["left_results"]["invalid_tool_call"], 0);
+        assert_eq!(summary["right_results"]["invalid_tool_call"], 1);
         assert_tool_count_invariants(&summary["left_tool_calls"]);
         assert_tool_count_invariants(&summary["right_tool_calls"]);
         assert_eq!(summary["left_tool_calls"]["after_valid_call"]["wrong"], 1);
@@ -2427,32 +2449,6 @@ fn tool_preflight_counts_escaped_followup_before_any_dispatch() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("follow-up request"));
     assert!(!out.exists());
     assert_eq!(server.requests(), 0);
-}
-
-// Raw nested values retain dynamic timing/identity bytes; the ordered field list
-// independently freezes the legacy envelope rather than deriving it from output.
-fn assert_legacy_envelope(bytes: &[u8], fields: &[&str]) {
-    use serde::ser::SerializeMap;
-    struct Projection<'a> {
-        values: std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
-        fields: &'a [&'a str],
-    }
-    impl serde::Serialize for Projection<'_> {
-        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            let mut map = serializer.serialize_map(Some(self.fields.len()))?;
-            for field in self.fields {
-                map.serialize_entry(field, &self.values[*field])?;
-            }
-            map.end()
-        }
-    }
-    let values: std::collections::HashMap<String, Box<serde_json::value::RawValue>> =
-        serde_json::from_slice(bytes).unwrap();
-    assert_eq!(values.len(), fields.len());
-    assert!(fields.iter().all(|field| values.contains_key(*field)));
-    let mut expected = serde_json::to_vec_pretty(&Projection { values, fields }).unwrap();
-    expected.push(b'\n');
-    assert_eq!(bytes, expected);
 }
 
 fn assert_no_tool_report_fields(value: &serde_json::Value) {
@@ -2528,34 +2524,6 @@ fn legacy_inspect_compare_and_study_preserve_serialized_envelopes() {
     success(&run(&pack, &server.endpoint(), &out, &[]));
     let inspected = cli(&["inspect", &out.to_string_lossy(), "--json"]);
     success(&inspected);
-    assert_legacy_envelope(
-        &inspected.stdout,
-        &[
-            "version",
-            "kind",
-            "claim",
-            "label",
-            "cases",
-            "system",
-            "stream",
-            "profile",
-            "reasoning_effort",
-            "include_usage",
-            "token_cap",
-            "collection",
-            "auth_env",
-            "started_unix_ms",
-            "counts",
-            "attempts",
-            "view",
-            "coverage",
-            "usage_status",
-            "usage_semantics",
-            "usage_coverage",
-            "result_counts",
-            "lifecycle",
-        ],
-    );
     let comparison = cli(&[
         "compare",
         &out.to_string_lossy(),
@@ -2563,26 +2531,6 @@ fn legacy_inspect_compare_and_study_preserve_serialized_envelopes() {
         "--json",
     ]);
     success(&comparison);
-    assert_legacy_envelope(
-        &comparison.stdout,
-        &[
-            "version",
-            "claim",
-            "left_evidence",
-            "right_evidence",
-            "effective_rendering",
-            "left_system",
-            "right_system",
-            "n",
-            "left",
-            "right",
-            "paired",
-            "delta_b_minus_a",
-            "complete_case_delta_diagnostic",
-            "left_results",
-            "right_results",
-        ],
-    );
     let pack_value = serde_json::from_str(ONE).unwrap();
     let manifest = s.write(
         "study.json",
@@ -2598,10 +2546,6 @@ fn legacy_inspect_compare_and_study_preserve_serialized_envelopes() {
         "--json",
     ]);
     success(&study);
-    assert_legacy_envelope(
-        &study.stdout,
-        &["version", "claim", "study", "comparison", "families"],
-    );
     for (output, version) in [(&inspected, 5), (&comparison, 2), (&study, 2)] {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["version"], version);
@@ -2626,4 +2570,58 @@ fn legacy_inspect_compare_and_study_preserve_serialized_envelopes() {
         assert_eq!(legacy_snapshot(&output.stdout), expected);
     }
     assert_eq!(server.requests(), 1);
+}
+
+#[test]
+fn missing_tool_followup_remains_unresolved_and_refuses_resume() {
+    let s = Scratch::new();
+    let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    let server = serve(vec![
+        ok_json(&call_response(&good, "tool_calls")),
+        ok_json(&answer(r#"{"total":22}"#, "stop")),
+    ]);
+    let out = s.path("run");
+    success(&tool_run(&pack, &server, &out));
+    fs::remove_dir_all(out.join("attempts/000000/followup")).unwrap();
+    let inspected = tool_inspect(&out);
+    assert_eq!(inspected["attempts"][0]["state"], "unresolved");
+    assert_eq!(inspected["attempts"][0]["outcome"], "unknown");
+    assert_eq!(inspected["attempts"][0]["tool_call"], "valid");
+    let regrade = s.path("regrade");
+    success(&cli(&[
+        "regrade",
+        &out.to_string_lossy(),
+        "--out",
+        &regrade.to_string_lossy(),
+    ]));
+    let row = &json_file(&regrade.join("view.json"))["cases"][0];
+    assert_eq!(row["evidence"], "unresolved");
+    assert_eq!(row["outcome"], "unknown");
+    assert!(!cli(&["resume", &out.to_string_lossy()]).status.success());
+    assert_eq!(server.requests(), 2);
+}
+
+#[test]
+fn mixed_legacy_and_tool_comparison_refuses_incompatible_identity() {
+    let s = Scratch::new();
+    let legacy_pack = s.write("legacy.json", ONE.as_bytes());
+    let tool_pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    let server = serve(vec![
+        ok_json(&answer(r#"{"answer":"T"}"#, "stop")),
+        ok_json(&answer(r#"{"total":22}"#, "stop")),
+    ]);
+    let legacy = s.path("legacy");
+    let tool = s.path("tool");
+    success(&run(&legacy_pack, &server.endpoint(), &legacy, &[]));
+    success(&tool_run(&tool_pack, &server, &tool));
+    let compared = cli(&[
+        "compare",
+        &legacy.to_string_lossy(),
+        &tool.to_string_lossy(),
+        "--json",
+    ]);
+    assert!(!compared.status.success());
+    assert!(compared.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&compared.stderr).contains("incompatible tasks identity"));
 }

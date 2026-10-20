@@ -159,7 +159,7 @@ pub(crate) fn grade(artifact: &[u8], acceptance: &Acceptance) -> Outcome {
 /// alternative in pack order is returned. Callers settle a length-stopped call
 /// as malformed without grading it.
 pub(crate) fn tool_call(call: &[u8], tool: &ToolTask) -> (ToolCall, Option<usize>) {
-    let Ok(record) = crate::transport::call_record(call) else {
+    let Some(record) = crate::transport::call_record(call) else {
         return (ToolCall::Malformed, None);
     };
     match serde_json::from_str::<atlas::ExactJson>(&record.arguments) {

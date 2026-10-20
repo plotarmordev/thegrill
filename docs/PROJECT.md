@@ -443,7 +443,7 @@ The relation is `tool-call-exact-arguments-v1`, implementation `grill-tool-call-
 |---|---|---|
 | Uncommitted, unresolved or not started | `unknown` | `unknown`; no result sent |
 | Refusal or content filter | `absent` | `refused`; refusal takes precedence |
-| No call (including null or an empty array) | `absent` | Grade the direct answer normally; missing final content remains unknown |
+| No call (including null or an empty array, even with a `tool_calls` stop) | `absent` | Retain the observed stop and grade the direct answer normally; missing final content remains unknown |
 | Wrong function name or argument values | `wrong` | `wrong`; no result sent |
 | Bad call shape | `malformed` | `malformed`; no result sent |
 | Any call under a length stop | `malformed` | Existing `output_limit` handling; never accepted or followed up |

@@ -764,7 +764,10 @@ pub(crate) struct Terminal {
 }
 
 /// A field of a newer record version: absent from older versions, required
-/// (possibly null) in its own.
+/// (possibly null) in its own. The version gate is applied while parsing, on
+/// purpose: older records keep their exact bytes and field order, and any
+/// spelling of a newer field in them (null included) is a closed-schema
+/// error before any consistency check runs.
 #[derive(Default)]
 enum Slot<T> {
     #[default]

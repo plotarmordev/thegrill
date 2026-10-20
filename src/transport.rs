@@ -398,9 +398,14 @@ impl Write for Counter {
 }
 
 /// Encoded size without allocating the body; used by zero-network preflight.
-pub(crate) fn request_size(model: &str, case: &Case, p: &Protocol) -> Result<usize> {
+pub(crate) fn request_size(
+    model: &str,
+    case: &Case,
+    p: &Protocol,
+    followup: Option<(&str, usize)>,
+) -> Result<usize> {
     let mut counter = Counter(0);
-    serde_json::to_writer(&mut counter, &case_request(model, case, p, None))
+    serde_json::to_writer(&mut counter, &case_request(model, case, p, followup))
         .map_err(|e| format!("request encoding: {e}"))?;
     Ok(counter.0)
 }
@@ -411,8 +416,13 @@ pub(crate) fn messages_size(messages: &[Message]) -> Result<usize> {
     Ok(counter.0)
 }
 
-pub(crate) fn request_body(model: &str, case: &Case, p: &Protocol) -> Result<String> {
-    serde_json::to_string(&case_request(model, case, p, None))
+pub(crate) fn request_body(
+    model: &str,
+    case: &Case,
+    p: &Protocol,
+    followup: Option<(&str, usize)>,
+) -> Result<String> {
+    serde_json::to_string(&case_request(model, case, p, followup))
         .map_err(|e| format!("request encoding: {e}"))
 }
 
@@ -429,33 +439,6 @@ fn case_request<'a>(
         request.messages.followup = followup.map(|(id, index)| (tool, id, index));
     }
     request
-}
-
-pub(crate) fn followup_body(
-    model: &str,
-    case: &Case,
-    p: &Protocol,
-    id: &str,
-    alternative: usize,
-) -> Result<String> {
-    serde_json::to_string(&case_request(model, case, p, Some((id, alternative))))
-        .map_err(|e| format!("request encoding: {e}"))
-}
-
-pub(crate) fn followup_size(
-    model: &str,
-    case: &Case,
-    p: &Protocol,
-    id: &str,
-    alternative: usize,
-) -> Result<usize> {
-    let mut counter = Counter(0);
-    serde_json::to_writer(
-        &mut counter,
-        &case_request(model, case, p, Some((id, alternative))),
-    )
-    .map_err(|e| format!("request encoding: {e}"))?;
-    Ok(counter.0)
 }
 
 // ----- Strict response semantics -----
@@ -518,25 +501,24 @@ impl<'de> Deserialize<'de> for CallEnvelope {
     }
 }
 
-pub(crate) fn call_record(bytes: &[u8]) -> Result<CallRecord, Fault> {
-    let malformed = || Fault::Malformed("expected one identified function call");
-    if bytes.len() > ARTIFACT_CAP {
-        return Err(Fault::ArtifactCap);
-    }
-    let [call]: [CallEnvelope; 1] = serde_json::from_slice(bytes).map_err(|_| malformed())?;
-    let id = call.id.ok_or_else(malformed)?;
+pub(crate) const CALL_ID_CAP: usize = 256;
+
+// The grader shares this strict wire reader rather than duplicating adapter parsing.
+pub(crate) fn call_record(bytes: &[u8]) -> Option<CallRecord> {
+    let [call]: [CallEnvelope; 1] = serde_json::from_slice(bytes).ok()?;
+    let id = call.id?;
     if id.is_empty()
-        || id.len() > 256
+        || id.len() > CALL_ID_CAP
         || id.chars().any(char::is_control)
         || call.kind.as_deref() != Some("function")
     {
-        return Err(malformed());
+        return None;
     }
-    let function = call.function.ok_or_else(malformed)?;
-    Ok(CallRecord {
+    let function = call.function?;
+    Some(CallRecord {
         id,
-        name: function.name.ok_or_else(malformed)?,
-        arguments: function.arguments.ok_or_else(malformed)?,
+        name: function.name?,
+        arguments: function.arguments?,
     })
 }
 
@@ -998,7 +980,7 @@ struct Semantic {
     finish: Option<Finish>,
     usage: Option<Usage>,
     id: Option<String>,
-    calls: bool,
+    accepts_calls: bool,
     call: Option<Vec<u8>>,
 }
 
@@ -1040,7 +1022,7 @@ impl Semantic {
             Channel::Unsupported => return Err(Fault::Malformed("refusal is not a string")),
             _ => {}
         }
-        if self.calls
+        if self.accepts_calls
             && !self.refused
             && self.finish != Some(Finish::ContentFilter)
             && let Some(raw) = call
@@ -1121,7 +1103,7 @@ pub(crate) struct Collector {
 }
 
 impl Collector {
-    pub(crate) fn new(artifact_cap: usize, calls: bool) -> Self {
+    pub(crate) fn new(artifact_cap: usize, accepts_calls: bool) -> Self {
         Self {
             parser: grill_sse::Parser::new(grill_sse::SseLimits {
                 line_bytes: SSE_LINE_CAP,
@@ -1136,7 +1118,7 @@ impl Collector {
                 finish: None,
                 usage: None,
                 id: None,
-                calls,
+                accepts_calls,
                 call: None,
             },
         }
@@ -1157,7 +1139,7 @@ impl Collector {
     /// Nonstreaming: the complete entity must be strict UTF-8, one closed
     /// envelope, one finished assistant message and nothing else.
     pub(crate) fn entity(self, bytes: &[u8]) -> Result<Settled, Fault> {
-        if self.state.calls {
+        if self.state.accepts_calls {
             self.entity_inner::<true>(bytes)
         } else {
             self.entity_inner::<false>(bytes)
@@ -1176,7 +1158,7 @@ impl Collector {
             .finish_reason
             .as_deref()
             .ok_or(Fault::Malformed("missing finish_reason"))?;
-        self.state.finish = Some(if self.state.calls && reason == "tool_calls" {
+        self.state.finish = Some(if self.state.accepts_calls && reason == "tool_calls" {
             Finish::ToolCalls
         } else {
             finish(reason)?
@@ -1517,19 +1499,19 @@ mod tests {
                 tokenizer: None,
             },
         };
-        let body = request_body("m", &messages, &p).unwrap();
+        let body = request_body("m", &messages, &p, None).unwrap();
         assert_eq!(
             body,
             r#"{"model":"m","messages":[{"role":"user","content":"q"}],"stream":false,"max_completion_tokens":16}"#
         );
-        assert_eq!(request_size("m", &messages, &p).unwrap(), body.len());
+        assert_eq!(request_size("m", &messages, &p, None).unwrap(), body.len());
         p.token_cap.field = TokenField::MaxTokens;
         p.stream = true;
         p.temperature_milli = Some(700);
         p.top_p_milli = Some(1000);
         p.seed = Some(-1);
         assert_eq!(
-            request_body("m", &messages, &p).unwrap(),
+            request_body("m", &messages, &p, None).unwrap(),
             r#"{"model":"m","messages":[{"role":"user","content":"q"}],"stream":true,"max_tokens":16,"temperature":0.7,"top_p":1.0,"seed":-1}"#
         );
         // Profile v2 controls append in declaration order; a declared-false
@@ -1538,14 +1520,34 @@ mod tests {
         p.reasoning_effort = Some(Effort::Xhigh);
         p.include_usage = Some(true);
         assert_eq!(
-            request_body("m", &messages, &p).unwrap(),
+            request_body("m", &messages, &p, None).unwrap(),
             r#"{"model":"m","messages":[{"role":"user","content":"q"}],"stream":true,"max_tokens":16,"temperature":0.7,"top_p":1.0,"seed":-1,"reasoning_effort":"xhigh","stream_options":{"include_usage":true}}"#
         );
         p.reasoning_effort = None;
         p.include_usage = Some(false);
         assert_eq!(
-            request_body("m", &messages, &p).unwrap(),
+            request_body("m", &messages, &p, None).unwrap(),
             r#"{"model":"m","messages":[{"role":"user","content":"q"}],"stream":true,"max_tokens":16,"temperature":0.7,"top_p":1.0,"seed":-1}"#
+        );
+    }
+
+    #[test]
+    fn legacy_call_channel_keeps_the_enclosing_depth_budget() {
+        let raw = format!("{}1{}", "[".repeat(125), "]".repeat(125));
+        let body = format!(
+            r#"{{"choices":[{{"message":{{"content":"answer","tool_calls":{raw}}},"finish_reason":"stop"}}]}}"#
+        );
+        assert_eq!(
+            fault(Collector::new(raw.len(), false).entity(body.as_bytes())).reason(),
+            Reason::MalformedEnvelope
+        );
+        // A RawValue reparse starts a fresh budget and would change this legacy fault.
+        assert_eq!(
+            Collector::new(raw.len(), true)
+                .entity(body.as_bytes())
+                .unwrap()
+                .delivery,
+            Delivery::Call(raw.into_bytes())
         );
     }
 
@@ -1572,16 +1574,24 @@ mod tests {
             ));
         }
         for absent in ["null", "[]", "[ \n ]"] {
-            let body = format!(
-                r#"{{"choices":[{{"message":{{"content":"answer","tool_calls":{absent}}},"finish_reason":"stop"}}]}}"#
-            );
-            assert_eq!(
-                Collector::new(64, true)
-                    .entity(body.as_bytes())
-                    .unwrap()
-                    .delivery,
-                Delivery::Answer(b"answer".to_vec()),
-            );
+            for finish in ["stop", "tool_calls"] {
+                let body = format!(
+                    r#"{{"choices":[{{"message":{{"content":"answer","tool_calls":{absent}}},"finish_reason":"{finish}"}}]}}"#
+                );
+                assert_eq!(
+                    Collector::new(64, true)
+                        .entity(body.as_bytes())
+                        .unwrap()
+                        .delivery,
+                    Delivery::Answer(b"answer".to_vec()),
+                );
+                if finish == "tool_calls" {
+                    assert!(matches!(
+                        Collector::new(64, false).entity(body.as_bytes()),
+                        Err(Fault::Unsupported(_))
+                    ));
+                }
+            }
         }
         for (refusal, finish) in [(r#""no""#, "tool_calls"), ("null", "content_filter")] {
             let body = format!(
@@ -1619,14 +1629,17 @@ mod tests {
             ),
             valid.replace(r#""id":"c","#, ""),
             valid.replace(r#""id":"c""#, r#""id":"""#),
-            valid.replace(r#""id":"c""#, &format!(r#""id":"{}""#, "x".repeat(257))),
+            valid.replace(
+                r#""id":"c""#,
+                &format!(r#""id":"{}""#, "x".repeat(CALL_ID_CAP + 1)),
+            ),
             valid.replace(r#""id":"c""#, r#""id":"\n""#),
             valid.replace(r#""type":"function""#, r#""type":"other""#),
             valid.replace(r#""name":"f","#, ""),
             valid.replace(r#""name":"f""#, r#""name":"f","name":"f""#),
             valid.replace(r#""arguments":"{}""#, r#""arguments":{}"#),
         ] {
-            assert!(call_record(bad.as_bytes()).is_err(), "{bad}");
+            assert!(call_record(bad.as_bytes()).is_none(), "{bad}");
         }
     }
 
@@ -1658,12 +1671,15 @@ mod tests {
             r#"{"functions":[{"name":"f","description":"d","parameters":{"type":"object"}}],"expected":{"name":"f","arguments":[{"x":1}]},"result":"result"}"#
         ).unwrap());
         let expected = r#"{"model":"m","messages":[{"role":"user","content":"q"}],"stream":false,"max_completion_tokens":16,"tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object"}}}],"tool_choice":"auto"}"#;
-        assert_eq!(request_body("m", case, &p).unwrap(), expected);
-        assert_eq!(request_size("m", case, &p).unwrap(), expected.len());
+        assert_eq!(request_body("m", case, &p, None).unwrap(), expected);
+        assert_eq!(request_size("m", case, &p, None).unwrap(), expected.len());
         let expected = r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":null,"tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}]},{"role":"tool","tool_call_id":"c","content":"result"}],"stream":false,"max_completion_tokens":16,"tools":[{"type":"function","function":{"name":"f","description":"d","parameters":{"type":"object"}}}],"tool_choice":"none"}"#;
-        assert_eq!(followup_body("m", case, &p, "c", 0).unwrap(), expected);
         assert_eq!(
-            followup_size("m", case, &p, "c", 0).unwrap(),
+            request_body("m", case, &p, Some(("c", 0))).unwrap(),
+            expected
+        );
+        assert_eq!(
+            request_size("m", case, &p, Some(("c", 0))).unwrap(),
             expected.len()
         );
     }

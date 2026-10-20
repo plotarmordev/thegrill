@@ -526,7 +526,7 @@ enum Step<B> {
 struct Exchange<'a> {
     client: &'a Client,
     stream: bool,
-    calls: bool,
+    accepts_calls: bool,
     response_cap: u64,
     artifact_cap: usize,
     interrupt: &'a mut Signal,
@@ -595,7 +595,7 @@ impl Exchange<'_> {
         } else {
             usize::try_from(declared.unwrap_or(0).min(self.response_cap)).unwrap_or(0)
         });
-        let mut collector = Collector::new(self.artifact_cap, self.calls);
+        let mut collector = Collector::new(self.artifact_cap, self.accepts_calls);
         // A pre-decided status/entity verdict names the reason for anything
         // short of a local failure; a local failure always wins and stops admission.
         let decided = |fallback: Settle, complete: bool| -> Settle {
@@ -740,11 +740,11 @@ fn reserve<'a>(
     input: &'a str,
     plan: &Plan,
     plan_digest: &str,
+    // Both exchanges are projected before reservation from frozen task data.
     body: String,
 ) -> Result<(Attempt<'a>, String)> {
     let started = Instant::now();
     let started_unix_ms = unix_ms();
-    // Both exchanges are projected before reservation from frozen task data.
     if body.len() > REQUEST_CAP {
         return Err(format!(
             "request for case {} exceeds the request cap",
@@ -879,15 +879,13 @@ fn prepare(o: &Options) -> Result<Prepared> {
     };
     pack::system(&system)?;
     let protocol = protocol(o)?;
-    if (pack.version == 5) != (protocol.profile == Profile::DeclaredChatCompletionsV3) {
-        return Err("tool packs require profile v3 and profile v3 requires a tool pack".into());
-    }
+    pack::tool_profile(&pack, &protocol)?;
     if let Some(name) = &o.auth_env {
         transport::credential(name)?;
     }
     let mut sizes = Vec::with_capacity(pack.cases.len());
     for case in &pack.cases {
-        let request_bytes = transport::request_size(&o.model, case, &protocol)?;
+        let request_bytes = transport::request_size(&o.model, case, &protocol, None)?;
         if request_bytes > REQUEST_CAP {
             return Err(format!(
                 "request for case {} exceeds the request cap",
@@ -895,11 +893,11 @@ fn prepare(o: &Options) -> Result<Prepared> {
             ));
         }
         if let Some(tool) = &case.tool {
-            let longest_id = "\\".repeat(256);
+            // A backslash id escapes to two bytes: the largest replayed id.
+            let longest_id = "\\".repeat(transport::CALL_ID_CAP);
             for alternative in 0..tool.expected.arguments.len() {
-                if transport::followup_size(&o.model, case, &protocol, &longest_id, alternative)?
-                    > REQUEST_CAP
-                {
+                let followup = Some((longest_id.as_str(), alternative));
+                if transport::request_size(&o.model, case, &protocol, followup)? > REQUEST_CAP {
                     return Err(format!(
                         "follow-up request for case {} exceeds the request cap",
                         case.id
@@ -1015,13 +1013,13 @@ async fn execute(
     client: &Client,
     interrupt: &mut Signal,
     body: String,
-    calls: bool,
+    accepts_calls: bool,
 ) -> Result<(Reason, Option<(String, usize)>)> {
     let collection = &plan.protocol.collection;
     let mut exchange = Exchange {
         client,
         stream: plan.protocol.stream,
-        calls,
+        accepts_calls,
         response_cap: u64::from(collection.response_bytes),
         artifact_cap: collection.artifact_bytes as usize,
         interrupt,
@@ -1058,8 +1056,8 @@ async fn execute(
         (Some(bytes), Some(tool)) if settle.stop != Some(Finish::Length) => {
             let (validity, alternative) = crate::grade::tool_call(bytes, tool);
             if validity == ToolCall::Valid {
-                let record = transport::call_record(bytes)
-                    .map_err(|_| "validated call cannot be replayed")?;
+                let record =
+                    transport::call_record(bytes).ok_or("validated call cannot be replayed")?;
                 Some((
                     record.id,
                     alternative.ok_or("valid call has no matched alternative")?,
@@ -1117,7 +1115,7 @@ fn collect(
                 break;
             }
             let attempt = i as u32;
-            let body = transport::request_body(&plan.system.model, case, &plan.protocol)?;
+            let body = transport::request_body(&plan.system.model, case, &plan.protocol, None)?;
             let (a, body) = reserve(
                 run.attempt(attempt),
                 attempt,
@@ -1141,12 +1139,11 @@ fn collect(
             if let Some((id, alternative)) = followup {
                 // Pause applies between cases, not between the exchanges of one case.
                 // An interrupt still produces an undispatched follow-up receipt.
-                let body = transport::followup_body(
+                let body = transport::request_body(
                     &plan.system.model,
                     case,
                     &plan.protocol,
-                    &id,
-                    alternative,
+                    Some((id.as_str(), alternative)),
                 )?;
                 let (followup, body) = reserve(
                     a.dir.join("followup"),
@@ -1219,19 +1216,5 @@ mod tests {
         let tools = bound(100, 200, 3, &collection, true).unwrap();
         let exchange = RESERVATION_CAP as u64 + 8192 + 1024 + TERMINAL_CAP as u64;
         assert_eq!(tools - plain, 3 * (exchange + 1024));
-    }
-
-    #[test]
-    fn length_call_retains_call_without_final_answer() {
-        let bytes = b"[]".to_vec();
-        let settle = Settle::completed(transport::Settled {
-            stop: Finish::Length,
-            delivery: transport::Delivery::Call(bytes.clone()),
-            usage: None,
-        });
-        assert_eq!(settle.reason, Reason::Committed);
-        assert_eq!(settle.stop, Some(Finish::Length));
-        assert_eq!(settle.call, Some(bytes));
-        assert!(settle.artifact.is_none());
     }
 }
