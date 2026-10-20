@@ -1,8 +1,15 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.9.1 — declared media program paths
 
 - Fix media runner and setup execution to preserve declared symlink paths, including virtualenv interpreters, while recording resolved targets and their hashes.
+- Document [MFLUX runner configuration](MEDIA.md#mflux-runner), including the
+  virtualenv console script, metadata-free output and offline environment.
+
+Verification and limits of this version:
+
+- Synthetic fixtures cover declared symlink paths for runner and setup execution.
+  They do not qualify a real model runner or establish output quality.
 
 ## Version 0.9.0 — experimental image benchmarking
 

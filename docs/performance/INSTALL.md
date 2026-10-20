@@ -13,6 +13,12 @@ and build receipt; never substitute a moving branch or local staging hashes.
 Retain earlier published releases and their original pins for historical studies.
 Installing v0.9.0 does not reinterpret old receipts or qualify new backend claims.
 
+The media runner and setup symlink-path fix ships from
+[v0.9.1](RELEASE-NOTES.md#version-091--declared-media-program-paths).
+That release is in preparation; the download commands remain pinned to the
+published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
+containing the fix until publication.
+
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
 startup, retention and microbench Python modules under `tools/`. Keep all of
