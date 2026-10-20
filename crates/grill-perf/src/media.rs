@@ -1,6 +1,7 @@
 //! Admission and retained evidence for operator-declared media processes.
 mod cache;
 mod capture;
+mod markers;
 use crate::{
     evidence,
     model::{FILE_CAP, Phase, Result, identifier, present},
@@ -75,10 +76,15 @@ enum Arm {
     B2,
     A2,
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 enum Metric {
-    EndToEndUs,
+    #[serde(rename = "end_to_end_us")]
+    EndToEnd,
+    #[serde(rename = "generation_us")]
+    Generation,
+    #[serde(rename = "load_to_generation_us")]
+    LoadToGeneration,
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -279,6 +285,8 @@ struct Runner {
     version: u32,
     id: String,
     execution: Execution,
+    #[serde(default, deserialize_with = "present")]
+    markers: Option<markers::Transport>,
     program: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
@@ -632,10 +640,20 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
     }
     let mut gates = BTreeSet::new();
     for g in &w.gates {
-        if !cells.contains(&g.cell) || !gates.insert(&g.cell) {
+        if !cells.contains(&g.cell) || !gates.insert((&g.cell, g.metric)) {
             return Err(format!(
-                "gate cell {}: undeclared or duplicate cell",
+                "gate cell {}: undeclared cell or duplicate cell/metric",
                 g.cell
+            ));
+        }
+        if g.metric != Metric::EndToEnd && r.markers.is_none() {
+            return Err(format!(
+                "gate {}: metric {} requires runner.markers",
+                g.cell,
+                serde_json::to_value(g.metric)
+                    .expect("metric string")
+                    .as_str()
+                    .expect("metric string")
             ));
         }
         if g.max_adverse_bps > 9999 {
@@ -723,6 +741,23 @@ fn validate_output_args(
     Ok(())
 }
 fn validate_runner(r: &Runner, limits: &Limits) -> Result<()> {
+    let marker_count = r
+        .args
+        .iter()
+        .map(|arg| arg.matches("{marker_file}").count())
+        .sum::<usize>();
+    if r.markers.is_some() && marker_count != 1 {
+        return Err("runner.args: {marker_file} must occur exactly once".into());
+    }
+    if r.markers.is_none() && marker_count != 0 {
+        return Err("unknown placeholder {marker_file}".into());
+    }
+    if r.setup
+        .as_ref()
+        .is_some_and(|setup| setup.args.iter().any(|arg| arg.contains("{marker_file}")))
+    {
+        return Err("runner.setup.args: {marker_file} is forbidden".into());
+    }
     if r.kind != "media-runner-v1" {
         return Err("runner.kind must be media-runner-v1".into());
     }
@@ -842,6 +877,7 @@ fn substitute(
                 ext.ok_or("args uses undeclared output")?
             ),
             "output_dir" => format!("{dir}/out/"),
+            "marker_file" => format!("{dir}/{}", markers::FILE),
             _ => return Err(format!("unknown placeholder {{{key}}}")),
         };
         result.push_str(&value);
@@ -864,6 +900,7 @@ struct Preflight {
     claim: &'static str,
     support: &'static str,
     execution: Execution,
+    markers: Option<markers::Transport>,
     workload_sha256: String,
     workload_typed_sha256: String,
     runner_sha256: String,
@@ -1025,6 +1062,7 @@ fn preflight(plan: &Plan) -> Result<Preflight> {
         claim: "offline-declared-media-plan-admission-launches-nothing",
         support: SUPPORT,
         execution: r.execution,
+        markers: r.markers,
         workload_sha256: evidence::digest(&plan.workload_bytes),
         workload_typed_sha256: evidence::digest(
             &serde_json::to_vec(&w).map_err(|e| e.to_string())?,

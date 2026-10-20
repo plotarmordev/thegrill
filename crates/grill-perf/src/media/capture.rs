@@ -49,6 +49,7 @@ struct Receipt {
     program: Program,
     setup_program: Option<Program>,
     execution: Execution,
+    markers: Option<markers::Transport>,
     env: BTreeMap<String, String>,
     cwd: Option<PathBuf>,
     cache_declared_state: CacheState,
@@ -210,6 +211,7 @@ struct Run {
     phase: Phase,
     seed: u64,
     process: ProcessRecord,
+    markers: Option<markers::Markers>,
     eligible: bool,
     outputs: Vec<RetainedOutput>,
     reasons: Vec<Reason>,
@@ -268,6 +270,9 @@ struct CellSummary {
     eligible: usize,
     ineligible_by_reason: BTreeMap<Reason, usize>,
     end_to_end_us: Option<Summary>,
+    markers_by_status: BTreeMap<markers::Status, usize>,
+    generation_us: Option<Summary>,
+    load_to_generation_us: Option<Summary>,
     determinism_by_seed: Vec<Determinism>,
 }
 #[derive(Serialize)]
@@ -803,6 +808,11 @@ impl Session<'_> {
             seed: sample.seed,
             eligible: process.status == Status::Complete
                 && cache_mutated_during_measurement == Some(false),
+            markers: self
+                .plan
+                .runner
+                .markers
+                .map(|_| markers::collect(&dir, process.end_to_end_us)),
             process,
             outputs: outputs.retained,
             reasons: outputs.reasons,
@@ -863,6 +873,7 @@ fn make_receipt(
         program: admitted.program,
         setup_program: admitted.setup_program,
         execution: plan.runner.execution,
+        markers: plan.runner.markers,
         env: admitted.env,
         cwd: admitted.cwd,
         cache_declared_state: plan.runner.cache.declared_state,
@@ -1154,6 +1165,16 @@ fn output_counts_match(
         .all(|(count, output)| *count == expected_outputs(output, request, args, setup))
 }
 fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Result<()> {
+    if run.markers.is_some() != plan.runner.markers.is_some() {
+        return Err("marker record declaration mismatch".into());
+    }
+    if run
+        .markers
+        .as_ref()
+        .is_some_and(|record| *record != markers::collect(dir, run.process.end_to_end_us))
+    {
+        return Err("retained evidence hash mismatch: markers".into());
+    }
     let workload = &plan.workload;
     verify_process(
         dir,
@@ -1196,6 +1217,7 @@ fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<D
         || receipt.deployment_sha256 != evidence::digest(deployment)
         || !plan.workload.slots.contains(&receipt.slot)
         || receipt.execution != plan.runner.execution
+        || receipt.markers != plan.runner.markers
         || receipt.env != plan.runner.env
         || receipt.cache_declared_state != plan.runner.cache.declared_state
         || receipt.setup_program.is_some() != plan.runner.setup.is_some()
@@ -1480,15 +1502,22 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
         .filter(|run| run.eligible)
         .map(|run| run.process.end_to_end_us)
         .collect::<Vec<_>>();
-    let end_to_end_us =
-        evidence::median(times.iter().map(|value| *value as f64).collect()).map(|median| Summary {
-            n: times.len(),
-            min: *times.iter().min().expect("nonempty median"),
-            median,
-            mean: times.iter().map(|value| u128::from(*value)).sum::<u128>() as f64
-                / times.len() as f64,
-            max: *times.iter().max().expect("nonempty median"),
-        });
+    let end_to_end_us = summary(&times);
+    let marker_summary = |metric| {
+        summary(
+            &measured
+                .iter()
+                .filter(|run| run.eligible)
+                .filter_map(|run| run.markers.as_ref()?.delta_ns(metric).map(|ns| ns / 1000))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let generation_us = marker_summary(Metric::Generation);
+    let load_to_generation_us = marker_summary(Metric::LoadToGeneration);
+    let mut markers_by_status = BTreeMap::new();
+    for markers in measured.iter().filter_map(|run| run.markers.as_ref()) {
+        *markers_by_status.entry(markers.status).or_default() += 1;
+    }
     let mut reasons = BTreeMap::new();
     let seeds = hashes_by_seed(measured.iter().copied());
     for run in &measured {
@@ -1513,8 +1542,22 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
         eligible: times.len(),
         ineligible_by_reason: reasons,
         end_to_end_us,
+        markers_by_status,
+        generation_us,
+        load_to_generation_us,
         determinism_by_seed,
     }
+}
+
+fn summary(times: &[u64]) -> Option<Summary> {
+    evidence::median(times.iter().map(|value| *value as f64).collect()).map(|median| Summary {
+        n: times.len(),
+        min: *times.iter().min().expect("nonempty median"),
+        median,
+        mean: times.iter().map(|value| u128::from(*value)).sum::<u128>() as f64
+            / times.len() as f64,
+        max: *times.iter().max().expect("nonempty median"),
+    })
 }
 
 #[cfg(test)]

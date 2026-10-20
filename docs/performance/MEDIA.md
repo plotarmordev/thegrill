@@ -2,7 +2,7 @@
 
 `media preflight`, `media capture`, `media inspect` and `media compare` are
 experimental and support image, audio and video workloads on Linux and macOS.
-Runner markers and external probes are not supported.
+External probes are not supported.
 Preflight prints JSON without starting processes or creating directories.
 
 ```text
@@ -39,8 +39,9 @@ integer fps 1–240, duration 1–3600000000 microseconds, sample rate positive.
 Cells (1–64) declare `id`, `warmup_runs` (0–20), `measured_runs` (1–100), optional
 `pause_between_runs_ms` (default zero) and optional `request`, which replaces the
 whole request. Slots declare unique `id` and `arm`: `a`, `b`, `a2`, optionally
-`b2`. Gates (1–16) name unique declared cells, `metric: end_to_end_us`,
+`b2`. Gates (1–16) name unique `(cell, metric)` pairs with a declared cell,
 `max_adverse_bps` (0–9999) and `max_reference_spread_bps` (0–1000000).
+Metrics are `end_to_end_us`, `generation_us` and `load_to_generation_us`.
 Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 `stdout_bytes` and `stderr_bytes`.
 
@@ -93,6 +94,51 @@ Pass `--no-exif` (or the runner's equivalent) when byte determinism by seed
 matters: generation metadata changes PNG bytes.
 Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` in `env` so a capture
 cannot download through Hugging Face.
+
+### Runner markers
+
+Declare `"markers": "file"` and exactly one `{marker_file}` in runner argv;
+it names `markers.ndjson` in the run directory and is forbidden in setup.
+The runner creates the file, capped at 16 KiB. Each UTF-8 NDJSON line ends
+in a newline and contains exactly
+`{"grill_media":1,"event":"runner_started","monotonic_ns":123}`.
+The closed order is `runner_started`, `model_loaded`, `generation_started`,
+`generation_finished`, `output_written`. Subsets are valid; duplicates, unknown
+fields and decreasing unsigned nanosecond stamps are not. The clock is
+runner-monotonic, not collector time; last-minus-first must fit `end_to_end_us`.
+
+`generation_us` spans generation start to finish; `load_to_generation_us`
+spans runner start to generation start. Displays floor nanoseconds to microseconds;
+gates retain exact rational differences. Events include offsets from the first
+event. Status (`valid`, `missing`, `unreadable`, `oversized`, `invalid`) never
+changes eligibility or end-to-end time. Inspect re-derives the complete record
+bound through `run.json`, including absence and hashes. Measured-run status counts
+and eligible available-metric summaries report coverage; image comparisons add
+`images_per_second_generation`. Marker gates require the declaration at preflight
+and both endpoints in every measured run of every supplied arm. Otherwise they
+are `markers_unavailable`; insufficient or ineligible samples take precedence
+as `insufficient_samples`.
+
+Run the stdlib adapter `tools/media/mflux_markers.py` with the venv interpreter
+as `program` and argv `["TOOLS/media/mflux_markers.py", "--grill-marker-file",
+"{marker_file}", "--grill-entry", "mflux-generate",
+"--grill-output-flag=--output", "--", "--output", "{output}", ...]`.
+The named output flag must occur exactly once with a following value.
+Without the marker-file option the adapter forwards without writing markers.
+Repeated `--grill-hook` options accept
+`generation_started=before:pkg.mod:Qual.name`,
+`generation_finished=after:pkg.mod:Qual.name`, or `model_loaded` equivalents.
+Each hook stamps only its first invocation and preserves instance-method,
+staticmethod and classmethod binding, including subclass calls.
+
+Without hooks the adapter observes only control after interpreter startup and
+stdlib imports, and output existence after console main returns. It cannot
+observe weight residency, inference boundaries or decode/encode. The output
+stamp bounds completion from above, not the actual close. Unhooked marker gates
+are therefore unavailable. Hook meaning depends on the operator's symbol choice:
+a whole-image function may include prompt encoding and decode, not just inference.
+Interpreter teardown and device-memory release remain inside end-to-end time
+and outside marker intervals. These are runner assertions, not attested timings.
 
 ## Capture and inspect
 

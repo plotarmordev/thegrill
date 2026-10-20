@@ -177,11 +177,16 @@ fn modality_and_optional_field_admission() {
         f.reject("invalid type");
         f.workload["request"].as_object_mut().unwrap().remove(field);
     }
-    for field in ["markers", "probe", "modality"] {
+    for field in ["probe", "modality"] {
         f.runner[field] = json!("audio");
         f.reject("unknown field");
         f.runner.as_object_mut().unwrap().remove(field);
     }
+    f.runner["markers"] = json!("audio");
+    f.reject("unknown variant");
+    f.runner["markers"] = Value::Null;
+    f.reject("invalid type");
+    f.runner.as_object_mut().unwrap().remove("markers");
     for field in ["negative_prompt", "guidance_milli"] {
         f.workload["request"][field] = Value::Null;
         f.reject("invalid type");
@@ -285,7 +290,11 @@ fn rejects_invalid_identifiers_slots_gates_and_bounds() {
         ("/cells/0/id", json!("invalid id"), "cell invalid id"),
         ("/name", json!("x".repeat(65)), "workload.name"),
         ("/gates/0/cell", json!("absent"), "gate cell absent"),
-        ("/gates/0/metric", json!("generation_us"), "unknown variant"),
+        (
+            "/gates/0/metric",
+            json!("generation_us"),
+            "requires runner.markers",
+        ),
         ("/gates/0/max_adverse_bps", json!(10000), "max_adverse_bps"),
         (
             "/gates/0/max_reference_spread_bps",
@@ -2754,3 +2763,6 @@ fn inspect_wall_clock_agreement_allows_tolerance_and_longer_intervals() {
     });
     inspection_rejected(&f, "elapsed_ms");
 }
+
+#[path = "media_markers.rs"]
+mod media_markers;
