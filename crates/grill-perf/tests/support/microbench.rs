@@ -2009,14 +2009,16 @@ fn external_program_deadline_does_not_join_inherited_pipes() {
     let temp = Temp::new();
     let pid = temp.path("descendant.pid");
     let script = format!(
-        "#!/bin/sh\nprintf diagnostic >&2\nsleep 2 &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+        "#!/bin/sh\nprintf diagnostic >&2\nsh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec sleep 30' sh '{0}' &\nwhile [ ! -s '{0}' ]; do sleep 0.01; done\nwait\n",
         pid.display()
     );
-    let (mut command, out) = mb_program_command(&temp, "deadline", &script, 50);
+    // Allow fixture startup under load, but never wait for the finite sleeper.
+    let deadline = 5000;
+    let (mut command, out) = mb_program_command(&temp, "deadline", &script, deadline);
     let output = command.output().unwrap();
     assert_eq!(mb_code(&output), 1);
     let receipt = mb_raw_receipt(&out);
-    assert!(receipt["duration_ms"].as_u64().unwrap() < 1000);
+    assert!(receipt["duration_ms"].as_u64().unwrap() < deadline + 5000);
     assert_eq!(receipt["status"], "failed");
     assert_eq!(fs::read(out.join("stderr.bin")).unwrap(), b"diagnostic");
     mb_assert_child_stopped(&pid);

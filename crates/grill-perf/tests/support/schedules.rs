@@ -88,7 +88,8 @@ fn paced(
         &mut stream,
         json!({"choices":[{"delta":{"content":"last"}}]}),
     );
-    thread::sleep(Duration::from_millis(120));
+    // Leave room for a delayed read without merging text and terminal observations.
+    thread::sleep(Duration::from_secs(2));
     finish(&mut stream, Some(tokens), None);
 }
 
@@ -101,8 +102,8 @@ fn schedule4_mixed_and_fixed_arrivals_replay_named_controls_and_real_overlap() {
         paced(stream, index, body, (&prefill_generated, &prefill_seen));
     });
     let mut work = scheduled();
-    work["limits"]["total_ms"] = json!(15000);
-    work["limits"]["idle_ms"] = json!(12000);
+    work["limits"]["total_ms"] = json!(20000);
+    work["limits"]["idle_ms"] = json!(15000);
     let mut fixed = work["schedule"][2].clone();
     fixed["id"] = json!("fixed");
     fixed["lanes"][0]["arrival"]["offset_us"] = json!(30000);
@@ -132,7 +133,7 @@ fn schedule4_mixed_and_fixed_arrivals_replay_named_controls_and_real_overlap() {
         true
     );
     assert_eq!(receipt["schedule"]["overlap"][0]["generated_text"], true);
-    assert!(at(a, "terminal_us") > at(a, "last_generated_text_us") + 50000);
+    assert!(at(a, "terminal_us") > at(a, "last_generated_text_us") + 500000);
     let fixed = wave(&temp, "run", 3);
     assert!(
         fixed["attempts"][0]["timing"]["dispatch_offset_us"]

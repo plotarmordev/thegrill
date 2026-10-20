@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix media runner and setup execution to preserve declared symlink paths, including virtualenv interpreters, while recording resolved targets and their hashes.
+- Fix microbench and media captures whose killed descendants close inherited pipes late: after leader exit, pipe drainage now uses the remaining run deadline instead of 100 ms, so these captures can succeed and receipt `duration_ms` can extend toward the deadline. See the [external capture contract](KERNEL-FABRIC.md).
 
 ## Version 0.9.0 — experimental image benchmarking
 

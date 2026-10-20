@@ -389,13 +389,14 @@ mod tests {
 
     static ACTIVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[test]
     #[cfg(target_os = "linux")]
-    fn normal_exit_waits_for_delayed_pipe_close() {
-        let root = std::env::temp_dir().join(format!("grill-drain-{}", std::process::id()));
+    fn delayed_pipe_close(cancel: bool) -> Output {
+        let root =
+            std::env::temp_dir().join(format!("grill-drain-{}-{cancel}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let leader = root.join("leader");
         let release = root.join("release");
+        let (finished, completion) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             let until = Instant::now() + Duration::from_secs(10);
             while !leader.exists() {
@@ -429,6 +430,16 @@ mod tests {
             // Reaping happens after group SIGKILL, so this exceeds the old
             // window regardless of how long startup took.
             std::thread::sleep(Duration::from_millis(250));
+            if cancel {
+                // The leader is already reaped, so cancellation must interrupt
+                // normal-exit drainage rather than the running-program path.
+                // SAFETY: the collector guard has installed the SIGINT handler.
+                assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+                let completed = completion.recv_timeout(Duration::from_secs(5)).is_ok();
+                drop((stdout, stderr));
+                assert!(completed, "cancellation waited for pipe EOF");
+                return;
+            }
             drop((stdout, stderr));
         });
         let output = shell(
@@ -440,8 +451,16 @@ mod tests {
             1024,
             true,
         );
+        let _ = finished.send(());
         holder.join().unwrap();
         std::fs::remove_dir_all(root).unwrap();
+        output
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn normal_exit_waits_for_delayed_pipe_close() {
+        let output = delayed_pipe_close(false);
         assert!(output.failure.is_none(), "{:?}", output.failure);
         assert!(output.status.unwrap().success());
         assert_eq!(output.stdout, b"honest");
@@ -449,6 +468,24 @@ mod tests {
         assert!(!output.stdout_truncated && !output.stderr_truncated);
         assert!(!output.timed_out && !output.cancelled);
         assert!(output.elapsed_with_cleanup_ms >= output.exit_observed_us / 1000 + 250);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cancellation_interrupts_normal_exit_pipe_drain() {
+        let output = delayed_pipe_close(true);
+        assert!(output.status.unwrap().success());
+        assert!(output.cancelled);
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout, b"honest");
+        assert_eq!(output.stderr, b"evidence");
+        assert!(output.stdout_truncated && output.stderr_truncated);
+        assert_eq!(
+            output.failure.as_deref(),
+            Some(
+                "collector cancelled by SIGINT or SIGTERM; stdout drainage incomplete at cleanup boundary; stderr drainage incomplete at cleanup boundary; raw output is truncated; retained prefixes only"
+            )
+        );
     }
 
     #[test]
