@@ -89,6 +89,12 @@ See the separate [media CLI guide](docs/performance/MEDIA.md).
 A second tool, `grill`, checks model answers against task rules. It is not ready
 yet: the included questions are synthetic examples, not a validated intelligence test.
 
+Version 0.10.0 adds [tool-call validity](docs/PROJECT.md#tool-call-pack-contract-v5-and-profile-v3)
+separately from final-answer correctness. Only a valid call receives the declared
+fixed tool result for a follow-up; this does not execute tools or validate a
+model's general tool-use ability. The quality CLI remains source-built and is
+not included in performance release archives.
+
 <details>
 <summary>Try it anyway with your agent (Linux)</summary>
 

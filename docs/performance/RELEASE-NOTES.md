@@ -1,6 +1,6 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.10.0 — audio, video and runner markers
 
 - Add runner-asserted media markers, exact generation interval gates and offline
   marker re-derivation across image, audio and video captures. The stdlib adapter
@@ -17,13 +17,30 @@
 - Report standard audio real-time factor and end-to-end video frame rates.
   Existing image workload identities and the end-to-end duration gate are unchanged.
 
-Verification and limits:
+Verification and limits of this version:
 
-- Synthetic fixture runners exercise capture, offline inspection and comparison;
-  they do not qualify a real model runner.
+- Synthetic fixture runners exercise capture, offline inspection and comparison.
+  Audio/video validation includes synthetic files and real GStreamer/ffmpeg muxer
+  files exercised during [review](https://github.com/plotarmordev/thegrill/pull/131),
+  not live audio/video generators.
+- Real-runner evidence is limited to the outside
+  [MFLUX image report](https://github.com/plotarmordev/thegrill/issues/126):
+  capture and offline inspect with a locally patched MFLUX on macOS using the
+  earlier image release. It does not qualify this release's markers, stock MFLUX,
+  matched comparisons or other generators; no live generator was run for this
+  release preparation.
+- Markers depend on runner cooperation and operator-selected hook meaning.
+  They are runner assertions, not independently attested inference boundaries.
 - Validation is container-checked, not decoded. MP4 checks declared sample bytes
   and ranges, coded dimensions and media timing. Presentation edits are
   descriptive; the supported edit-list rule is documented in [Media](MEDIA.md).
+- Compatibility check: an image capture made with the published 0.9.1 Linux
+  ARM archive inspected successfully with 0.10.0, preserving its evidence digest
+  and all three eligible measured samples. Absent marker fields are accepted;
+  marker intervals remain unavailable. This synthetic PNG check does not qualify
+  every historical capture or cross-version comparison. The 0.9.0 media receipt
+  incompatibility documented below remains; retain its original reader or
+  recapture rather than rewriting evidence.
 
 ## Version 0.9.1 — declared media program paths
 
