@@ -6,22 +6,15 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.9.1** experimental release.
-It fixes the experimental image [media CLI](MEDIA.md) to execute declared program
-paths, so virtualenv interpreters and console scripts keep their environment.
-Media captures written by v0.9.0 must be recaptured
-([compatibility note](RELEASE-NOTES.md#version-091--declared-media-program-paths));
-other measurements and their meaning are unchanged. Use its exact version/target,
-checksum and build receipt; never substitute a moving branch or local staging
-hashes. Retain earlier published releases and their original pins for historical
-studies. Installing v0.9.1 does not reinterpret old receipts or qualify new
-backend claims.
-
-Audio/video media workloads, runner markers and the post-kill pipe-drain fix ship from
-[v0.10.0](RELEASE-NOTES.md#version-0100--audio-video-and-runner-markers).
-That release is in preparation; the download commands remain pinned to the
-published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
-containing these changes until publication.
+The download commands below select the published **v0.10.0** experimental release.
+It adds audio (WAV) and video (MP4) [media](MEDIA.md) workloads, runner markers
+with generation-time gates, and lets killed descendants close inherited pipes
+until the run deadline. Existing measurements and their meaning are unchanged, and
+v0.9.1 media captures still inspect. Use its exact version/target, checksum and
+build receipt; never substitute a moving branch or local staging hashes. Retain
+earlier published releases and their original pins for historical studies.
+Installing v0.10.0 does not reinterpret old receipts or qualify new backend
+claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -38,8 +31,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.9.1**](https://github.com/plotarmordev/thegrill/releases/tag/v0.9.1),
-from reviewed source `330fa2da31ad7754248bcca55fd3318418e23df4`.
+The published prerelease is [**v0.10.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.10.0),
+from reviewed source `aad5dbc8e15378764ddf7092bbc55f8bbd610fb6`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -70,8 +63,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.9.1
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.9.1
+VERSION=0.10.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.10.0
 ```
 
 ```sh
