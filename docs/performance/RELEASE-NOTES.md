@@ -3,8 +3,9 @@
 ## Version 0.10.0 — audio, video and runner markers
 
 - Add runner-asserted media markers, exact generation interval gates and offline
-  marker re-derivation across image, audio and video captures. The stdlib adapter
-  requires operator-selected hooks for inference boundaries; see
+  marker re-derivation across image, audio and video captures. Release archives
+  include the stdlib adapter at `tools/media/mflux_markers.py`; it requires
+  operator-selected hooks for inference boundaries. See
   [Runner markers](MEDIA.md#runner-markers).
 - Preserve method descriptor binding in marker hooks, including staticmethods
   called through instances and classmethods called through subclasses.
