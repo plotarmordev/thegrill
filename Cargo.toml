@@ -10,7 +10,7 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 too_many_lines = "warn"
 
-# CLI fixtures hash their executable; keep local debug hashing as fast as CI.
+# Debug binaries hash their own executable; optimize sha2 so they start quickly.
 [profile.dev.package.sha2]
 opt-level = 3
 
