@@ -1906,3 +1906,722 @@ fn quality_crash_is_not_pause_and_legacy_evidence_remains_inspectable() {
     assert!(!cli(&["pause", &out.to_string_lossy()]).status.success());
     assert!(!out.join("lifecycle").exists());
 }
+
+fn tool_call(name: &str, arguments: &str) -> String {
+    serde_json::json!([{
+        "id":"call-1", "type":"function", "index":0,
+        "function":{"name":name,"arguments":arguments}
+    }])
+    .to_string()
+}
+
+fn tool_pack() -> serde_json::Value {
+    serde_json::json!({
+        "version":5, "label":"tool regression", "worlds":["w"], "groups":["g"],
+        "cases":[{
+            "id":"invoice", "world":"w", "group":"g",
+            "messages":[{"role":"user","content":"Look up INV-7 and return its total as JSON."}],
+            "acceptance":{"kind":"json-exact","expected":{"total":22}},
+            "qualification":{"valid":["{\"total\":22}"],"wrong":["{\"total\":21}"]},
+            "provenance":{
+                "repository":"https://example.org/tests", "revision":"a".repeat(40),
+                "path":"synthetic.json", "sha256":"b".repeat(64), "item_id":"invoice",
+                "license":"Synthetic regression fixture", "changes":["Original synthetic fixture"]
+            },
+            "tool":{
+                "functions":[
+                    {"name":"lookup_invoice","description":"Return an invoice.",
+                     "parameters":{"type":"object"}},
+                    {"name":"lookup_customer","description":"Return a customer.",
+                     "parameters":{"type":"object"}}
+                ],
+                "expected":{"name":"lookup_invoice","arguments":[
+                    {"invoice_id":"INV-7","scale":1}, {"invoice_id":"INV-7","scale":1,"optional":true}
+                ]},
+                "result":"{\"lines\":[{\"quantity\":3,\"unit_price\":4},{\"quantity\":2,\"unit_price\":5}]}"
+            },
+            "call_qualification":{
+                "valid":[
+                    tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#),
+                    tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1,"optional":true}"#)
+                ],
+                "wrong":[tool_call("lookup_customer", r#"{"invoice_id":"INV-7","scale":1}"#)]
+            }
+        }]
+    })
+}
+
+fn call_response(call: &str, finish: &str) -> String {
+    format!(
+        r#"{{"choices":[{{"message":{{"role":"assistant","content":"not an answer","tool_calls":{call}}},"finish_reason":"{finish}"}}]}}"#
+    )
+}
+
+fn json_file(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn tool_run(pack: &Path, server: &Server, out: &Path) -> Output {
+    run(
+        pack,
+        &server.endpoint(),
+        out,
+        &["--profile", "declared-chat-completions-v3"],
+    )
+}
+
+fn tool_inspect(out: &Path) -> serde_json::Value {
+    let result = cli(&["inspect", &out.to_string_lossy(), "--json"]);
+    success(&result);
+    serde_json::from_slice(&result.stdout).unwrap()
+}
+
+#[test]
+fn tool_calls_keep_answer_correctness_independent_and_replay_canonical_gold() {
+    for (answer_text, outcome) in [(r#"{"total":22}"#, "success"), (r#"{"total":21}"#, "wrong")] {
+        let s = Scratch::new();
+        let pack_value = tool_pack();
+        let pack = s.write("tool.json", &serde_json::to_vec(&pack_value).unwrap());
+        let call = tool_call(
+            "lookup_invoice",
+            " { \"scale\":1.0,\"invoice_id\":\"INV-7\" } ",
+        );
+        let server = serve(vec![
+            ok_json(&call_response(&call, "tool_calls")),
+            ok_json(&answer(answer_text, "stop")),
+        ]);
+        let out = s.path("run");
+        success(&tool_run(&pack, &server, &out));
+        assert_eq!(server.requests(), 2);
+        let root = out.join("attempts/000000");
+        assert_eq!(fs::read(root.join("call.json")).unwrap(), call.as_bytes());
+        let first = json_file(&root.join("reservation.json"));
+        let first_body: serde_json::Value =
+            serde_json::from_str(first["body"].as_str().unwrap()).unwrap();
+        assert_eq!(first_body["tool_choice"], "auto");
+        assert_eq!(
+            first_body["tools"][1]["function"]["name"],
+            "lookup_customer"
+        );
+        let second = json_file(&root.join("followup/reservation.json"));
+        let second_body: serde_json::Value =
+            serde_json::from_str(second["body"].as_str().unwrap()).unwrap();
+        assert_eq!(second_body["tool_choice"], "none");
+        assert_eq!(
+            second_body["messages"][1],
+            serde_json::json!({
+                "role":"assistant","content":null,"tool_calls":[{
+                    "id":"call-1","type":"function","function":{
+                        "name":"lookup_invoice","arguments":"{\"invoice_id\":\"INV-7\",\"scale\":1}"
+                    }
+                }]
+            })
+        );
+        assert_eq!(
+            second_body["messages"][2],
+            serde_json::json!({
+                "role":"tool","tool_call_id":"call-1","content":pack_value["cases"][0]["tool"]["result"]
+            })
+        );
+        let view_path = out.join("grades/initial/view.json");
+        let v = json_file(&view_path);
+        assert_eq!(v["version"], 2);
+        assert_eq!(v["cases"][0]["tool_call"], "valid");
+        assert_eq!(v["cases"][0]["outcome"], outcome);
+        assert_eq!(json_file(&root.join("terminal.json"))["version"], 3);
+        let inspected = tool_inspect(&out);
+        assert_eq!(inspected["version"], 6);
+        assert_eq!(inspected["tool_calls"]["valid"], 1);
+        assert_eq!(inspected["tool_calls"]["after_valid_call"][outcome], 1);
+        assert!(inspected["attempts"][0]["followup"].is_object());
+        assert_eq!(inspected["usage_coverage"]["snapshots"], 0);
+        assert_eq!(
+            inspected["attempts"][0]["followup"]["usage"]["total_tokens"],
+            2
+        );
+        assert_eq!(
+            inspected["attempts"][0]["followup"]["metadata_source"],
+            "terminal"
+        );
+        let followup_terminal = json_file(&root.join("followup/terminal.json"));
+        assert_eq!(followup_terminal["call"], serde_json::Value::Null);
+        assert!(followup_terminal.as_object().unwrap().contains_key("call"));
+        let regrade = s.path("regrade");
+        success(&cli(&[
+            "regrade",
+            &out.to_string_lossy(),
+            "--out",
+            &regrade.to_string_lossy(),
+        ]));
+        assert_eq!(
+            fs::read(view_path).unwrap(),
+            fs::read(regrade.join("view.json")).unwrap()
+        );
+        let comparison = cli(&[
+            "compare",
+            &out.to_string_lossy(),
+            &regrade.to_string_lossy(),
+            "--json",
+        ]);
+        success(&comparison);
+        let comparison: serde_json::Value = serde_json::from_slice(&comparison.stdout).unwrap();
+        assert_eq!(comparison["version"], 3);
+        assert_eq!(comparison["left_results"]["invalid_tool_call"], 0);
+        assert_eq!(comparison["right_results"]["invalid_tool_call"], 0);
+        assert_eq!(
+            comparison["left_tool_calls"]["after_valid_call"][outcome],
+            1
+        );
+        assert_eq!(
+            comparison["left_tool_calls"],
+            comparison["right_tool_calls"]
+        );
+    }
+}
+
+#[test]
+fn invalid_calls_never_receive_fixture_and_absence_never_becomes_valid() {
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    let bad_id = r#"[{"type":"function","function":{"name":"lookup_invoice","arguments":"{}"}}]"#;
+    for (reply, call_grade, outcome, result) in [
+        (call_response(&tool_call("lookup_customer", r#"{"invoice_id":"INV-7","scale":1}"#), "tool_calls"), "wrong", "wrong", "invalid_tool_call"),
+        (call_response(&tool_call("lookup_invoice", r#"{"invoice_id":"INV-8","scale":1}"#), "stop"), "wrong", "wrong", "invalid_tool_call"),
+        (call_response(&tool_call("lookup_invoice", "{"), "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
+        (call_response(bad_id, "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
+        (call_response(&good, "length"), "malformed", "malformed", "output_limit"),
+        (call_response(&tool_call("lookup_invoice", "{"), "length"), "malformed", "malformed", "output_limit"),
+        (call_response(&format!("[{},{}]", &good[1..good.len()-1], &good[1..good.len()-1]), "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
+        (call_response(&good.replace(r#""type":"function""#, r#""type":"other""#), "tool_calls"), "malformed", "malformed", "invalid_tool_call"),
+        (r#"{"choices":[{"message":{"content":null,"tool_calls":null},"finish_reason":"tool_calls"}]}"#.into(), "absent", "unknown", "other_ungraded"),
+        (r#"{"choices":[{"message":{"content":null,"tool_calls":[]},"finish_reason":"tool_calls"}]}"#.into(), "absent", "unknown", "other_ungraded"),
+        (answer(r#"{"total":22}"#, "tool_calls"), "absent", "success", "correct"),
+        (answer(r#"{"total":22}"#, "tool_calls").replace(r#""tool_calls":[]"#, r#""tool_calls":null"#), "absent", "success", "correct"),
+        (answer("", "tool_calls"), "absent", "malformed", "malformed_answer"),
+        (answer("", "tool_calls").replace(r#""tool_calls":[]"#, r#""tool_calls":null"#), "absent", "malformed", "malformed_answer"),
+        (format!(r#"{{"choices":[{{"message":{{"refusal":"no","tool_calls":{good}}},"finish_reason":"tool_calls"}}]}}"#), "absent", "refused", "refused"),
+        (answer(r#"{"total":22}"#, "stop"), "absent", "success", "correct"),
+        (answer(r#"{"total":21}"#, "stop"), "absent", "wrong", "wrong_answer"),
+    ] {
+        let s = Scratch::new();
+        let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+        let server = serve(vec![ok_json(&reply)]);
+        let out = s.path("run");
+        success(&tool_run(&pack, &server, &out));
+        assert_eq!(server.requests(), 1);
+        assert!(!out.join("attempts/000000/followup").exists());
+        let inspected = tool_inspect(&out);
+        assert_eq!(inspected["attempts"][0]["tool_call"], call_grade);
+        assert_eq!(inspected["attempts"][0]["outcome"], outcome);
+        assert_eq!(inspected["attempts"][0]["result"], result);
+        assert_eq!(inspected["tool_calls"][call_grade], 1);
+        assert_eq!(inspected["tool_calls"]["valid"], 0);
+        let view = json_file(&out.join("grades/initial/view.json"));
+        let row = view["cases"][0].as_object().unwrap();
+        assert!(row.contains_key("call") && row.contains_key("followup"));
+        assert_eq!(row["followup"], serde_json::Value::Null);
+        let regrade = s.path("regrade");
+        success(&cli(&["regrade", &out.to_string_lossy(), "--out", &regrade.to_string_lossy()]));
+        assert_eq!(
+            fs::read(out.join("grades/initial/view.json")).unwrap(),
+            fs::read(regrade.join("view.json")).unwrap()
+        );
+    }
+}
+
+#[test]
+fn valid_call_followup_failure_remains_unknown_not_success_or_wrong() {
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    for (followup, result) in [
+        (
+            ok_json(&call_response(&good, "tool_calls")),
+            "other_ungraded",
+        ),
+        (
+            entity("503 Service Unavailable", "text/plain", b"fixture failure"),
+            "service_error",
+        ),
+    ] {
+        let s = Scratch::new();
+        let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+        let server = serve(vec![ok_json(&call_response(&good, "stop")), followup]);
+        let out = s.path("run");
+        success(&tool_run(&pack, &server, &out));
+        assert_eq!(server.requests(), 2);
+        let inspected = tool_inspect(&out);
+        assert_eq!(inspected["attempts"][0]["tool_call"], "valid");
+        assert_eq!(inspected["attempts"][0]["outcome"], "unknown");
+        assert_eq!(inspected["attempts"][0]["result"], result);
+        assert_eq!(inspected["tool_calls"]["after_valid_call"]["unknown"], 1);
+    }
+}
+
+#[test]
+fn tool_profile_preflight_refuses_incompatible_packs_and_submission_channels() {
+    let s = Scratch::new();
+    let server = serve(vec![]);
+    let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    for extra in [
+        vec![],
+        vec!["--profile", "declared-chat-completions-v2"],
+        vec!["--profile", "declared-chat-completions-v3", "--stream"],
+    ] {
+        let out = s.path("refused");
+        assert!(
+            !run(&pack, &server.endpoint(), &out, &extra)
+                .status
+                .success()
+        );
+        assert!(!out.exists());
+    }
+    let legacy = s.write("legacy.json", ONE.as_bytes());
+    assert!(
+        !tool_run(&legacy, &server, &s.path("legacy-run"))
+            .status
+            .success()
+    );
+    let submission = s.write("submission.json", B);
+    assert!(
+        !cli(&[
+            "grade",
+            &pack.to_string_lossy(),
+            &submission.to_string_lossy(),
+            "--out",
+            &s.path("grade").to_string_lossy()
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(server.requests(), 0);
+}
+
+#[test]
+fn tool_followup_interrupt_and_crash_preserve_valid_call_unknown_answer() {
+    for interrupt in [false, true] {
+        let s = Scratch::new();
+        let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+        let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+        let (release, held) = std::sync::mpsc::channel();
+        let server = serve(vec![
+            ok_json(&call_response(&good, "tool_calls")),
+            vec![Step::Wait(held)],
+        ]);
+        let out = s.path("run");
+        let mut child = bin()
+            .args(run_args(&pack, &server.endpoint(), &out))
+            .args(["--profile", "declared-chat-completions-v3"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        server.wait_requests(2);
+        let root = out.join("attempts/000000");
+        let first = fs::read(root.join("terminal.json")).unwrap();
+        assert_eq!(fs::read(root.join("call.json")).unwrap(), good.as_bytes());
+        if interrupt {
+            success(
+                &Command::new("kill")
+                    .args(["-INT", &child.id().to_string()])
+                    .output()
+                    .unwrap(),
+            );
+        } else {
+            child.kill().unwrap();
+        }
+        assert!(!child.wait().unwrap().success());
+        release.send(()).unwrap();
+        let inspected = tool_inspect(&out);
+        assert_eq!(inspected["tool_calls"]["valid"], 1);
+        assert_eq!(inspected["tool_calls"]["after_valid_call"]["unknown"], 1);
+        assert_eq!(inspected["attempts"][0]["outcome"], "unknown");
+        if interrupt {
+            assert_eq!(
+                json_file(&root.join("followup/terminal.json"))["reason"],
+                "interrupted"
+            );
+        } else {
+            assert!(!root.join("followup/terminal.json").exists());
+            assert_eq!(inspected["counts"]["unresolved"], 1);
+        }
+        let regrade = s.path("view");
+        success(&cli(&[
+            "regrade",
+            &out.to_string_lossy(),
+            "--out",
+            &regrade.to_string_lossy(),
+        ]));
+        let row = &json_file(&regrade.join("view.json"))["cases"][0];
+        assert_eq!(row["tool_call"], "valid");
+        assert_eq!(row["outcome"], "unknown");
+        assert_eq!(
+            row["evidence"],
+            if interrupt {
+                "uncommitted"
+            } else {
+                "unresolved"
+            }
+        );
+        assert!(!cli(&["resume", &out.to_string_lossy()]).status.success());
+        assert_eq!(server.requests(), 2);
+        assert_eq!(fs::read(root.join("terminal.json")).unwrap(), first);
+    }
+}
+
+#[test]
+fn tool_call_and_followup_tampering_refuses_regrade_and_resume() {
+    let s = Scratch::new();
+    let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    let server = serve(vec![
+        ok_json(&call_response(&good, "stop")),
+        ok_json(&answer(r#"{"total":22}"#, "stop")),
+    ]);
+    let out = s.path("run");
+    success(&tool_run(&pack, &server, &out));
+    let root = out.join("attempts/000000");
+    for (file, field) in [
+        ("call.json", None),
+        ("followup/reservation.json", Some("body")),
+        ("followup/terminal.json", Some("request")),
+    ] {
+        let path = root.join(file);
+        let original = fs::read(&path).unwrap();
+        let changed = if let Some(field) = field {
+            let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            value[field] = "changed".into();
+            serde_json::to_vec(&value).unwrap()
+        } else {
+            b"[]".to_vec()
+        };
+        fs::write(&path, changed).unwrap();
+        assert!(
+            !cli(&[
+                "regrade",
+                &out.to_string_lossy(),
+                "--out",
+                &s.path("refused").to_string_lossy()
+            ])
+            .status
+            .success(),
+            "{file}"
+        );
+        assert!(
+            !cli(&["resume", &out.to_string_lossy()]).status.success(),
+            "{file}"
+        );
+        fs::write(&path, original).unwrap();
+    }
+    assert_eq!(server.requests(), 2);
+    let initial = out.join("grades/initial/view.json");
+    let original = fs::read(&initial).unwrap();
+    let mut forged: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    forged["cases"][0]["tool_call"] = "absent".into();
+    fs::write(&initial, serde_json::to_vec(&forged).unwrap()).unwrap();
+    assert!(
+        !cli(&[
+            "compare",
+            &out.to_string_lossy(),
+            &out.to_string_lossy(),
+            "--json"
+        ])
+        .status
+        .success()
+    );
+    fs::write(&initial, original).unwrap();
+    let regrade = s.path("valid-view");
+    success(&cli(&[
+        "regrade",
+        &out.to_string_lossy(),
+        "--out",
+        &regrade.to_string_lossy(),
+    ]));
+    assert_eq!(
+        tool_inspect(&regrade)["tool_calls"]["after_valid_call"]["success"],
+        1
+    );
+}
+
+fn study_fixture(pack: &serde_json::Value, left: &Path, right: &Path) -> serde_json::Value {
+    let lp = json_file(&left.join("plan.json"));
+    let rp = json_file(&right.join("plan.json"));
+    serde_json::json!({
+        "version":1, "label":"synthetic study", "purpose":"pilot",
+        "construct":"Synthetic exact answers", "sampling":"Synthetic local fixture",
+        "exclusions":"", "stopping_rule":"All declared cases", "pack_source":lp["pack"]["source"],
+        "protocol":lp["protocol"], "left_system":lp["system"], "right_system":rp["system"],
+        "families":pack["groups"].as_array().unwrap().iter().map(|group| serde_json::json!({
+            "group":group, "construct":"Synthetic", "source":"Synthetic local fixture",
+            "revision":"fixture", "rights":"Original synthetic fixture"
+        })).collect::<Vec<_>>(),
+        "exposure":pack["cases"].as_array().unwrap().iter().map(|case| serde_json::json!({
+            "case_id":case["id"], "left":"fresh", "right":"fresh"
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn assert_tool_count_invariants(counts: &serde_json::Value) {
+    let total: u64 = ["valid", "wrong", "malformed", "absent", "unknown"]
+        .iter()
+        .map(|name| counts[name].as_u64().unwrap())
+        .sum();
+    let after: u64 = ["success", "wrong", "malformed", "refused", "unknown"]
+        .iter()
+        .map(|name| counts["after_valid_call"][name].as_u64().unwrap())
+        .sum();
+    assert_eq!(counts["cases"], total);
+    assert_eq!(counts["valid"], after);
+}
+
+#[test]
+fn tool_study_preserves_each_side_and_family_unit_invariants() {
+    let s = Scratch::new();
+    let pack_value = tool_pack();
+    let pack = s.write("tool.json", &serde_json::to_vec(&pack_value).unwrap());
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    let left_server = serve(vec![
+        ok_json(&call_response(&good, "stop")),
+        ok_json(&answer(r#"{"total":21}"#, "stop")),
+    ]);
+    let right_server = serve(vec![ok_json(&call_response(
+        &tool_call("lookup_customer", "{}"),
+        "stop",
+    ))]);
+    let left = s.path("left");
+    let right = s.path("right");
+    success(&tool_run(&pack, &left_server, &left));
+    success(&tool_run(&pack, &right_server, &right));
+    let manifest = s.write(
+        "study.json",
+        &serde_json::to_vec(&study_fixture(&pack_value, &left, &right)).unwrap(),
+    );
+    let result = cli(&[
+        "study",
+        "compare",
+        &manifest.to_string_lossy(),
+        &pack.to_string_lossy(),
+        &left.to_string_lossy(),
+        &right.to_string_lossy(),
+        "--json",
+    ]);
+    success(&result);
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["version"], 3);
+    for summary in [
+        &report["comparison"],
+        &report["families"][0]["summary"],
+        &report["families"][0]["units"][0]["summary"],
+    ] {
+        assert_eq!(summary["left_results"]["invalid_tool_call"], 0);
+        assert_eq!(summary["right_results"]["invalid_tool_call"], 1);
+        assert_tool_count_invariants(&summary["left_tool_calls"]);
+        assert_tool_count_invariants(&summary["right_tool_calls"]);
+        assert_eq!(summary["left_tool_calls"]["after_valid_call"]["wrong"], 1);
+        assert_eq!(summary["right_tool_calls"]["wrong"], 1);
+        assert_eq!(summary["right_tool_calls"]["valid"], 0);
+    }
+    assert_eq!((left_server.requests(), right_server.requests()), (2, 1));
+    let mut mismatched = json_file(&manifest);
+    mismatched["protocol"]["profile"] = "declared-chat-completions-v2".into();
+    let mismatched = s.write(
+        "mismatched-study.json",
+        &serde_json::to_vec(&mismatched).unwrap(),
+    );
+    let checked = cli(&[
+        "study",
+        "check",
+        &mismatched.to_string_lossy(),
+        &pack.to_string_lossy(),
+    ]);
+    assert!(!checked.status.success());
+    assert!(String::from_utf8_lossy(&checked.stderr).contains("tool packs require profile v3"));
+}
+
+#[test]
+fn tool_preflight_counts_escaped_followup_before_any_dispatch() {
+    let s = Scratch::new();
+    let mut value = tool_pack();
+    value["cases"][0]["tool"]["result"] = "\\".repeat(140_000).into();
+    let pack = s.write("large-result.json", &serde_json::to_vec(&value).unwrap());
+    success(&cli(&["check", &pack.to_string_lossy()]));
+    let server = serve(vec![]);
+    let out = s.path("refused");
+    let result = tool_run(&pack, &server, &out);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("follow-up request"));
+    assert!(!out.exists());
+    assert_eq!(server.requests(), 0);
+}
+
+fn assert_no_tool_report_fields(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, child) in fields {
+                assert!(
+                    !matches!(
+                        name.as_str(),
+                        "tool_call"
+                            | "tool_calls"
+                            | "left_tool_calls"
+                            | "right_tool_calls"
+                            | "invalid_tool_call"
+                            | "followup"
+                    ),
+                    "{name}"
+                );
+                assert_no_tool_report_fields(child);
+            }
+        }
+        serde_json::Value::Array(values) => values.iter().for_each(assert_no_tool_report_fields),
+        _ => {}
+    }
+}
+
+// Keep raw ordering and whitespace; only invocation timing, the loopback port,
+// and identities derived from that port vary between synthetic runs.
+fn legacy_snapshot(bytes: &[u8]) -> String {
+    fn normalize(value: &serde_json::Value, text: &mut String) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    let replacement = match key.as_str() {
+                        "endpoint" => Some("loopback-endpoint"),
+                        "identity" => Some("study-identity"),
+                        "left_system" | "right_system" if value.is_string() => {
+                            Some("system-identity")
+                        }
+                        _ => None,
+                    };
+                    if let Some(replacement) = replacement {
+                        *text = text.replace(
+                            &serde_json::to_string(value).unwrap(),
+                            &serde_json::to_string(replacement).unwrap(),
+                        );
+                    } else if matches!(key.as_str(), "started_unix_ms" | "settle_ms") {
+                        *text =
+                            text.replace(&format!("\"{key}\": {value}"), &format!("\"{key}\": 0"));
+                    }
+                    normalize(value, text);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    normalize(value, text);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut text = String::from_utf8(bytes.to_vec()).unwrap();
+    normalize(&serde_json::from_slice(bytes).unwrap(), &mut text);
+    digest("legacy-report", text.as_bytes())
+}
+
+#[test]
+fn legacy_inspect_compare_and_study_preserve_serialized_envelopes() {
+    let s = Scratch::new();
+    let pack = s.write("legacy.json", ONE.as_bytes());
+    let server = serve(vec![ok_json(&answer(r#"{"answer":"T"}"#, "stop"))]);
+    let out = s.path("run");
+    success(&run(&pack, &server.endpoint(), &out, &[]));
+    let inspected = cli(&["inspect", &out.to_string_lossy(), "--json"]);
+    success(&inspected);
+    let comparison = cli(&[
+        "compare",
+        &out.to_string_lossy(),
+        &out.to_string_lossy(),
+        "--json",
+    ]);
+    success(&comparison);
+    let pack_value = serde_json::from_str(ONE).unwrap();
+    let manifest = s.write(
+        "study.json",
+        &serde_json::to_vec(&study_fixture(&pack_value, &out, &out)).unwrap(),
+    );
+    let study = cli(&[
+        "study",
+        "compare",
+        &manifest.to_string_lossy(),
+        &pack.to_string_lossy(),
+        &out.to_string_lossy(),
+        &out.to_string_lossy(),
+        "--json",
+    ]);
+    success(&study);
+    for (output, version) in [(&inspected, 5), (&comparison, 2), (&study, 2)] {
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["version"], version);
+        assert_no_tool_report_fields(&value);
+    }
+    // Frozen from the text-only binary at 178f03e, after exact byte comparison
+    // against these reports over the same retained synthetic evidence.
+    for (output, expected) in [
+        (
+            &inspected,
+            "122b5f71ce4eaa1f9d9a8f67466f175cb989a6d6a33e0efbc02162e68561f783",
+        ),
+        (
+            &comparison,
+            "99482c0cdbc0df4743e995a5860b4af78465e4a78db8a9123816d064a2572561",
+        ),
+        (
+            &study,
+            "5e82dfc685f9cd6c7186ba928194cd935fd00ddad1350d674e4654974cce9141",
+        ),
+    ] {
+        assert_eq!(legacy_snapshot(&output.stdout), expected);
+    }
+    assert_eq!(server.requests(), 1);
+}
+
+#[test]
+fn missing_tool_followup_remains_unresolved_and_refuses_resume() {
+    let s = Scratch::new();
+    let pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    let good = tool_call("lookup_invoice", r#"{"invoice_id":"INV-7","scale":1}"#);
+    let server = serve(vec![
+        ok_json(&call_response(&good, "tool_calls")),
+        ok_json(&answer(r#"{"total":22}"#, "stop")),
+    ]);
+    let out = s.path("run");
+    success(&tool_run(&pack, &server, &out));
+    fs::remove_dir_all(out.join("attempts/000000/followup")).unwrap();
+    let inspected = tool_inspect(&out);
+    assert_eq!(inspected["attempts"][0]["state"], "unresolved");
+    assert_eq!(inspected["attempts"][0]["outcome"], "unknown");
+    assert_eq!(inspected["attempts"][0]["tool_call"], "valid");
+    let regrade = s.path("regrade");
+    success(&cli(&[
+        "regrade",
+        &out.to_string_lossy(),
+        "--out",
+        &regrade.to_string_lossy(),
+    ]));
+    let row = &json_file(&regrade.join("view.json"))["cases"][0];
+    assert_eq!(row["evidence"], "unresolved");
+    assert_eq!(row["outcome"], "unknown");
+    assert!(!cli(&["resume", &out.to_string_lossy()]).status.success());
+    assert_eq!(server.requests(), 2);
+}
+
+#[test]
+fn mixed_legacy_and_tool_comparison_refuses_incompatible_identity() {
+    let s = Scratch::new();
+    let legacy_pack = s.write("legacy.json", ONE.as_bytes());
+    let tool_pack = s.write("tool.json", &serde_json::to_vec(&tool_pack()).unwrap());
+    let server = serve(vec![
+        ok_json(&answer(r#"{"answer":"T"}"#, "stop")),
+        ok_json(&answer(r#"{"total":22}"#, "stop")),
+    ]);
+    let legacy = s.path("legacy");
+    let tool = s.path("tool");
+    success(&run(&legacy_pack, &server.endpoint(), &legacy, &[]));
+    success(&tool_run(&tool_pack, &server, &tool));
+    let compared = cli(&[
+        "compare",
+        &legacy.to_string_lossy(),
+        &tool.to_string_lossy(),
+        "--json",
+    ]);
+    assert!(!compared.status.success());
+    assert!(compared.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&compared.stderr).contains("incompatible tasks identity"));
+}

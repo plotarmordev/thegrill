@@ -104,6 +104,7 @@ pub(crate) fn admit(bytes: &[u8], pack: &Pack, pack_bytes: &[u8]) -> Result<Stud
     }
     pack::text(&manifest.exclusions, 4096, true, "study exclusions")?;
     pack::protocol(&manifest.protocol)?;
+    pack::tool_profile(pack, &manifest.protocol)?;
     pack::system(&manifest.left_system)?;
     pack::system(&manifest.right_system)?;
     let (identities, inputs) = identity::pack(pack, pack_bytes)?;
