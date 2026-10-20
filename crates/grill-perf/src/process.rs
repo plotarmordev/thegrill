@@ -55,7 +55,7 @@ pub mod program_signals {
     static ACTIVE: Mutex<()> = Mutex::new(());
     static CANCELLED: AtomicBool = AtomicBool::new(false);
 
-    extern "C" fn cancel(_: libc::c_int) {
+    pub(super) extern "C" fn cancel(_: libc::c_int) {
         CANCELLED.store(true, Ordering::SeqCst);
     }
 
@@ -433,8 +433,9 @@ mod tests {
             if cancel {
                 // The leader is already reaped, so cancellation must interrupt
                 // normal-exit drainage rather than the running-program path.
-                // SAFETY: the collector guard has installed the SIGINT handler.
-                assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+                // A raised SIGINT would reach whichever handler a concurrent
+                // test installed last, so invoke the guard's handler directly.
+                program_signals::cancel(libc::SIGINT);
                 let completed = completion.recv_timeout(Duration::from_secs(5)).is_ok();
                 drop((stdout, stderr));
                 assert!(completed, "cancellation waited for pipe EOF");
