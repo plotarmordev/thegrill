@@ -238,6 +238,7 @@ fn verify_submitted(path: &Path) -> Result<Verified> {
                 case_id: c.case_id,
                 input: c.input,
                 outcome: c.outcome,
+                tool_call: None,
                 result: crate::report::ResultKind::graded(c.outcome),
             })
             .collect(),
@@ -335,6 +336,10 @@ pub(crate) struct LoadedAttempt {
     pub reservation: Option<String>,
     pub terminal: Option<String>,
     pub artifact: Option<String>,
+    pub call: Option<String>,
+    pub tool_call: Option<ToolCall>,
+    pub followup: Option<Box<LoadedAttempt>>,
+    replay: Option<(String, usize)>,
     pub outcome: Outcome,
     pub recovered_metadata: Option<CompletionMetadata>,
 }
@@ -423,8 +428,15 @@ fn terminal_consistent(t: &Terminal, stream: bool, protocol: &Protocol) -> bool 
         Reason::Committed => {
             committed
                 && body.complete
-                && matches!(t.stop, Some(Finish::Stop | Finish::Length))
-                && t.final_artifact.is_some()
+                && if t.call.is_some() {
+                    matches!(
+                        t.stop,
+                        Some(Finish::Stop | Finish::Length | Finish::ToolCalls)
+                    ) && t.final_artifact.is_none()
+                } else {
+                    matches!(t.stop, Some(Finish::Stop | Finish::Length))
+                        && t.final_artifact.is_some()
+                }
                 && (stream == body.terminal_offset.is_some())
                 && (stream || !body.truncated)
         }
@@ -436,10 +448,11 @@ fn terminal_consistent(t: &Terminal, stream: bool, protocol: &Protocol) -> bool 
                 && (stream == body.terminal_offset.is_some())
                 && (stream || !body.truncated)
         }
-        Reason::UnsupportedResponse if t.version == 2 && t.stop.is_some() => {
+        Reason::UnsupportedResponse if t.version >= 2 && t.stop.is_some() => {
             !committed
                 && body.complete
-                && matches!(t.stop, Some(Finish::Stop | Finish::Length))
+                && (matches!(t.stop, Some(Finish::Stop | Finish::Length))
+                    || (t.version == 3 && t.stop == Some(Finish::ToolCalls)))
                 && t.final_artifact.is_none()
                 && (stream == body.terminal_offset.is_some())
                 && (stream || !body.truncated)
@@ -452,7 +465,20 @@ fn terminal_consistent(t: &Terminal, stream: bool, protocol: &Protocol) -> bool 
         }
         _ => !committed && t.stop.is_none() && t.final_artifact.is_none(),
     };
-    matches!(t.version, 1 | 2)
+    (matches!(t.version, 1 | 2)
+        || (t.version == 3 && protocol.profile == Profile::DeclaredChatCompletionsV3))
+        && (protocol.profile != Profile::DeclaredChatCompletionsV3 || t.version == 3)
+        && (t.stop != Some(Finish::ToolCalls)
+            || (t.version == 3
+                && (t.call.is_some()
+                    || matches!(t.reason, Reason::Refused | Reason::UnsupportedResponse))))
+        && t.call.as_ref().is_none_or(|c| {
+            t.version == 3
+                && !stream
+                && t.reason == Reason::Committed
+                && c.bytes <= u64::from(protocol.collection.artifact_bytes)
+                && t.final_artifact.is_none()
+        })
         && (t.dispatched
             || (t.http.is_none()
                 && body.bytes == 0
@@ -482,7 +508,8 @@ fn legacy_completion_metadata(
     {
         return None;
     }
-    let mut collector = transport::Collector::new(protocol.collection.artifact_bytes as usize);
+    let mut collector =
+        transport::Collector::new(protocol.collection.artifact_bytes as usize, false);
     let settled = if protocol.stream {
         let consumed = collector.feed(bytes).ok()??;
         if terminal.body.terminal_offset != Some(consumed as u64) {
@@ -509,21 +536,130 @@ fn legacy_completion_metadata(
     })
 }
 
-fn load_attempt(
+fn delivery_matches(t: &Terminal, bytes: &[u8], protocol: &Protocol, calls: bool) -> bool {
+    if t.commitment != Commitment::Committed && t.stop.is_none() {
+        return true;
+    }
+    let collector = transport::Collector::new(protocol.collection.artifact_bytes as usize, calls);
+    let Ok(settled) = collector.entity(bytes) else {
+        return false;
+    };
+    if Some(settled.stop) != t.stop || settled.usage != t.usage {
+        return false;
+    }
+    let matches = |artifact: &Option<Artifact>, bytes: &[u8]| {
+        artifact
+            .as_ref()
+            .is_some_and(|a| a.bytes == bytes.len() as u64 && a.sha256 == identity::sha256(bytes))
+    };
+    match settled.delivery {
+        transport::Delivery::Answer(bytes) => {
+            t.reason == Reason::Committed && matches(&t.final_artifact, &bytes)
+        }
+        transport::Delivery::Call(bytes) => {
+            t.reason == Reason::Committed && matches(&t.call, &bytes)
+        }
+        transport::Delivery::Refused => t.reason == Reason::Refused,
+        transport::Delivery::Absent => t.reason == Reason::UnsupportedResponse,
+    }
+}
+
+fn load_artifacts(
     dir: &Path,
-    attempt: u32,
+    terminal: &Terminal,
     case: &Case,
-    input: &str,
-    plan: &Plan,
-    plan_digest: &str,
-    raw: bool,
-) -> LoadedAttempt {
+    loaded: &mut LoadedAttempt,
+) -> Result<(), &'static str> {
+    if terminal.version == 3
+        && ((terminal.call.is_none() && exists(&dir.join("call.json")))
+            || (terminal.final_artifact.is_none() && exists(&dir.join("final.txt"))))
+    {
+        return Err("artifact exists without a terminal declaration");
+    }
+    if let Some(final_artifact) = &terminal.final_artifact {
+        let artifact = check_file(
+            &dir.join("final.txt"),
+            ARTIFACT_CAP,
+            final_artifact.bytes,
+            &final_artifact.sha256,
+        )
+        .map_err(|_| "final artifact missing or mismatched")?;
+        loaded.artifact = Some(identity::bytes("artifact", &artifact));
+        loaded.outcome = grade::grade(&artifact, &case.acceptance);
+    } else if terminal.reason == Reason::Refused {
+        loaded.outcome = Outcome::Refused;
+    }
+    if let Some(call) = &terminal.call {
+        let bytes = check_file(
+            &dir.join("call.json"),
+            ARTIFACT_CAP,
+            call.bytes,
+            &call.sha256,
+        )
+        .map_err(|_| "call artifact missing or mismatched")?;
+        loaded.call = Some(identity::bytes("call", &bytes));
+        let tool = case
+            .tool
+            .as_ref()
+            .ok_or("call evidence for a tool-free case")?;
+        let (validity, alternative) = if terminal.stop == Some(Finish::Length) {
+            (ToolCall::Malformed, None)
+        } else {
+            grade::tool_call(&bytes, tool)
+        };
+        loaded.tool_call = Some(validity);
+        loaded.outcome = match validity {
+            ToolCall::Wrong => Outcome::Wrong,
+            ToolCall::Malformed => Outcome::Malformed,
+            _ => Outcome::Unknown,
+        };
+        if validity == ToolCall::Valid {
+            let record =
+                transport::call_record(&bytes).map_err(|_| "validated call cannot be replayed")?;
+            loaded.replay = Some((
+                record.id,
+                alternative.ok_or("valid call has no alternative")?,
+            ));
+        }
+    } else if loaded.tool_call.is_some()
+        && (terminal.commitment == Commitment::Committed
+            || (terminal.reason == Reason::UnsupportedResponse && terminal.stop.is_some()))
+    {
+        loaded.tool_call = Some(ToolCall::Absent);
+    }
+    Ok(())
+}
+
+struct ExchangeProjection<'a> {
+    attempt: u32,
+    case: &'a Case,
+    input: &'a str,
+    plan: &'a Plan,
+    plan_digest: &'a str,
+    body: Option<String>,
+    calls: bool,
+}
+
+fn load_exchange(dir: &Path, projection: ExchangeProjection<'_>, raw: bool) -> LoadedAttempt {
+    let ExchangeProjection {
+        attempt,
+        case,
+        input,
+        plan,
+        plan_digest,
+        body: expected_body,
+        calls,
+    } = projection;
     let mut loaded = LoadedAttempt {
         attempt,
         state: AttemptState::NotStarted,
         reservation: None,
         terminal: None,
         artifact: None,
+        call: None,
+        tool_call: (calls && case.tool.is_some()).then_some(ToolCall::Unknown),
+        followup: None,
+        replay: None,
         outcome: Outcome::Unknown,
         recovered_metadata: None,
     };
@@ -552,10 +688,6 @@ fn load_attempt(
     let Ok(reservation) = crate::record::parse::<Reservation>(&reservation_bytes) else {
         return invalid(loaded, "reservation is not a closed record");
     };
-    // The request projection is recomputed from the frozen plan and case, never
-    // trusted from the receipt.
-    let expected_body =
-        transport::request_body(&plan.system.model, &case.messages, &plan.protocol).ok();
     if reservation.version != 1
         || reservation.attempt != attempt
         || reservation.case_id != case.id
@@ -595,7 +727,9 @@ fn load_attempt(
     {
         return invalid(loaded, "terminal lineage does not match its reservation");
     }
-    if !terminal_consistent(&terminal, plan.protocol.stream, &plan.protocol) {
+    if !terminal_consistent(&terminal, plan.protocol.stream, &plan.protocol)
+        || (!calls && terminal.call.is_some())
+    {
         return invalid(
             loaded,
             "terminal is physically or semantically contradictory",
@@ -611,28 +745,76 @@ fn load_attempt(
             Ok(bytes) => {
                 loaded.recovered_metadata =
                     legacy_completion_metadata(&terminal, &bytes, &plan.protocol);
+                if terminal.version == 3
+                    && !delivery_matches(&terminal, &bytes, &plan.protocol, calls)
+                {
+                    return invalid(loaded, "terminal delivery differs from retained response");
+                }
             }
             Err(_) => return invalid(loaded, "raw body evidence missing or mismatched"),
         }
     }
-    if let Some(final_artifact) = &terminal.final_artifact {
-        match check_file(
-            &dir.join("final.txt"),
-            ARTIFACT_CAP,
-            final_artifact.bytes,
-            &final_artifact.sha256,
-        ) {
-            Ok(artifact) => {
-                loaded.artifact = Some(identity::bytes("artifact", &artifact));
-                loaded.outcome = grade::grade(&artifact, &case.acceptance);
-            }
-            Err(_) => return invalid(loaded, "final artifact missing or mismatched"),
-        }
-    } else if terminal.reason == Reason::Refused {
-        loaded.outcome = Outcome::Refused;
+    if let Err(why) = load_artifacts(dir, &terminal, case, &mut loaded) {
+        return invalid(loaded, why);
     }
     loaded.terminal = Some(identity::bytes("terminal-source", &terminal_bytes));
     loaded.state = AttemptState::Terminal(Box::new(terminal));
+    loaded
+}
+
+fn load_attempt(
+    dir: &Path,
+    attempt: u32,
+    case: &Case,
+    input: &str,
+    plan: &Plan,
+    plan_digest: &str,
+    raw: bool,
+) -> LoadedAttempt {
+    let mut loaded = load_exchange(
+        dir,
+        ExchangeProjection {
+            attempt,
+            case,
+            input,
+            plan,
+            plan_digest,
+            body: transport::request_body(&plan.system.model, case, &plan.protocol).ok(),
+            calls: case.tool.is_some(),
+        },
+        raw,
+    );
+    if let Some((id, alternative)) = loaded.replay.take() {
+        let followup_dir = dir.join("followup");
+        let followup = load_exchange(
+            &followup_dir,
+            ExchangeProjection {
+                attempt,
+                case,
+                input,
+                plan,
+                plan_digest,
+                body: transport::followup_body(
+                    &plan.system.model,
+                    case,
+                    &plan.protocol,
+                    &id,
+                    alternative,
+                )
+                .ok(),
+                calls: false,
+            },
+            raw,
+        );
+        if exists(&followup_dir.join("followup")) {
+            loaded.state = AttemptState::Invalid("nested follow-up evidence is out of profile");
+        } else {
+            loaded.outcome = followup.outcome;
+            loaded.followup = Some(Box::new(followup));
+        }
+    } else if exists(&dir.join("followup")) {
+        loaded.state = AttemptState::Invalid("follow-up evidence without a valid call");
+    }
     loaded
 }
 
@@ -655,6 +837,9 @@ pub(crate) fn load(path: &Path) -> Result<Loaded> {
     }
     pack::system(&plan.system)?;
     pack::protocol(&plan.protocol)?;
+    if (pack.version == 5) != (plan.protocol.profile == Profile::DeclaredChatCompletionsV3) {
+        return Err("tool pack and protocol profile disagree".into());
+    }
     // The bound endpoint and fixed transport declaration are recomputed from
     // the plan's own system/protocol, so a plan cannot describe a client that
     // this binary would not have built.
@@ -718,7 +903,17 @@ pub(crate) fn run_view(loaded: &Loaded) -> Result<RunView> {
         .zip(&loaded.inputs)
         .zip(&loaded.attempts)
         .map(|((case, input), a)| {
-            let (evidence, reason) = match &a.state {
+            if let AttemptState::Invalid(what) = &a.state {
+                return Err(format!(
+                    "attempt {} for case {}: {what}",
+                    a.attempt, case.id
+                ));
+            }
+            let deciding = a.followup.as_deref().unwrap_or(a);
+            let (evidence, reason) = match &deciding.state {
+                AttemptState::NotStarted if a.tool_call == Some(ToolCall::Valid) => {
+                    (RunEvidence::Unresolved, None)
+                }
                 AttemptState::NotStarted => (RunEvidence::NotStarted, None),
                 AttemptState::Unresolved => (RunEvidence::Unresolved, None),
                 AttemptState::Invalid(what) => {
@@ -741,15 +936,18 @@ pub(crate) fn run_view(loaded: &Loaded) -> Result<RunView> {
                 input: input.clone(),
                 attempt: a.attempt,
                 terminal: a.terminal.clone(),
+                call: a.call.clone(),
+                tool_call: a.tool_call,
+                followup: a.followup.as_ref().and_then(|f| f.terminal.clone()),
                 reason,
-                artifact: a.artifact.clone(),
+                artifact: deciding.artifact.clone(),
                 evidence,
-                outcome: a.outcome,
+                outcome: deciding.outcome,
             })
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RunView {
-        version: 1,
+        version: if loaded.pack.version == 5 { 2 } else { 1 },
         claim: RunViewClaim::ClientCollectedArtifactsNotAuthenticatedExecution,
         identities: RunIdentities {
             pack: PackIdentities {
@@ -832,6 +1030,7 @@ pub(crate) fn verify(path: &Path) -> Result<Verified> {
                         case_id: c.case_id,
                         input: c.input,
                         outcome: c.outcome,
+                        tool_call: c.tool_call,
                         result: crate::report::attempt_result(attempt),
                     })
                     .collect(),
@@ -849,6 +1048,38 @@ fn copy_checked(from: &Path, to: &Path, cap: usize, domain: &str, digest: &str) 
         ));
     }
     write_new(to, &bytes)
+}
+
+fn copy_exchange(from: &Path, to: &Path, a: &LoadedAttempt) -> Result<()> {
+    let Some(reservation) = &a.reservation else {
+        return Ok(());
+    };
+    create_directory(to)?;
+    copy_checked(
+        &from.join("reservation.json"),
+        &to.join("reservation.json"),
+        RESERVATION_CAP,
+        "reservation-source",
+        reservation,
+    )?;
+    for (name, cap, domain, digest) in [
+        (
+            "terminal.json",
+            TERMINAL_CAP,
+            "terminal-source",
+            &a.terminal,
+        ),
+        ("final.txt", ARTIFACT_CAP, "artifact", &a.artifact),
+        ("call.json", ARTIFACT_CAP, "call", &a.call),
+    ] {
+        if let Some(digest) = digest {
+            copy_checked(&from.join(name), &to.join(name), cap, domain, digest)?;
+        }
+    }
+    if let Some(followup) = &a.followup {
+        copy_exchange(&from.join("followup"), &to.join("followup"), followup)?;
+    }
+    sync_directory(to)
 }
 
 /// Offline regrade: apply the current grader to a run's saved evidence and
@@ -869,42 +1100,144 @@ pub(crate) fn regrade(run: &Path, out: &Path) -> Result<RunView> {
     sync_directory(out)?;
     let source_attempts = run.join("attempts");
     for a in &loaded.attempts {
-        let Some(reservation) = &a.reservation else {
-            continue;
-        };
         let name = attempt_name(a.attempt);
-        let from = source_attempts.join(&name);
-        let to = attempts.join(&name);
-        create_directory(&to)?;
-        copy_checked(
-            &from.join("reservation.json"),
-            &to.join("reservation.json"),
-            RESERVATION_CAP,
-            "reservation-source",
-            reservation,
-        )?;
-        if let (Some(terminal), AttemptState::Terminal(t)) = (&a.terminal, &a.state) {
-            copy_checked(
-                &from.join("terminal.json"),
-                &to.join("terminal.json"),
-                TERMINAL_CAP,
-                "terminal-source",
-                terminal,
-            )?;
-            if let (Some(_), Some(artifact)) = (&t.final_artifact, &a.artifact) {
-                copy_checked(
-                    &from.join("final.txt"),
-                    &to.join("final.txt"),
-                    ARTIFACT_CAP,
-                    "artifact",
-                    artifact,
-                )?;
-            }
-        }
-        sync_directory(&to)?;
+        copy_exchange(&source_attempts.join(&name), &attempts.join(&name), a)?;
     }
     sync_directory(&attempts)?;
     publish_receipt(out, "view.json", &receipt)?;
     sync_directory(parent)?;
     Ok(view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn protocol() -> Protocol {
+        Protocol {
+            profile: Profile::DeclaredChatCompletionsV3,
+            stream: false,
+            token_cap: TokenCap {
+                field: TokenField::MaxCompletionTokens,
+                value: 16,
+            },
+            temperature_milli: None,
+            top_p_milli: None,
+            seed: None,
+            reasoning_effort: None,
+            include_usage: Some(false),
+            collection: Collection {
+                total_ms: 1000,
+                idle_ms: 1000,
+                response_bytes: 8192,
+                artifact_bytes: 1024,
+            },
+            rendering: Rendering {
+                status: RenderingStatus::Unknown,
+                template: None,
+                tokenizer: None,
+            },
+        }
+    }
+
+    fn terminal(body: &[u8], call: &[u8]) -> Terminal {
+        Terminal {
+            version: 3,
+            attempt: 0,
+            case_id: "synthetic".into(),
+            input: String::new(),
+            reservation: String::new(),
+            request: String::new(),
+            dispatched: true,
+            reason: Reason::Committed,
+            detail: String::new(),
+            commitment: Commitment::Committed,
+            stop: Some(Finish::ToolCalls),
+            http: Some(Http {
+                status: 200,
+                version: "HTTP/1.1".into(),
+                content_type: Some("application/json".into()),
+                content_length: Some(body.len() as u64),
+            }),
+            body: Body {
+                bytes: body.len() as u64,
+                sha256: identity::sha256(body),
+                complete: true,
+                truncated: false,
+                terminal_offset: None,
+                surplus_retained: 0,
+                surplus_observed: 0,
+            },
+            final_artifact: None,
+            call: Some(Artifact {
+                bytes: call.len() as u64,
+                sha256: identity::sha256(call),
+            }),
+            usage: None,
+            timing: Timing {
+                started_unix_ms: 0,
+                reserve_ms: 0,
+                headers_ms: None,
+                first_body_ms: None,
+                settle_ms: 0,
+                local_ms: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn tool_terminal_requires_new_profile_and_exclusive_call() {
+        let mut protocol = protocol();
+        let mut terminal = terminal(b"body", b"call");
+        assert!(terminal_consistent(&terminal, false, &protocol));
+        terminal.version = 2;
+        assert!(!terminal_consistent(&terminal, false, &protocol));
+        terminal.version = 3;
+        protocol.profile = Profile::DeclaredChatCompletionsV2;
+        assert!(!terminal_consistent(&terminal, false, &protocol));
+        protocol.profile = Profile::DeclaredChatCompletionsV3;
+        terminal.final_artifact = Some(Artifact {
+            bytes: 0,
+            sha256: identity::sha256(b""),
+        });
+        assert!(!terminal_consistent(&terminal, false, &protocol));
+        terminal.final_artifact = None;
+        terminal.stop = Some(Finish::Length);
+        assert!(terminal_consistent(&terminal, false, &protocol));
+        terminal.reason = Reason::Refused;
+        assert!(!terminal_consistent(&terminal, false, &protocol));
+        terminal.call = None;
+        terminal.stop = Some(Finish::ToolCalls);
+        assert!(terminal_consistent(&terminal, false, &protocol));
+    }
+
+    #[test]
+    fn retained_call_must_match_raw_response_and_exchange_role() {
+        let call =
+            r#"[{"id":"c","type":"function","function":{"name":"lookup","arguments":"{}"}}]"#;
+        let body = format!(
+            r#"{{"choices":[{{"message":{{"content":null,"tool_calls":{call}}},"finish_reason":"tool_calls"}}]}}"#
+        );
+        let mut terminal = terminal(body.as_bytes(), call.as_bytes());
+        let protocol = protocol();
+        assert!(delivery_matches(
+            &terminal,
+            body.as_bytes(),
+            &protocol,
+            true
+        ));
+        assert!(!delivery_matches(
+            &terminal,
+            body.as_bytes(),
+            &protocol,
+            false
+        ));
+        terminal.call.as_mut().unwrap().sha256 = identity::sha256(b"[]");
+        assert!(!delivery_matches(
+            &terminal,
+            body.as_bytes(),
+            &protocol,
+            true
+        ));
+    }
 }

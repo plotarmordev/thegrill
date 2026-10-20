@@ -114,6 +114,15 @@ fn encoded(value: &impl Serialize) -> Result<Vec<u8>> {
 fn prefix(loaded: &Loaded) -> Result<usize> {
     let mut next = 0;
     for a in &loaded.attempts {
+        if let Some(followup) = &a.followup {
+            match &followup.state {
+                AttemptState::Terminal(_) => {}
+                AttemptState::Invalid(why) => {
+                    return Err(format!("damaged follow-up evidence: {why}"));
+                }
+                _ => return Err("uncertain tool follow-up; resume refuses replay".into()),
+            }
+        }
         match &a.state {
             AttemptState::Terminal(_) if a.attempt as usize == next => next += 1,
             AttemptState::NotStarted => {}
@@ -144,6 +153,9 @@ fn snapshot_matches(saved: &RunView, current: &RunView, next: usize) -> bool {
                         && old.input == now.input
                         && old.attempt == now.attempt
                         && old.terminal.is_none()
+                        && old.call.is_none()
+                        && old.followup.is_none()
+                        && old.tool_call == now.tool_call.map(|_| ToolCall::Unknown)
                         && old.reason.is_none()
                         && old.artifact.is_none()
                         && old.evidence == RunEvidence::NotStarted

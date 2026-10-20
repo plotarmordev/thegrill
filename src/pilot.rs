@@ -258,6 +258,8 @@ pub(crate) fn generate(seed: u64, units: usize) -> Result<Pack> {
                     },
                     qualification: qualification(answer),
                     provenance: None,
+                    tool: None,
+                    call_qualification: None,
                 });
             }
             pack.worlds.push(world);

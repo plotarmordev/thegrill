@@ -1,4 +1,4 @@
-use crate::contract::{Acceptance, Grids, Outcome};
+use crate::contract::{Acceptance, Grids, Outcome, ToolCall, ToolTask};
 use serde::Deserialize;
 
 pub(crate) mod atlas;
@@ -14,6 +14,11 @@ pub(crate) const FINAL_STRING_RELATION: &str = "final-marker-json-string-set-v1"
 pub(crate) const FINAL_STRING_IMPLEMENTATION: &str = "grill-final-marker-json-string-set-impl-v1";
 pub(crate) const FINAL_GRID_RELATION: &str = "final-marker-json-grid-set-v1";
 pub(crate) const FINAL_GRID_IMPLEMENTATION: &str = "grill-final-marker-json-grid-set-impl-v1";
+pub(crate) const TOOL_RELATION: &str = "tool-call-exact-arguments-v1";
+// Covers call validity and how a call settles the case outcome: length-stopped
+// calls are malformed, invalid calls end the case with their own grade, absent
+// calls leave the direct answer graded. Bump for any change to these rules.
+pub(crate) const TOOL_IMPLEMENTATION: &str = "grill-tool-call-exact-arguments-impl-v1";
 
 pub(crate) fn revision(acceptance: &Acceptance) -> (&'static str, &'static str) {
     match acceptance {
@@ -144,6 +149,32 @@ pub(crate) fn grade(artifact: &[u8], acceptance: &Acceptance) -> Outcome {
         },
         Acceptance::JsonExact { expected } => atlas::json(artifact, expected),
         Acceptance::TextConstraints { rules } => atlas::constraints(artifact, &rules.0),
+    }
+}
+
+/// Grade one retained `tool_calls` JSON array against the expected call. The
+/// transport record enforces exactly one identified function call; unknown
+/// provider fields are ignored. A well-formed call to another function or with
+/// arguments unequal to every alternative is `wrong`; the first equal
+/// alternative in pack order is returned. Callers settle a length-stopped call
+/// as malformed without grading it.
+pub(crate) fn tool_call(call: &[u8], tool: &ToolTask) -> (ToolCall, Option<usize>) {
+    let Ok(record) = crate::transport::call_record(call) else {
+        return (ToolCall::Malformed, None);
+    };
+    match serde_json::from_str::<atlas::ExactJson>(&record.arguments) {
+        Ok(arguments @ atlas::ExactJson::Object(_)) => {
+            let alternative = (record.name == tool.expected.name)
+                .then(|| tool.expected.arguments.iter().position(|a| *a == arguments))
+                .flatten();
+            let validity = if alternative.is_some() {
+                ToolCall::Valid
+            } else {
+                ToolCall::Wrong
+            };
+            (validity, alternative)
+        }
+        _ => (ToolCall::Malformed, None),
     }
 }
 
@@ -354,5 +385,93 @@ mod tests {
             Some("mint")
         );
         assert_eq!(decode(b"{\"answer\":\"mint\"}", &acceptance), None);
+    }
+
+    #[test]
+    fn tool_call_validity_contract() {
+        let tool: ToolTask = crate::record::parse(
+            br#"{"functions":[
+                {"name":"lookup_invoice","description":"Invoice by ID.","parameters":{"type":"object"}},
+                {"name":"lookup_customer","description":"Customer by ID.","parameters":{"type":"object"}}],
+              "expected":{"name":"lookup_invoice","arguments":[
+                {"invoice_id":"INV-7"},
+                {"invoice_id":"INV-7","currency":"EUR","page":1}]},
+              "result":"{\"total\":22}"}"#,
+        )
+        .unwrap();
+        let call = |name: &str, arguments: &str| {
+            serde_json::json!([{"id":"call-1","type":"function",
+                "function":{"name":name,"arguments":arguments}}])
+            .to_string()
+        };
+        for (artifact, alternative) in [
+            (call("lookup_invoice", r#"{"invoice_id":"INV-7"}"#), 0),
+            (call("lookup_invoice", r#" { "invoice_id" : "INV-\u0037" } "#), 0),
+            // Key order and decimal spelling are insignificant; the first
+            // equal alternative in pack order is reported.
+            (
+                call(
+                    "lookup_invoice",
+                    r#"{"page":1.0,"invoice_id":"INV-7","currency":"EUR"}"#,
+                ),
+                1,
+            ),
+            // Unknown provider fields are ignored at every call level.
+            (
+                r#"[{"index":0,"id":"c","type":"function","function":{"name":"lookup_invoice","arguments":"{\"invoice_id\":\"INV-7\"}","extra":null}}]"#
+                    .to_string(),
+                0,
+            ),
+        ] {
+            assert_eq!(
+                tool_call(artifact.as_bytes(), &tool),
+                (ToolCall::Valid, Some(alternative)),
+                "{artifact}"
+            );
+        }
+        // Well-formed but mistargeted: decoy or misspelled function, wrong,
+        // missing or extra arguments.
+        for artifact in [
+            call("lookup_customer", r#"{"invoice_id":"INV-7"}"#),
+            call("Lookup_invoice", r#"{"invoice_id":"INV-7"}"#),
+            call("lookup_invoice", r#"{"invoice_id":"INV-8"}"#),
+            call("lookup_invoice", "{}"),
+            call("lookup_invoice", r#"{"invoice_id":"INV-7","page":1}"#),
+        ] {
+            assert_eq!(
+                tool_call(artifact.as_bytes(), &tool),
+                (ToolCall::Wrong, None),
+                "{artifact}"
+            );
+        }
+        let one = call("lookup_invoice", r#"{"invoice_id":"INV-7"}"#);
+        let inner = &one[1..one.len() - 1];
+        for artifact in [
+            "[]".to_string(),
+            format!("[{inner},{inner}]"),
+            inner.to_string(),
+            format!("{one} {{}}"),
+            one.replace(r#""id":"call-1","#, ""),
+            one.replace("call-1", ""),
+            one.replace(r#""id":"call-1""#, r#""id":"call-1","id":"call-1""#),
+            one.replace(r#""type":"function""#, r#""type":"tool""#),
+            serde_json::json!([{"id":"c","type":"function",
+                "function":{"name":"lookup_invoice","arguments":{"invoice_id":"INV-7"}}}])
+            .to_string(),
+            call("lookup_invoice", r#"{"invoice_id":"#),
+            call(
+                "lookup_invoice",
+                r#"{"invoice_id":"INV-7","invoice_id":"INV-7"}"#,
+            ),
+            call("lookup_invoice", r#"{"invoice_id":{"a":1,"a":1}}"#),
+            call("lookup_invoice", r#"["INV-7"]"#),
+            call("lookup_invoice", r#"{"invoice_id":"INV-7"} ok"#),
+        ] {
+            assert_eq!(
+                tool_call(artifact.as_bytes(), &tool),
+                (ToolCall::Malformed, None),
+                "{artifact}"
+            );
+        }
     }
 }

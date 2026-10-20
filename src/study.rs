@@ -104,6 +104,9 @@ pub(crate) fn admit(bytes: &[u8], pack: &Pack, pack_bytes: &[u8]) -> Result<Stud
     }
     pack::text(&manifest.exclusions, 4096, true, "study exclusions")?;
     pack::protocol(&manifest.protocol)?;
+    if (pack.version == 5) != (manifest.protocol.profile == Profile::DeclaredChatCompletionsV3) {
+        return Err("tool packs require profile v3 and profile v3 requires a tool pack".into());
+    }
     pack::system(&manifest.left_system)?;
     pack::system(&manifest.right_system)?;
     let (identities, inputs) = identity::pack(pack, pack_bytes)?;

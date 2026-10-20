@@ -64,6 +64,41 @@ struct CaseV4 {
     provenance: CaseProvenance,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaseV5 {
+    id: String,
+    world: String,
+    group: String,
+    #[serde(deserialize_with = "crate::record::objects")]
+    messages: Vec<Message>,
+    acceptance: Acceptance,
+    #[serde(deserialize_with = "crate::record::object")]
+    qualification: Qualification,
+    #[serde(deserialize_with = "crate::record::object")]
+    provenance: CaseProvenance,
+    #[serde(deserialize_with = "crate::record::object")]
+    tool: ToolTask,
+    #[serde(deserialize_with = "crate::record::object")]
+    call_qualification: Qualification,
+}
+
+impl From<CaseV5> for Case {
+    fn from(c: CaseV5) -> Self {
+        Self {
+            id: c.id,
+            world: c.world,
+            group: c.group,
+            messages: c.messages,
+            acceptance: c.acceptance,
+            qualification: c.qualification,
+            provenance: Some(c.provenance),
+            tool: Some(c.tool),
+            call_qualification: Some(c.call_qualification),
+        }
+    }
+}
+
 impl From<CaseV4> for Case {
     fn from(c: CaseV4) -> Self {
         Self {
@@ -74,6 +109,8 @@ impl From<CaseV4> for Case {
             acceptance: c.acceptance,
             qualification: c.qualification,
             provenance: Some(c.provenance),
+            tool: None,
+            call_qualification: None,
         }
     }
 }
@@ -90,6 +127,8 @@ impl From<ArchivalCaseV1> for Case {
             },
             qualification: c.qualification,
             provenance: None,
+            tool: None,
+            call_qualification: None,
         }
     }
 }
@@ -104,6 +143,8 @@ impl From<CaseV2> for Case {
             acceptance: c.acceptance,
             qualification: c.qualification,
             provenance: None,
+            tool: None,
+            call_qualification: None,
         }
     }
 }
@@ -186,6 +227,78 @@ fn provenance(source: &CaseProvenance) -> Result<()> {
     Ok(())
 }
 
+/// Version 5 tool round: declared functions, the expected call and its own
+/// self-qualification through the call grader.
+fn tool(case: &Case) -> Result<()> {
+    let (Some(tool), Some(q)) = (&case.tool, &case.call_qualification) else {
+        return Ok(());
+    };
+    let id = &case.id;
+    if tool.functions.is_empty() || tool.functions.len() > 8 {
+        return Err(format!("case {id}: tool requires 1..=8 functions"));
+    }
+    let mut names = HashSet::new();
+    for function in &tool.functions {
+        let name = function.name.as_str();
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            || !names.insert(name)
+        {
+            return Err(format!(
+                "case {id}: function names must be unique, 1..=64 bytes of [A-Za-z0-9_-]"
+            ));
+        }
+        text(&function.description, 4096, false, "function description")?;
+        if !matches!(function.parameters, grade::atlas::ExactJson::Object(_)) {
+            return Err(format!(
+                "case {id}: function parameters must be a JSON object"
+            ));
+        }
+    }
+    if !names.contains(tool.expected.name.as_str()) {
+        return Err(format!(
+            "case {id}: expected call names an undeclared function"
+        ));
+    }
+    let alternatives = &tool.expected.arguments;
+    if alternatives.is_empty()
+        || alternatives.len() > 16
+        || alternatives.iter().enumerate().any(|(i, a)| {
+            !matches!(a, grade::atlas::ExactJson::Object(_)) || alternatives[..i].contains(a)
+        })
+    {
+        return Err(format!(
+            "case {id}: expected arguments require 1..=16 distinct JSON objects"
+        ));
+    }
+    if q.valid.is_empty() || q.valid.len() > 128 || q.wrong.is_empty() || q.wrong.len() > 128 {
+        return Err("call qualification requires 1..=128 valid and wrong artifacts".into());
+    }
+    for artifact in q.valid.iter().chain(&q.wrong) {
+        text(artifact, ARTIFACT_CAP, true, "call qualification artifact")?;
+    }
+    let mut covered = [false; 16];
+    for artifact in &q.valid {
+        match grade::tool_call(artifact.as_bytes(), tool) {
+            (ToolCall::Valid, Some(alternative)) => covered[alternative] = true,
+            _ => return Err(format!("valid call qualification failed for case {id}")),
+        }
+    }
+    if q.wrong
+        .iter()
+        .any(|a| grade::tool_call(a.as_bytes(), tool).0 == ToolCall::Valid)
+    {
+        return Err(format!("wrong call qualification failed for case {id}"));
+    }
+    if covered[..alternatives.len()].contains(&false) {
+        return Err(format!("unqualified expected arguments in case {id}"));
+    }
+    Ok(())
+}
+
 pub(crate) fn admit(bytes: &[u8]) -> Result<Pack> {
     if bytes.len() > PACK_CAP {
         return Err("pack exceeds byte limit".into());
@@ -195,6 +308,7 @@ pub(crate) fn admit(bytes: &[u8]) -> Result<Pack> {
         1 => crate::record::parse::<WirePack<ArchivalCaseV1>>(bytes).map(Into::into),
         2 | 3 => crate::record::parse::<WirePack<CaseV2>>(bytes).map(Into::into),
         4 => crate::record::parse::<WirePack<CaseV4>>(bytes).map(Into::into),
+        5 => crate::record::parse::<WirePack<CaseV5>>(bytes).map(Into::into),
         _ => return Err("unsupported pack version".into()),
     }
     .map_err(|e| format!("pack JSON: {e}"))?;
@@ -236,6 +350,7 @@ pub(crate) fn admit(bytes: &[u8]) -> Result<Pack> {
             provenance(source)?;
         }
         grade::atlas::admit(&case.acceptance)?;
+        tool(case)?;
         if !worlds.contains(case.world.as_str()) || !groups.contains(case.group.as_str()) {
             return Err(format!("case {} has undeclared world/group", case.id));
         }
@@ -244,7 +359,7 @@ pub(crate) fn admit(bytes: &[u8]) -> Result<Pack> {
         if case.messages.is_empty() || case.messages.len() > 64 {
             return Err(format!("case {} requires 1..=64 messages", case.id));
         }
-        let mut message_bytes = 0usize;
+        let mut message_bytes = case.tool.as_ref().map_or(0, |t| t.result.len());
         for message in &case.messages {
             text(&message.content, MESSAGE_CAP, true, "message")?;
             message_bytes = message_bytes
@@ -327,7 +442,8 @@ pub(crate) fn system(system: &System) -> Result<()> {
 pub(crate) fn protocol(protocol: &Protocol) -> Result<()> {
     // The request controls are bound to the declared profile: v1 records carry
     // neither field; v2 records declare include_usage explicitly and may only
-    // request streaming usage in the streaming mode.
+    // request streaming usage in the streaming mode; the v3 tool round is
+    // nonstreaming only.
     match protocol.profile {
         Profile::DeclaredChatCompletionsV1 => {
             if protocol.reasoning_effort.is_some() || protocol.include_usage.is_some() {
@@ -347,6 +463,13 @@ pub(crate) fn protocol(protocol: &Protocol) -> Result<()> {
             }
             _ => {}
         },
+        Profile::DeclaredChatCompletionsV3 => {
+            if protocol.stream || protocol.include_usage != Some(false) {
+                return Err(
+                    "profile declared-chat-completions-v3 is nonstreaming and declares include_usage false".into(),
+                );
+            }
+        }
     }
     if !(1..=1_048_576).contains(&protocol.token_cap.value)
         || protocol.temperature_milli.is_some_and(|t| t > 2000)
@@ -390,6 +513,13 @@ pub(crate) fn submission(bytes: &[u8], pack: &Pack) -> Result<Submission> {
         crate::record::parse(bytes).map_err(|e| format!("submission JSON: {e}"))?;
     if submission.version != 1 {
         return Err("unsupported submission version".into());
+    }
+    // Submission v1 has no call channel; tool cases are graded only from
+    // collected run evidence.
+    if pack.version == 5 || submission.protocol.profile == Profile::DeclaredChatCompletionsV3 {
+        return Err(
+            "tool-call cases require collected run evidence, not submitted artifacts".into(),
+        );
     }
     system(&submission.system)?;
     protocol(&submission.protocol)?;
@@ -750,6 +880,147 @@ mod tests {
         assert!(protocol(&p).is_err(), "include_usage needs streaming");
         p.include_usage = Some(false);
         protocol(&p).unwrap();
+        p.profile = Profile::DeclaredChatCompletionsV3;
+        protocol(&p).unwrap();
+        p.include_usage = None;
+        assert!(protocol(&p).is_err(), "v3 requires explicit include_usage");
+        p.include_usage = Some(false);
+        p.stream = true;
+        assert!(protocol(&p).is_err(), "v3 is nonstreaming");
+    }
+
+    fn tool_call(name: &str, arguments: &str) -> String {
+        serde_json::json!([{"id":"c1","type":"function",
+            "function":{"name":name,"arguments":arguments}}])
+        .to_string()
+    }
+
+    fn v5_pack() -> serde_json::Value {
+        let mut pack = v4_case(
+            serde_json::json!({"kind":"string-set","accepted":["22"]}),
+            &[r#"{"answer":"22"}"#],
+            &[r#"{"answer":"21"}"#],
+        );
+        pack["version"] = 5.into();
+        pack["cases"][0]["tool"] = serde_json::json!({
+            "functions":[
+                {"name":"lookup_invoice","description":"Invoice by ID.",
+                 "parameters":{"type":"object","properties":{"invoice_id":{"type":"string"}}}},
+                {"name":"lookup_customer","description":"Customer by ID.",
+                 "parameters":{"type":"object"}}],
+            "expected":{"name":"lookup_invoice","arguments":[
+                {"invoice_id":"INV-7"},{"invoice_id":"INV-7","currency":"EUR"}]},
+            "result":"{\"lines\":[{\"quantity\":3,\"unit_price\":4},{\"quantity\":2,\"unit_price\":5}]}"
+        });
+        pack["cases"][0]["call_qualification"] = serde_json::json!({
+            "valid":[
+                tool_call("lookup_invoice", r#"{"invoice_id":"INV-7"}"#),
+                tool_call("lookup_invoice", r#"{"currency":"EUR","invoice_id":"INV-7"}"#)],
+            "wrong":[tool_call("lookup_customer", r#"{"customer_id":"INV-7"}"#), "[]"]
+        });
+        pack
+    }
+
+    #[test]
+    fn v5_tool_cases_admit_and_self_qualify() {
+        let wire = v5_pack();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let pack = admit(&bytes).unwrap();
+        assert!(pack.cases[0].tool.is_some() && pack.cases[0].call_qualification.is_some());
+        // Earlier closed readers refuse the tool fields; v5 requires both.
+        for version in 1..=4 {
+            let mut old = wire.clone();
+            old["version"] = version.into();
+            assert!(
+                admit(&serde_json::to_vec(&old).unwrap()).is_err(),
+                "{version}"
+            );
+        }
+        for field in ["tool", "call_qualification", "provenance"] {
+            let mut missing = wire.clone();
+            missing["cases"][0].as_object_mut().unwrap().remove(field);
+            assert!(
+                admit(&serde_json::to_vec(&missing).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let decoy = serde_json::json!({"name":"decoy","description":"d","parameters":{}});
+        let mut rejected: Vec<(&str, serde_json::Value)> = vec![
+            ("/tool/functions", serde_json::json!([])),
+            ("/tool/functions", serde_json::Value::Array(vec![decoy; 9])),
+            ("/tool/functions/1/name", "lookup_invoice".into()),
+            ("/tool/functions/1/name", "lookup customer".into()),
+            ("/tool/functions/1/name", "".into()),
+            ("/tool/functions/1/name", "x".repeat(65).into()),
+            ("/tool/functions/1/description", "".into()),
+            ("/tool/functions/1/parameters", "object".into()),
+            (
+                "/tool/functions/1",
+                serde_json::json!(["lookup_customer", "d", {}]),
+            ),
+            ("/tool/functions/1/extra", serde_json::json!(null)),
+            ("/tool/expected/name", "lookup_order".into()),
+            ("/tool/expected/arguments", serde_json::json!([])),
+            ("/tool/expected/arguments", serde_json::json!([["INV-7"]])),
+            (
+                "/tool/expected/arguments",
+                serde_json::json!([{"invoice_id":"INV-7"},{"invoice_id":"INV-7"}]),
+            ),
+            (
+                "/tool/expected/arguments/1",
+                serde_json::json!({"invoice_id":"INV-7"}),
+            ),
+            ("/tool/result", 7.into()),
+            ("/tool/result", "x".repeat(MESSAGE_CAP).into()),
+            ("/tool/executable", true.into()),
+            ("/call_qualification/wrong", serde_json::json!([])),
+            ("/call_qualification/valid/1", "[]".into()),
+            (
+                "/call_qualification/wrong/1",
+                tool_call("lookup_invoice", r#"{"invoice_id":"INV-7"}"#).into(),
+            ),
+        ];
+        let alternatives: Vec<_> = (0..17).map(|i| serde_json::json!({"page": i})).collect();
+        rejected.push(("/tool/expected/arguments", alternatives.into()));
+        for (pointer, value) in rejected {
+            let mut bad = wire.clone();
+            let case = &mut bad["cases"][0];
+            if case.pointer(pointer).is_some() {
+                *case.pointer_mut(pointer).unwrap() = value;
+            } else {
+                let (parent, key) = pointer.rsplit_once('/').unwrap();
+                case.pointer_mut(parent).unwrap()[key] = value;
+            }
+            assert!(
+                admit(&serde_json::to_vec(&bad).unwrap()).is_err(),
+                "{pointer}"
+            );
+        }
+        // Every argument alternative needs a passing qualification artifact.
+        let mut uncovered = wire.clone();
+        uncovered["cases"][0]["call_qualification"]["valid"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(admit(&serde_json::to_vec(&uncovered).unwrap()).is_err());
+        // Submitted artifacts carry no call channel: v5 packs and the v3
+        // profile are refused before any answer is read.
+        let error = submission(SUB, &pack).unwrap_err();
+        assert!(error.contains("collected run evidence"), "{error}");
+        let v3 = std::str::from_utf8(SUB)
+            .unwrap()
+            .replacen(
+                "declared-chat-completions-v1",
+                "declared-chat-completions-v3",
+                1,
+            )
+            .replacen(
+                "\"seed\": null",
+                "\"seed\": null,\n    \"include_usage\": false",
+                1,
+            );
+        let error = submission(v3.as_bytes(), &admit(PACK).unwrap()).unwrap_err();
+        assert!(error.contains("collected run evidence"), "{error}");
     }
 
     #[test]

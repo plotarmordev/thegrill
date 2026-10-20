@@ -12,7 +12,7 @@ mod study;
 mod transport;
 
 use clap::{Parser, Subcommand};
-use contract::Result;
+use contract::{Result, ToolCall};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -210,6 +210,7 @@ fn result_line(counts: &report::ResultCounts) -> String {
         ("local-error", counts.local_error),
         ("invalid-evidence", counts.invalid_evidence),
         ("other-ungraded", counts.other_ungraded),
+        ("invalid-tool-call", counts.invalid_tool_call.unwrap_or(0)),
     ] {
         if count != 0 {
             if !text.is_empty() {
@@ -219,6 +220,36 @@ fn result_line(counts: &report::ResultCounts) -> String {
         }
     }
     text
+}
+
+fn tool_calls_line(label: &str, counts: Option<&report::ToolCallCounts>) -> Result<()> {
+    let Some(c) = counts else { return Ok(()) };
+    let a = &c.after_valid_call;
+    line(&format!(
+        "{} tool-calls: cases={} valid={} wrong={} malformed={} absent={} unknown={}; after-valid-call: success={} wrong={} malformed={} refused={} unknown={}",
+        report::escape(label),
+        c.cases,
+        c.valid,
+        c.wrong,
+        c.malformed,
+        c.absent,
+        c.unknown,
+        a.success,
+        a.wrong,
+        a.malformed,
+        a.refused,
+        a.unknown
+    ))
+}
+
+fn tool_call_label(call: ToolCall) -> &'static str {
+    match call {
+        ToolCall::Valid => "valid",
+        ToolCall::Wrong => "wrong",
+        ToolCall::Malformed => "malformed",
+        ToolCall::Absent => "absent",
+        ToolCall::Unknown => "unknown",
+    }
 }
 
 #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
@@ -444,6 +475,7 @@ fn execute(cli: Cli) -> Result<()> {
                 "Results: {}",
                 result_line(&inspection.result_counts)
             ))?;
+            tool_calls_line("Run", inspection.tool_calls.as_ref())?;
             let usage = &inspection.usage_coverage;
             line(&format!(
                 "Usage: unvalidated provider last snapshots, not complete or validated billing; snapshots={}/{}; field present/unknown: prompt={}/{} completion={}/{} total={}/{}",
@@ -469,6 +501,9 @@ fn execute(cli: Cli) -> Result<()> {
                     a.metadata_source,
                     a.detail.map(report::escape).unwrap_or_default()
                 ))?;
+                if let Some(call) = a.tool_call {
+                    line(&format!("    tool_call={}", tool_call_label(call)))?;
+                }
                 if let Some(usage) = a.usage {
                     line(&format!(
                         "    unvalidated provider snapshot: prompt={} completion={} total={}",
@@ -530,6 +565,8 @@ fn execute(cli: Cli) -> Result<()> {
                 }
                 line(&format!("A results: {}", result_line(&c.left_results)))?;
                 line(&format!("B results: {}", result_line(&c.right_results)))?;
+                tool_calls_line("A", c.left_tool_calls.as_ref())?;
+                tool_calls_line("B", c.right_tool_calls.as_ref())?;
                 line(&format!(
                     "B-A bounds [{}/{}, {}/{}]; both-success={} both-fail={} gains={} losses={} either-unknown={}",
                     c.delta_b_minus_a.lower,
@@ -619,6 +656,8 @@ fn execute_study(command: StudyCommand) -> Result<()> {
             let c = &analysis.comparison;
             line(&format!("A results: {}", result_line(&c.left_results)))?;
             line(&format!("B results: {}", result_line(&c.right_results)))?;
+            tool_calls_line("A", c.left_tool_calls.as_ref())?;
+            tool_calls_line("B", c.right_tool_calls.as_ref())?;
             line(&format!(
                 "All cases: gains={} losses={} either-unknown={}; B-A bounds [{}/{}, {}/{}]",
                 c.paired.gains,
@@ -657,6 +696,8 @@ fn execute_study(command: StudyCommand) -> Result<()> {
 }
 
 fn study_summary_line(summary: &report::PairSummary) -> Result<()> {
+    tool_calls_line("A", summary.left_tool_calls.as_ref())?;
+    tool_calls_line("B", summary.right_tool_calls.as_ref())?;
     line(&format!(
         "  N={} gains={} losses={} either-unknown={}; B-A bounds [{}/{}, {}/{}]",
         summary.n,
