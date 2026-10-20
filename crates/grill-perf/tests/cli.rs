@@ -750,11 +750,18 @@ fn evidence_is_not_published_while_a_peer_request_is_active() {
             );
             checked.store(true, Ordering::SeqCst);
         } else {
-            thread::sleep(Duration::from_millis(180));
+            // The peer stays active until request 0 has checked, however late it is scheduled.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !checked.load(Ordering::SeqCst) && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(1));
+            }
             finish(&mut s, Some(8), None);
         }
     });
-    successful(&run(&temp, &server, "run", &workload(2, 0, 1)));
+    let mut w = workload(2, 0, 1);
+    w["limits"]["total_ms"] = json!(15000);
+    w["limits"]["idle_ms"] = json!(12000);
+    successful(&run(&temp, &server, "run", &w));
     assert!(barrier.load(Ordering::SeqCst));
     assert!(temp.path("run/wave-000000/response-0000.bin").exists());
 }
