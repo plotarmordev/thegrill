@@ -1,5 +1,9 @@
 # Performance release notes
 
+## Unreleased
+
+- Fix media runner and setup execution to preserve declared symlink paths, including virtualenv interpreters, while recording resolved targets and their hashes.
+
 ## Version 0.9.0 — experimental image benchmarking
 
 - Add experimental image CLI [`media preflight|capture|inspect|compare`](MEDIA.md):

@@ -57,15 +57,16 @@ struct GateResult {
 
 fn same_runner(a: &Loaded, b: &Loaded) -> bool {
     a.plan.runner_bytes == b.plan.runner_bytes
-        && a.receipt.program.sha256 == b.receipt.program.sha256
+        && a.receipt.program.declared_path == b.receipt.program.declared_path
+        && a.receipt.program.resolved_sha256 == b.receipt.program.resolved_sha256
         && a.receipt
             .setup_program
             .as_ref()
-            .map(|program| &program.sha256)
+            .map(|program| (&program.declared_path, &program.resolved_sha256))
             == b.receipt
                 .setup_program
                 .as_ref()
-                .map(|program| &program.sha256)
+                .map(|program| (&program.declared_path, &program.resolved_sha256))
         && a.deployment == b.deployment
 }
 
@@ -91,7 +92,7 @@ fn admit(captures: &[Loaded], arms: &[Arm]) -> Result<()> {
         return Err("every declared slot must be supplied, including b2".into());
     }
     if !same_runner(a, captures.last().expect("reference return")) {
-        return Err("A and A2 runner bytes, program or setup hash, or deployment differ".into());
+        return Err("A and A2 runner bytes, program, setup or deployment differ".into());
     }
     if same_runner(a, &captures[1]) {
         return Err("B must differ from A in runner, program, setup or deployment".into());
