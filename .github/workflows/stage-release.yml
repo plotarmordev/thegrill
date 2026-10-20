@@ -147,17 +147,16 @@ jobs:
       - name: Existing checks using synthetic and loopback fixtures
         run: |
           set -euo pipefail
-          # This override applies only to fixture builds, never the exact-source release stager.
           if [ "${{ matrix.workspace-checks }}" = "true" ]; then
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
+            cargo +1.98.0 build --workspace --locked
             cargo +1.98.0 fmt --all --check
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
+            cargo +1.98.0 test --workspace --locked -- --test-threads=1
+            cargo +1.98.0 clippy --workspace --locked --all-targets -- -D warnings
           else
             # macOS builds the portable grill-perf slice only, as in the CI macos-performance job.
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 build -p grill-perf --locked
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked -- --test-threads=1
-            cargo +1.98.0 --config profile.dev.package.sha2.opt-level=3 clippy -p grill-perf --locked --all-targets -- -D warnings
+            cargo +1.98.0 build -p grill-perf --locked
+            cargo +1.98.0 test -p grill-perf --locked -- --test-threads=1
+            cargo +1.98.0 clippy -p grill-perf --locked --all-targets -- -D warnings
           fi
       - name: Stage exact clean source
         run: |

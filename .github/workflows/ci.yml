@@ -21,15 +21,14 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
-      # Speed software SHA in test builds without changing pinned manifests or release builds.
       - name: Build
-        run: cargo --config profile.dev.package.sha2.opt-level=3 build --workspace --locked
+        run: cargo build --workspace --locked
       - name: Format
         run: cargo fmt --all --check
       - name: Test
-        run: cargo --config profile.dev.package.sha2.opt-level=3 test --workspace --locked -- --test-threads=1
+        run: cargo test --workspace --locked -- --test-threads=1
       - name: Clippy
-        run: cargo --config profile.dev.package.sha2.opt-level=3 clippy --workspace --locked --all-targets -- -D warnings
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   macos-performance:
     runs-on: macos-15
@@ -41,8 +40,8 @@ jobs:
           toolchain: 1.98.0
           components: clippy
       - name: Build performance CLI
-        run: cargo --config profile.dev.package.sha2.opt-level=3 build -p grill-perf --locked
+        run: cargo build -p grill-perf --locked
       - name: Test performance CLI
-        run: cargo --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked -- --test-threads=1
+        run: cargo test -p grill-perf --locked -- --test-threads=1
       - name: Clippy performance CLI
-        run: cargo --config profile.dev.package.sha2.opt-level=3 clippy -p grill-perf --locked --all-targets -- -D warnings
+        run: cargo clippy -p grill-perf --locked --all-targets -- -D warnings
