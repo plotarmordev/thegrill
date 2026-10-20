@@ -516,6 +516,13 @@ fn media_modality_fields_and_templates_are_closed() {
 }
 
 #[test]
+fn audio_workload_rejects_mp4_container() {
+    let mut f = audio_fixture();
+    f.workload["outputs"][0]["container"] = json!("mp4");
+    f.reject("outputs.output.container does not match modality");
+}
+
+#[test]
 fn audio_capture_accepts_unpadded_odd_final_data() {
     for external_pad in [false, true] {
         let mut f = audio_fixture();
@@ -633,7 +640,7 @@ fn modality_required_fields_and_output_bounds_name_the_field() {
                     .unwrap()
                     .remove(*field)
                     .unwrap();
-                f.reject(&format!("{context}.{field}: missing field"));
+                f.reject(&format!("{context}: missing field `{field}`"));
                 f.workload.pointer_mut(section).unwrap()[field] = json!(0);
                 f.reject(&format!("{context}.{field} must be"));
                 f.workload.pointer_mut(section).unwrap()[field] = old;
@@ -692,24 +699,45 @@ fn declared_audio_track_requires_nonempty_samples_bytes_and_duration() {
 
 #[test]
 fn video_fractional_rate_cannot_match_rounded_integer_expectation() {
-    let mut f = video_fixture(false);
-    f.workload["request"]["frames"] = json!(30);
-    f.workload["request"]["fps"] = json!(30);
-    f.workload["outputs"][0]["expect"]["frames"] = json!(30);
-    f.workload["outputs"][0]["expect"]["fps"] = json!(30);
-    f.workload["outputs"][0]["expect"]["duration_us"] = json!(1001000);
-    fs::write(
-        f.root.path("prepared"),
-        progressive(&[TrackSpec::video(16, 16, 30, 30000, 1001)], 1000),
-    )
-    .unwrap();
+    for (timescale, delta, numerator, denominator) in
+        [(30000, 1001, 30000, 1001), (30030, 1000, 3003, 100)]
+    {
+        let mut f = video_fixture(false);
+        f.workload["request"]["frames"] = json!(30);
+        f.workload["request"]["fps"] = json!(30);
+        f.workload["outputs"][0]["expect"]["frames"] = json!(30);
+        f.workload["outputs"][0]["expect"]["fps"] = json!(30);
+        f.workload["outputs"][0]["expect"]["duration_us"] =
+            json!(30 * u64::from(delta) * 1_000_000 / u64::from(timescale));
+        fs::write(
+            f.root.path("prepared"),
+            progressive(&[TrackSpec::video(16, 16, 30, timescale, delta)], 1000),
+        )
+        .unwrap();
+        let report = f.captured();
+        assert_eq!(
+            report["runs"][1]["outputs"][0]["validation"]["fps"],
+            json!({"numerator":numerator,"denominator":denominator})
+        );
+        assert_eq!(report["cells"][0]["eligible"], 0);
+        assert!(report["runs"][1]["frames_per_second_end_to_end"].is_null());
+        successful(&f.inspect_capture());
+    }
+}
+
+#[test]
+fn video_header_duration_is_descriptive_not_an_expectation_source() {
+    let f = video_fixture(false);
+    let mut bytes = fs::read(f.root.path("prepared")).unwrap();
+    let mdhd = bytes.windows(4).position(|tag| tag == b"mdhd").unwrap() + 4;
+    bytes[mdhd + 16..mdhd + 20].copy_from_slice(&2500u32.to_be_bytes());
+    fs::write(f.root.path("prepared"), bytes).unwrap();
     let report = f.captured();
-    assert_eq!(
-        report["runs"][1]["outputs"][0]["validation"]["fps"],
-        json!({"numerator":30000,"denominator":1001})
-    );
-    assert_eq!(report["cells"][0]["eligible"], 0);
-    assert!(report["runs"][1]["frames_per_second_end_to_end"].is_null());
+    assert_eq!(report["cells"][0]["eligible"], 3);
+    let validation = &report["runs"][1]["outputs"][0]["validation"];
+    assert_eq!(validation["media_duration_us"], 1500000);
+    assert_eq!(validation["mdhd_duration_us"], 2500000);
+    assert_eq!(validation["fps"], json!({"numerator":2,"denominator":1}));
     successful(&f.inspect_capture());
 }
 

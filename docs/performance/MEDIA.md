@@ -133,6 +133,8 @@ and timescale; retained `fps` has exact `numerator` and `denominator` fields.
 Width and height expectations use coded sample-entry dimensions;
 track-header display dimensions are reported separately, allowing anamorphic output.
 Both sample-timing `media_duration_us` and presentation `duration_us` are retained.
+The media header's `mdhd_duration_us` is descriptive and may differ from sample
+timing, as in variable-frame-rate remuxes; it does not determine eligibility.
 A single unit-rate edit with nonnegative media time sets presentation duration;
 its segment may exceed media duration by at most one movie-timescale tick for
 muxer rounding. Without an edit, the durations are equal. Multi-entry or empty

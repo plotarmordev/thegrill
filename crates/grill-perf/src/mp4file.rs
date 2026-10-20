@@ -54,9 +54,9 @@ impl Rational {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Track {
     pub kind: TrackKind,
-    pub timescale: u32,
     pub duration_us: u64,
     pub media_duration_us: u64,
+    pub mdhd_duration_us: u64,
     pub sample_count: u64,
     pub sample_bytes: u64,
     pub width: Option<u32>,
@@ -783,7 +783,7 @@ fn parse_fragments(
     bytes: &[u8],
     tracks: &mut [TrackState],
     fragmented: bool,
-) -> Result<bool, Failure> {
+) -> Result<(), Failure> {
     let mut found = false;
     for item in Boxes::new(bytes) {
         let item = item?;
@@ -812,7 +812,7 @@ fn parse_fragments(
     if fragmented && !found {
         return Err(Failure::InvalidFragment);
     }
-    Ok(found)
+    Ok(())
 }
 
 fn microseconds(duration: u64, timescale: u32) -> Result<u64, Failure> {
@@ -820,11 +820,7 @@ fn microseconds(duration: u64, timescale: u32) -> Result<u64, Failure> {
         .map_err(|_| Failure::Overflow)
 }
 
-fn finish_track(
-    state: TrackState,
-    movie_timescale: u32,
-    fragmented: bool,
-) -> Result<Track, Failure> {
+fn finish_track(state: TrackState, movie_timescale: u32) -> Result<Track, Failure> {
     let metadata = state.metadata;
     if state.sample_count == 0 || state.duration == 0 {
         return Err(Failure::InvalidTiming);
@@ -832,12 +828,8 @@ fn finish_track(
     if state.sample_bytes == 0 {
         return Err(Failure::InsufficientSampleData);
     }
-    if metadata.declared_duration != state.duration
-        && !(fragmented && metadata.declared_duration == 0)
-    {
-        return Err(Failure::InvalidTiming);
-    }
     let media_duration_us = microseconds(state.duration, metadata.timescale)?;
+    let mdhd_duration_us = microseconds(metadata.declared_duration, metadata.timescale)?;
     if metadata.kind == TrackKind::Audio && media_duration_us == 0 {
         return Err(Failure::InvalidTiming);
     }
@@ -872,9 +864,9 @@ fn finish_track(
     };
     Ok(Track {
         kind: metadata.kind,
-        timescale: metadata.timescale,
         duration_us,
         media_duration_us,
+        mdhd_duration_us,
         sample_count: state.sample_count,
         sample_bytes: state.sample_bytes,
         width,
@@ -925,12 +917,12 @@ pub(crate) fn check(bytes: &[u8]) -> Result<Checked, Failure> {
     if let Some(mvex) = mvex {
         parse_defaults(mvex, &mut tracks)?;
     }
-    let fragmented = parse_fragments(bytes, &mut tracks, mvex.is_some())?;
+    parse_fragments(bytes, &mut tracks, mvex.is_some())?;
     let mut total = 0;
     let mut checked = Vec::with_capacity(tracks.len());
     for state in tracks {
         total = add(total, state.sample_bytes)?;
-        checked.push(finish_track(state, movie_timescale, fragmented)?);
+        checked.push(finish_track(state, movie_timescale)?);
     }
     if total > media.total {
         return Err(Failure::InsufficientSampleData);
@@ -1057,9 +1049,9 @@ mod tests {
             result.tracks[0],
             Track {
                 kind: TrackKind::Video,
-                timescale: 1000,
                 duration_us: 1_200_000,
                 media_duration_us: 1_200_000,
+                mdhd_duration_us: 1_200_000,
                 sample_count: 30,
                 sample_bytes: 120,
                 width: Some(640),
@@ -1402,6 +1394,10 @@ mod tests {
             Err(Failure::InvalidFragment)
         );
         assert_eq!(
+            check(&patch(&bytes, &[b"moov", b"mvex", b"trex"], 8, 2)),
+            Err(Failure::InvalidFragment)
+        );
+        assert_eq!(
             check(&replace(&bytes, &[b"moov", b"mvex", b"trex"], &[])),
             Err(Failure::InvalidFragment)
         );
@@ -1680,15 +1676,6 @@ mod tests {
             Err(Failure::UnsupportedVersion)
         );
         assert_eq!(
-            check(&patch(
-                &bytes,
-                &[b"moov", b"trak", b"mdia", b"mdhd"],
-                16,
-                1201
-            )),
-            Err(Failure::InvalidTiming)
-        );
-        assert_eq!(
             check(&patch(&bytes, &[b"moov", b"mvhd"], 12, 0)),
             Err(Failure::InvalidTiming)
         );
@@ -1723,8 +1710,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multiple_fragment_tracks_and_fragments_accumulate() {
+    fn two_track_fragment(audio_base_is_moof: bool) -> (Vec<u8>, Vec<u8>) {
         let ftyp = box_bytes(b"ftyp", b"isom\0\0\0\0isom");
         let empty_video = TrackSpec {
             sample_count: 0,
@@ -1748,35 +1734,47 @@ mod tests {
             ]
             .concat(),
         );
-        let mut moof = box_bytes(
-            b"moof",
+        let video_traf = box_bytes(
+            b"traf",
             &[
-                box_bytes(
-                    b"traf",
-                    &[
-                        box_bytes(b"tfhd", &words(&[0, 1])),
-                        box_bytes(b"trun", &words(&[1, 2, 0])),
-                    ]
-                    .concat(),
-                ),
-                box_bytes(
-                    b"traf",
-                    &[
-                        box_bytes(b"tfhd", &words(&[0, 2])),
-                        box_bytes(b"trun", &words(&[0, 3])),
-                    ]
-                    .concat(),
-                ),
+                box_bytes(b"tfhd", &words(&[0, 1])),
+                box_bytes(b"trun", &words(&[1, 2, 0])),
             ]
             .concat(),
         );
+        let audio_flags = if audio_base_is_moof { 0x020000 } else { 0 };
+        let audio_run = if audio_base_is_moof {
+            words(&[1, 3, 0])
+        } else {
+            words(&[0, 3])
+        };
+        let mut audio_traf = box_bytes(
+            b"traf",
+            &[
+                box_bytes(b"tfhd", &words(&[audio_flags, 2])),
+                box_bytes(b"trun", &audio_run),
+            ]
+            .concat(),
+        );
+        if audio_base_is_moof {
+            let moof_size = 8 + video_traf.len() + audio_traf.len();
+            let audio_offset = moof_size + 8 + 8;
+            audio_traf = patch(&audio_traf, &[b"traf", b"trun"], 8, audio_offset as u32);
+        }
+        let mut moof = box_bytes(b"moof", &[video_traf, audio_traf].concat());
         moof = patch(
             &moof,
             &[b"moof", b"traf", b"trun"],
             8,
             moof.len() as u32 + 8,
         );
-        let mut bytes = [ftyp, moov, moof.clone(), box_bytes(b"mdat", &[1; 20])].concat();
+        let bytes = [ftyp, moov, moof.clone(), box_bytes(b"mdat", &[1; 20])].concat();
+        (bytes, moof)
+    }
+
+    #[test]
+    fn multiple_fragment_tracks_and_fragments_accumulate() {
+        let (mut bytes, moof) = two_track_fragment(false);
         let checked = check(&bytes).unwrap();
         assert_eq!(
             (
@@ -1841,5 +1839,61 @@ mod tests {
             check(&patch(&bytes, &table_path(b"stco"), 4, 0)),
             Err(Failure::InvalidBox)
         );
+    }
+
+    #[test]
+    fn declared_mdhd_duration_is_descriptive() {
+        let bytes = progressive(&[video()], 1000);
+        let mismatched = patch(&bytes, &[b"moov", b"trak", b"mdia", b"mdhd"], 16, 1201);
+        let checked = check(&mismatched).unwrap();
+        let track = &checked.tracks[0];
+        assert_eq!(track.mdhd_duration_us, 1_201_000);
+        assert_eq!(track.media_duration_us, 1_200_000);
+        assert_eq!(track.duration_us, 1_200_000);
+        assert_eq!(track.sample_count, 30);
+        assert_eq!(
+            track.fps,
+            Some(Rational {
+                numerator: 25,
+                denominator: 1
+            })
+        );
+        let fragment = fragmented();
+        assert_eq!(check(&fragment).unwrap().tracks[0].mdhd_duration_us, 0);
+        let mismatched = patch(&fragment, &[b"moov", b"trak", b"mdia", b"mdhd"], 16, 999);
+        let checked = check(&mismatched).unwrap();
+        assert_eq!(checked.tracks[0].mdhd_duration_us, 999_000);
+        assert_eq!(checked.tracks[0].media_duration_us, 120_000);
+        assert_eq!(checked.tracks[0].sample_count, 3);
+        assert_eq!(
+            checked.tracks[0].fps,
+            Some(Rational {
+                numerator: 25,
+                denominator: 1
+            })
+        );
+    }
+
+    #[test]
+    fn second_traf_default_base_is_moof_not_previous_traf_end() {
+        let (bytes, _) = two_track_fragment(true);
+        let checked = check(&bytes).unwrap();
+        assert_eq!(checked.tracks[0].kind, TrackKind::Video);
+        assert_eq!(checked.tracks[1].kind, TrackKind::Audio);
+        assert_eq!(
+            (
+                checked.tracks[0].sample_count,
+                checked.tracks[0].sample_bytes
+            ),
+            (2, 8)
+        );
+        assert_eq!(
+            (
+                checked.tracks[1].sample_count,
+                checked.tracks[1].sample_bytes
+            ),
+            (3, 12)
+        );
+        assert_eq!(checked.tracks[1].media_duration_us, 60_000);
     }
 }

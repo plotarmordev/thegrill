@@ -144,6 +144,8 @@ struct Validation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     media_duration_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    mdhd_duration_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     display_width: Option<crate::mp4file::Rational>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display_height: Option<crate::mp4file::Rational>,
@@ -269,7 +271,6 @@ struct CellSummary {
     determinism_by_seed: Vec<Determinism>,
 }
 #[derive(Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Inspection {
     version: u32,
     kind: String,
@@ -365,6 +366,7 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
         reason: None,
         duration_us: None,
         media_duration_us: None,
+        mdhd_duration_us: None,
         display_width: None,
         display_height: None,
         sample_rate: None,
@@ -434,15 +436,16 @@ fn validate_video(bytes: &[u8], result: &mut Validation) {
     result.frames = Some(video.sample_count);
     result.duration_us = Some(video.duration_us);
     result.media_duration_us = Some(video.media_duration_us);
+    result.mdhd_duration_us = Some(video.mdhd_duration_us);
     result.display_width = video.display_width;
     result.display_height = video.display_height;
     result.fps = video.fps;
-    result.audio = Some(checked.tracks.iter().any(|track| {
-        track.kind == crate::mp4file::TrackKind::Audio
-            && track.sample_count > 0
-            && track.sample_bytes > 0
-            && track.media_duration_us > 0
-    }));
+    result.audio = Some(
+        checked
+            .tracks
+            .iter()
+            .any(|track| track.kind == crate::mp4file::TrackKind::Audio),
+    );
 }
 
 fn expectations_match(expect: &Expect, observed: &Validation) -> bool {

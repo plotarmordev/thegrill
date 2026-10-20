@@ -411,7 +411,7 @@ fn validate_fields(
     modality: Modality,
     context: &str,
     expect: bool,
-    values: [Option<u64>; 10],
+    values: &[(&str, Option<u64>)],
 ) -> Result<()> {
     use Presence::{Forbidden as F, Optional as O, Required as R};
     const RULES: [FieldRule; 10] = [
@@ -491,7 +491,11 @@ fn validate_fields(
         Modality::Audio => 1,
         Modality::Video => 2,
     };
-    for (rule, value) in RULES.iter().zip(values) {
+    for rule in &RULES {
+        let value = values
+            .iter()
+            .find(|(name, _)| *name == rule.name)
+            .and_then(|(_, value)| *value);
         let presence = if expect {
             rule.expect[index]
         } else {
@@ -499,10 +503,7 @@ fn validate_fields(
         };
         match (presence, value) {
             (Presence::Required, None) => {
-                return Err(format!(
-                    "{context}.{}: missing field `{}`",
-                    rule.name, rule.name
-                ));
+                return Err(format!("{context}: missing field `{}`", rule.name));
             }
             (Presence::Forbidden, Some(_)) => {
                 return Err(format!(
@@ -537,17 +538,15 @@ fn validate_expect(output: &Output, modality: Modality) -> Result<()> {
         modality,
         &format!("outputs.{name}.expect"),
         true,
-        [
-            e.width.map(u64::from),
-            e.height.map(u64::from),
-            None,
-            None,
-            e.frames.map(u64::from),
-            e.fps.map(u64::from),
-            e.duration_us,
-            e.sample_rate.map(u64::from),
-            e.channels.map(u64::from),
-            e.audio.map(u64::from),
+        &[
+            ("width", e.width.map(u64::from)),
+            ("height", e.height.map(u64::from)),
+            ("frames", e.frames.map(u64::from)),
+            ("fps", e.fps.map(u64::from)),
+            ("duration_us", e.duration_us),
+            ("sample_rate", e.sample_rate.map(u64::from)),
+            ("channels", e.channels.map(u64::from)),
+            ("audio", e.audio.map(u64::from)),
         ],
     )
 }
@@ -570,17 +569,15 @@ fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()
         modality,
         context,
         false,
-        [
-            r.width.map(u64::from),
-            r.height.map(u64::from),
-            r.steps.map(u64::from),
-            r.images_per_run.map(u64::from),
-            r.frames.map(u64::from),
-            r.fps.map(u64::from),
-            r.duration_us,
-            r.sample_rate.map(u64::from),
-            None,
-            None,
+        &[
+            ("width", r.width.map(u64::from)),
+            ("height", r.height.map(u64::from)),
+            ("steps", r.steps.map(u64::from)),
+            ("images_per_run", r.images_per_run.map(u64::from)),
+            ("frames", r.frames.map(u64::from)),
+            ("fps", r.fps.map(u64::from)),
+            ("duration_us", r.duration_us),
+            ("sample_rate", r.sample_rate.map(u64::from)),
         ],
     )
 }
