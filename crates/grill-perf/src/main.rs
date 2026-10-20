@@ -9,6 +9,7 @@ mod media;
 mod metrics;
 mod microbench;
 mod model;
+mod mp4file;
 mod outputs;
 mod policy;
 mod process;
@@ -23,6 +24,7 @@ mod serving_resources;
 mod startup;
 mod study;
 mod systemone;
+mod wavfile;
 mod wire;
 
 use clap::{Parser, Subcommand};

@@ -1,4 +1,4 @@
-//! Admission and retained evidence for operator-declared image processes.
+//! Admission and retained evidence for operator-declared media processes.
 mod cache;
 mod capture;
 use crate::{
@@ -19,13 +19,16 @@ const MAX_SEEDS: usize = 16;
 const MAX_CANVAS: u32 = 16384;
 const MAX_STEPS: u32 = 1000;
 const MAX_IMAGES: u32 = 64;
+const MAX_FRAMES: u64 = 100_000;
+const MAX_FPS: u64 = 240;
+const MAX_DURATION_US: u64 = 3_600_000_000;
 const MAX_WARMUPS: u32 = 20;
 const MAX_MEASURED: u32 = 100;
 const PROMPT_CAP: usize = 16 * 1024;
 const PROGRAM_CAP: usize = 1024 * 1024 * 1024;
 const SUPPORT: &str = "experimental-extension-first-released-v0.9";
 
-#[derive(Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum Modality {
     Image,
@@ -51,12 +54,16 @@ impl OutputPlaceholder {
 pub(crate) enum Container {
     Png,
     Jpeg,
+    Wav,
+    Mp4,
 }
 impl Container {
     fn extension(self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
+            Self::Wav => "wav",
+            Self::Mp4 => "mp4",
         }
     }
 }
@@ -113,16 +120,60 @@ struct Request {
     )]
     negative_prompt: Option<String>,
     seeds: Vec<u64>,
-    width: u32,
-    height: u32,
-    steps: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    width: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    height: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    steps: Option<u32>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     guidance_milli: Option<u32>,
-    images_per_run: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    images_per_run: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    frames: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    fps: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    duration_us: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sample_rate: Option<u32>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -134,8 +185,54 @@ struct Output {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Expect {
-    width: u32,
-    height: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    width: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    height: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    frames: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    fps: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    duration_us: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sample_rate: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    channels: Option<u16>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    audio: Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -295,7 +392,166 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 fn nul_free(s: &str) -> bool {
     !s.contains('\0')
 }
-fn validate_request(r: &Request, context: &str) -> Result<()> {
+#[derive(Clone, Copy)]
+enum Presence {
+    Required,
+    Optional,
+    Forbidden,
+}
+
+struct FieldRule {
+    name: &'static str,
+    min: u64,
+    max: u64,
+    request: [Presence; 3],
+    expect: [Presence; 3],
+}
+
+fn validate_fields(
+    modality: Modality,
+    context: &str,
+    expect: bool,
+    values: &[(&str, Option<u64>)],
+) -> Result<()> {
+    use Presence::{Forbidden as F, Optional as O, Required as R};
+    const RULES: [FieldRule; 10] = [
+        FieldRule {
+            name: "width",
+            min: 1,
+            max: MAX_CANVAS as u64,
+            request: [R, F, R],
+            expect: [R, F, R],
+        },
+        FieldRule {
+            name: "height",
+            min: 1,
+            max: MAX_CANVAS as u64,
+            request: [R, F, R],
+            expect: [R, F, R],
+        },
+        FieldRule {
+            name: "steps",
+            min: 1,
+            max: MAX_STEPS as u64,
+            request: [R, O, O],
+            expect: [F, F, F],
+        },
+        FieldRule {
+            name: "images_per_run",
+            min: 1,
+            max: MAX_IMAGES as u64,
+            request: [R, F, F],
+            expect: [F, F, F],
+        },
+        FieldRule {
+            name: "frames",
+            min: 1,
+            max: MAX_FRAMES,
+            request: [F, F, R],
+            expect: [F, F, R],
+        },
+        FieldRule {
+            name: "fps",
+            min: 1,
+            max: MAX_FPS,
+            request: [F, F, R],
+            expect: [F, F, R],
+        },
+        FieldRule {
+            name: "duration_us",
+            min: 1,
+            max: MAX_DURATION_US,
+            request: [F, R, O],
+            expect: [F, R, O],
+        },
+        FieldRule {
+            name: "sample_rate",
+            min: 1,
+            max: u32::MAX as u64,
+            request: [F, R, F],
+            expect: [F, R, F],
+        },
+        FieldRule {
+            name: "channels",
+            min: 1,
+            max: u16::MAX as u64,
+            request: [F, F, F],
+            expect: [F, R, F],
+        },
+        FieldRule {
+            name: "audio",
+            min: 0,
+            max: 1,
+            request: [F, F, F],
+            expect: [F, F, O],
+        },
+    ];
+    let index = match modality {
+        Modality::Image => 0,
+        Modality::Audio => 1,
+        Modality::Video => 2,
+    };
+    for rule in &RULES {
+        let value = values
+            .iter()
+            .find(|(name, _)| *name == rule.name)
+            .and_then(|(_, value)| *value);
+        let presence = if expect {
+            rule.expect[index]
+        } else {
+            rule.request[index]
+        };
+        match (presence, value) {
+            (Presence::Required, None) => {
+                return Err(format!("{context}: missing field `{}`", rule.name));
+            }
+            (Presence::Forbidden, Some(_)) => {
+                return Err(format!(
+                    "{context}.{} is forbidden for this modality",
+                    rule.name
+                ));
+            }
+            (_, Some(value)) if !(rule.min..=rule.max).contains(&value) => {
+                return Err(format!(
+                    "{context}.{} must be {}..={}",
+                    rule.name, rule.min, rule.max
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_expect(output: &Output, modality: Modality) -> Result<()> {
+    let name = output.placeholder.name();
+    let compatible = match modality {
+        Modality::Image => matches!(output.container, Container::Png | Container::Jpeg),
+        Modality::Audio => output.container == Container::Wav,
+        Modality::Video => output.container == Container::Mp4,
+    };
+    if !compatible {
+        return Err(format!("outputs.{name}.container does not match modality"));
+    }
+    let e = &output.expect;
+    validate_fields(
+        modality,
+        &format!("outputs.{name}.expect"),
+        true,
+        &[
+            ("width", e.width.map(u64::from)),
+            ("height", e.height.map(u64::from)),
+            ("frames", e.frames.map(u64::from)),
+            ("fps", e.fps.map(u64::from)),
+            ("duration_us", e.duration_us),
+            ("sample_rate", e.sample_rate.map(u64::from)),
+            ("channels", e.channels.map(u64::from)),
+            ("audio", e.audio.map(u64::from)),
+        ],
+    )
+}
+
+fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()> {
     for (field, value) in [
         ("prompt", Some(r.prompt.as_str())),
         ("negative_prompt", r.negative_prompt.as_deref()),
@@ -309,17 +565,21 @@ fn validate_request(r: &Request, context: &str) -> Result<()> {
     if !(1..=MAX_SEEDS).contains(&r.seeds.len()) {
         return Err(format!("{context}.seeds needs 1..={MAX_SEEDS} entries"));
     }
-    for (field, value, max) in [
-        ("width", r.width, MAX_CANVAS),
-        ("height", r.height, MAX_CANVAS),
-        ("steps", r.steps, MAX_STEPS),
-        ("images_per_run", r.images_per_run, MAX_IMAGES),
-    ] {
-        if !(1..=max).contains(&value) {
-            return Err(format!("{context}.{field} must be 1..={max}"));
-        }
-    }
-    Ok(())
+    validate_fields(
+        modality,
+        context,
+        false,
+        &[
+            ("width", r.width.map(u64::from)),
+            ("height", r.height.map(u64::from)),
+            ("steps", r.steps.map(u64::from)),
+            ("images_per_run", r.images_per_run.map(u64::from)),
+            ("frames", r.frames.map(u64::from)),
+            ("fps", r.fps.map(u64::from)),
+            ("duration_us", r.duration_us),
+            ("sample_rate", r.sample_rate.map(u64::from)),
+        ],
+    )
 }
 fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if w.kind != "media-workload-v1" {
@@ -328,13 +588,10 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if w.version != 1 {
         return Err("workload.version must be 1".into());
     }
-    if w.modality != Modality::Image {
-        return Err("workload.modality: audio/video not supported yet".into());
-    }
     if !identifier(&w.name) {
         return Err(format!("invalid workload.name: {}", w.name));
     }
-    validate_request(&w.request, "request")?;
+    validate_request(&w.request, w.modality, "request")?;
     if !(1..=MAX_CELLS).contains(&w.cells.len()) {
         return Err(format!("cells needs 1..={MAX_CELLS} entries"));
     }
@@ -356,7 +613,7 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
             ));
         }
         if let Some(req) = &c.request {
-            validate_request(req, &format!("cell {}.request", c.id))?;
+            validate_request(req, w.modality, &format!("cell {}.request", c.id))?;
         }
     }
     validate_outputs(w, r)?;
@@ -415,13 +672,7 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
         if !outputs.insert(o.placeholder) {
             return Err(format!("outputs.{name}: duplicate declaration"));
         }
-        for (field, value) in [("width", o.expect.width), ("height", o.expect.height)] {
-            if !(1..=MAX_CANVAS).contains(&value) {
-                return Err(format!(
-                    "outputs.{name}.expect.{field} must be 1..={MAX_CANVAS}"
-                ));
-            }
-        }
+        validate_expect(o, w.modality)?;
     }
     validate_output_args(&outputs, &r.args, "runner.args", true)?;
     if let Some(setup) = &r.setup {
@@ -429,7 +680,14 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
     }
     if outputs.contains(&OutputPlaceholder::Output) {
         for cell in &w.cells {
-            if cell.request.as_ref().unwrap_or(&w.request).images_per_run > 1 {
+            if cell
+                .request
+                .as_ref()
+                .unwrap_or(&w.request)
+                .images_per_run
+                .unwrap_or(1)
+                > 1
+            {
                 return Err(format!(
                     "cell {}.images_per_run: multiple images require only output_dir",
                     cell.id
@@ -566,9 +824,19 @@ fn substitute(
             "prompt" => request.prompt.clone(),
             "negative_prompt" => request.negative_prompt.clone().unwrap_or_default(),
             "seed" => seed.to_string(),
-            "width" => request.width.to_string(),
-            "height" => request.height.to_string(),
-            "steps" => request.steps.to_string(),
+            "width" => request.width.ok_or("width is unavailable")?.to_string(),
+            "height" => request.height.ok_or("height is unavailable")?.to_string(),
+            "steps" => request.steps.ok_or("steps is unavailable")?.to_string(),
+            "frames" => request.frames.ok_or("frames is unavailable")?.to_string(),
+            "fps" => request.fps.ok_or("fps is unavailable")?.to_string(),
+            "sample_rate" => request
+                .sample_rate
+                .ok_or("sample_rate is unavailable")?
+                .to_string(),
+            "duration_s" => {
+                let us = request.duration_us.ok_or("duration_s is unavailable")?;
+                format!("{}.{:06}", us / 1_000_000, us % 1_000_000)
+            }
             "output" => format!(
                 "{dir}/output-00.{}",
                 ext.ok_or("args uses undeclared output")?

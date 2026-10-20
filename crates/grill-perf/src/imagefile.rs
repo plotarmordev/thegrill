@@ -1,5 +1,4 @@
 //! `container_checked` validates framing and dimensions, never decoded pixels.
-use crate::media::Container;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Checked {
@@ -25,13 +24,6 @@ pub(crate) enum Failure {
     InvalidHeader,
     MissingIdat,
     MissingSos,
-}
-
-pub(crate) fn check(bytes: &[u8], kind: Container) -> Result<Checked, Failure> {
-    match kind {
-        Container::Png => png(bytes),
-        Container::Jpeg => jpeg(bytes),
-    }
 }
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -66,7 +58,7 @@ fn dimensions(width: u32, height: u32) -> Result<Checked, Failure> {
     }
     Ok(Checked { width, height })
 }
-fn png(bytes: &[u8]) -> Result<Checked, Failure> {
+pub(crate) fn png(bytes: &[u8]) -> Result<Checked, Failure> {
     let mut rest = bytes
         .strip_prefix(PNG_SIGNATURE)
         .ok_or(Failure::BadSignature)?;
@@ -131,7 +123,7 @@ fn png(bytes: &[u8]) -> Result<Checked, Failure> {
         Failure::MissingIhdr
     })
 }
-fn jpeg(bytes: &[u8]) -> Result<Checked, Failure> {
+pub(crate) fn jpeg(bytes: &[u8]) -> Result<Checked, Failure> {
     let mut rest = bytes
         .strip_prefix(&[0xff, 0xd8])
         .ok_or(Failure::BadSignature)?;
@@ -243,7 +235,7 @@ mod tests {
         bytes.extend(chunk(b"IDAT", &[]));
         bytes.extend(chunk(b"IEND", &[]));
         assert_eq!(
-            check(&bytes, Container::Png),
+            png(&bytes),
             Ok(Checked {
                 width: 17,
                 height: 29
@@ -252,7 +244,7 @@ mod tests {
         for index in [16, 37, bytes.len() - 1] {
             let mut corrupt = bytes.clone();
             corrupt[index] ^= 1;
-            assert_eq!(check(&corrupt, Container::Png), Err(Failure::CrcMismatch));
+            assert_eq!(png(&corrupt), Err(Failure::CrcMismatch));
         }
     }
     #[test]
@@ -301,7 +293,7 @@ mod tests {
             ),
         ];
         for (bytes, reason) in cases {
-            assert_eq!(check(&bytes, Container::Png), Err(reason), "{reason:?}");
+            assert_eq!(png(&bytes), Err(reason), "{reason:?}");
         }
     }
     #[test]
@@ -319,16 +311,16 @@ mod tests {
                     height: 29,
                 })
             };
-            assert_eq!(check(&bytes, Container::Jpeg), expected);
+            assert_eq!(jpeg(&bytes), expected);
         }
         let mut bytes = jpeg_header(0xc0, 17, 29);
         bytes.extend(segment(0xc2, &[8, 0, 3, 0, 4, 0]));
         bytes.extend([0xff, 0xd9]);
-        assert_eq!(check(&bytes, Container::Jpeg), Err(Failure::MissingSos));
+        assert_eq!(jpeg(&bytes), Err(Failure::MissingSos));
         bytes.truncate(bytes.len() - 2);
         bytes.extend(segment(0xda, &[1, 1, 0, 0, 63, 0]));
         bytes.extend([0xff, 0xd9]);
-        assert_eq!(check(&bytes, Container::Jpeg).unwrap().width, 17);
+        assert_eq!(jpeg(&bytes).unwrap().width, 17);
     }
     #[test]
     fn jpeg_failures_are_specific() {
@@ -368,14 +360,14 @@ mod tests {
             ),
         ];
         for (bytes, reason) in cases {
-            assert_eq!(check(&bytes, Container::Jpeg), Err(reason), "{reason:?}");
+            assert_eq!(jpeg(&bytes), Err(reason), "{reason:?}");
         }
     }
     #[test]
     fn png_rejects_duplicate_ihdr() {
         let header = png_header(17, 29);
         let bytes = [header.as_slice(), &header[8..], &chunk(b"IEND", &[])].concat();
-        assert_eq!(check(&bytes, Container::Png), Err(Failure::DuplicateIhdr));
+        assert_eq!(png(&bytes), Err(Failure::DuplicateIhdr));
     }
 
     #[test]
@@ -390,7 +382,7 @@ mod tests {
                 &chunk(b"IEND", &[]),
             ]
             .concat();
-            assert_eq!(check(&bytes, Container::Png), Err(Failure::InvalidHeader));
+            assert_eq!(png(&bytes), Err(Failure::InvalidHeader));
         }
     }
 
@@ -405,7 +397,7 @@ mod tests {
         ]
         .concat();
         assert_eq!(
-            check(&bytes, Container::Jpeg),
+            jpeg(&bytes),
             Ok(Checked {
                 width: 17,
                 height: 29,
@@ -421,13 +413,13 @@ mod tests {
             &[8, 0, 29, 0, 17, 1, 1, 0x11, 0, 0][..],
         ] {
             let bytes = [vec![0xff, 0xd8], segment(0xc0, data), vec![0xff, 0xd9]].concat();
-            assert_eq!(check(&bytes, Container::Jpeg), Err(Failure::InvalidLength));
+            assert_eq!(jpeg(&bytes), Err(Failure::InvalidLength));
         }
     }
 
     #[test]
     fn png_requires_idat_before_iend() {
         let bytes = [png_header(17, 29), chunk(b"IEND", &[])].concat();
-        assert_eq!(check(&bytes, Container::Png), Err(Failure::MissingIdat));
+        assert_eq!(png(&bytes), Err(Failure::MissingIdat));
     }
 }
