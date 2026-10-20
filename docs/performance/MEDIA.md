@@ -53,6 +53,12 @@ The per-arm runner owns `id`, `program`, `args`, `env`, `execution`, `cache`,
 `delegates-to-resident-service` or `unknown`. Programs must be executable regular
 files; relative paths resolve against the invoking directory, not `cwd`, without
 PATH search. Leading `~` expands to HOME. A declared `cwd` must exist as a directory.
+Capture executes the declared path, not its canonical symlink target, for both
+runner and setup programs. Preflight and receipts record `declared_path` (expanded
+and made absolute without resolving symlinks), `resolved_path` (canonical target)
+and `resolved_sha256` (SHA-256 of the target bytes). The hash covers the target at
+capture time, before execution; changes to symlink targets between admission and
+execution are not guarded against.
 Setup declares `args`, optional `program` (defaults to the runner program) and
 optional `deadline_ms` (defaults to, and cannot exceed, the workload setup limit).
 Cache declares `declared_state: cold|warm|unknown` and up to 64 `paths`, each at
@@ -65,6 +71,15 @@ spaces, quotes and shell syntax stay literal in their argv element. An absent
 negative prompt substitutes an empty string without removing the element.
 Unknown or unclosed placeholders fail. There is no literal opening-brace escape;
 JSON-valued arguments need an adapter. Env values and paths are not templates.
+
+### MFLUX runner
+
+Use the console script inside the virtualenv, such as
+`VENV/bin/mflux-generate-...`, as `program`.
+Pass `--no-exif` (or the runner's equivalent) when byte determinism by seed
+matters: generation metadata changes PNG bytes.
+Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` in `env` so a capture
+cannot download through Hugging Face.
 
 ## Capture and inspect
 
@@ -144,8 +159,9 @@ grill-perf media compare --a A --b B --a2 A2 [--b2 B2]
 Compare fully rechecks every capture through inspect before admitting it.
 All declared slots are required, with matching arms, byte-identical workloads,
 and the same collector binary and platform. A and A2 must match runner bytes,
-program and setup-program hashes, and deployment; B must differ in at least one
-of those, and B2 must match B. Runner bytes include setup arguments.
+program and setup-program declared paths and resolved-bytes hashes, and deployment;
+B must differ in at least one of those, and B2 must match B.
+Runner bytes include setup arguments.
 
 Comparison requires A to finish no later than B starts, then B2 if declared,
 then A2. These comparisons use only wall-clock readings, so clock steps can make

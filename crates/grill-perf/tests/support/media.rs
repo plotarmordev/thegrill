@@ -80,16 +80,17 @@ fn preflight_projects_without_running_or_creating_directories() {
     let f = Fixture::new();
     let report = f.report();
     assert_eq!(
-        report["program"]["path"],
+        report["program"]["resolved_path"],
         f.root.path("runner").to_str().unwrap()
     );
     assert_eq!(
-        report["program"]["sha256"],
+        report["program"]["resolved_sha256"],
         Sha256::digest(fs::read(f.root.path("runner")).unwrap())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
+    assert_eq!(report["program"]["declared_path"], f.runner["program"]);
     assert_eq!(report["setup_program"], report["program"]);
     assert_eq!(report["warmup_runs"], 1);
     assert_eq!(report["measured_runs"], 3);
@@ -310,7 +311,7 @@ fn program_and_working_directory_admission() {
     let mut f = Fixture::new();
     f.runner["program"] = json!("link");
     assert_eq!(
-        f.report()["program"]["path"],
+        f.report()["program"]["resolved_path"],
         f.root.path("runner").to_str().unwrap()
     );
     f.runner["cwd"] = json!(f.root.path("absent"));
@@ -336,7 +337,7 @@ fn large_executable_program_is_admitted() {
         .unwrap();
     let report = f.report();
     assert_eq!(
-        report["program"]["path"],
+        report["program"]["resolved_path"],
         f.root.path("runner").to_str().unwrap()
     );
     assert_eq!(report["program"], report["setup_program"]);
@@ -456,6 +457,57 @@ impl Fixture {
             .output()
             .unwrap()
     }
+}
+
+#[test]
+fn capture_executes_declared_symlinks_and_records_resolved_bytes() {
+    let mut f = capture_fixture(
+        "test \"$0\" = \"$ROOT/link\"\nprintf '%s' \"$0\"\ncp \"$PREPARED\" \"$1\"",
+    );
+    let setup = f.root.path("setup-target");
+    fs::write(
+        &setup,
+        b"#!/bin/sh\nset -eu\ntest \"$0\" = \"$ROOT/setup-link\"\nprintf '%s' \"$0\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&setup, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&setup, f.root.path("setup-link")).unwrap();
+    f.runner["program"] = json!("link");
+    f.runner["setup"] = json!({"program":"setup-link","args":[]});
+    let plan = f.report();
+    let report = f.captured();
+    assert_eq!(report["cells"][0]["eligible"], 3);
+    assert_eq!(report["setup"]["process"]["status"], "complete");
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(f.root.path("capture/receipt.json")).unwrap()).unwrap();
+    for (field, link, target, stdout) in [
+        ("program", "link", "runner", "run-000000/stdout.bin"),
+        (
+            "setup_program",
+            "setup-link",
+            "setup-target",
+            "setup/stdout.bin",
+        ),
+    ] {
+        assert_eq!(receipt[field], plan[field]);
+        assert_eq!(receipt[field]["declared_path"], json!(f.root.path(link)));
+        assert_eq!(
+            receipt[field]["resolved_path"],
+            json!(fs::canonicalize(f.root.path(target)).unwrap())
+        );
+        assert_eq!(
+            receipt[field]["resolved_sha256"],
+            Sha256::digest(fs::read(f.root.path(target)).unwrap())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.path("capture").join(stdout)).unwrap(),
+            f.root.path(link).to_str().unwrap()
+        );
+    }
+    successful(&f.inspect_capture());
 }
 
 #[test]

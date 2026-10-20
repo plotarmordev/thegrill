@@ -529,23 +529,24 @@ fn expand(path: &str) -> Result<PathBuf> {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Program {
-    path: PathBuf,
-    sha256: String,
+    declared_path: PathBuf,
+    resolved_path: PathBuf,
+    resolved_sha256: String,
 }
-fn resolve_program(name: &str) -> Result<PathBuf> {
+fn resolve_program(name: &str) -> Result<Program> {
     validate_path(name, "program")?;
-    let path =
-        std::fs::canonicalize(expand(name)?).map_err(|e| format!("resolve program {name}: {e}"))?;
+    let declared_path =
+        std::path::absolute(expand(name)?).map_err(|e| format!("program {name}: {e}"))?;
+    let path = std::fs::canonicalize(&declared_path)
+        .map_err(|e| format!("resolve program {name}: {e}"))?;
     let metadata = std::fs::metadata(&path).map_err(|e| format!("program {name}: {e}"))?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(format!("program {name} must be an executable regular file"));
     }
-    Ok(path)
-}
-fn program(path: PathBuf) -> Result<Program> {
     Ok(Program {
-        sha256: evidence::hash_file(&path, PROGRAM_CAP)?,
-        path,
+        resolved_sha256: evidence::hash_file(&path, PROGRAM_CAP)?,
+        resolved_path: path,
+        declared_path,
     })
 }
 fn substitute(
@@ -692,22 +693,13 @@ fn render(
 fn preflight(plan: &Plan) -> Result<Preflight> {
     let w = &plan.workload;
     let r = &plan.runner;
-    let program = program(resolve_program(&r.program)?)?;
+    let program = resolve_program(&r.program)?;
     let setup_program = r
         .setup
         .as_ref()
-        .map(|s| {
-            let path = s
-                .program
-                .as_deref()
-                .map(resolve_program)
-                .transpose()?
-                .unwrap_or_else(|| program.path.clone());
-            if path == program.path {
-                Ok(program.clone())
-            } else {
-                self::program(path)
-            }
+        .map(|s| match s.program.as_deref() {
+            Some(name) if name != r.program => resolve_program(name),
+            _ => Ok(program.clone()),
         })
         .transpose()?;
     let cwd = r

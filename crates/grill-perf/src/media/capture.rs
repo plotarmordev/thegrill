@@ -526,7 +526,7 @@ impl Session<'_> {
         let output = process::run(
             self.guard,
             &process::Request {
-                program: &program.path,
+                program: &program.declared_path,
                 argv: &argv,
                 env: &env,
                 cwd: self.receipt.cwd.as_deref(),

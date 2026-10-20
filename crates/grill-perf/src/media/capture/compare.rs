@@ -57,15 +57,16 @@ struct GateResult {
 
 fn same_runner(a: &Loaded, b: &Loaded) -> bool {
     a.plan.runner_bytes == b.plan.runner_bytes
-        && a.receipt.program.sha256 == b.receipt.program.sha256
+        && a.receipt.program.declared_path == b.receipt.program.declared_path
+        && a.receipt.program.resolved_sha256 == b.receipt.program.resolved_sha256
         && a.receipt
             .setup_program
             .as_ref()
-            .map(|program| &program.sha256)
+            .map(|program| (&program.declared_path, &program.resolved_sha256))
             == b.receipt
                 .setup_program
                 .as_ref()
-                .map(|program| &program.sha256)
+                .map(|program| (&program.declared_path, &program.resolved_sha256))
         && a.deployment == b.deployment
 }
 
