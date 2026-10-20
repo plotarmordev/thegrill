@@ -16,6 +16,53 @@ SPEC.loader.exec_module(adapter)
 
 
 class AdapterTests(unittest.TestCase):
+    def check_method_binding(self, kind):
+        class Engine:
+            @staticmethod
+            def static(value):
+                return value
+
+            @classmethod
+            def class_method(cls, value):
+                return cls, value
+
+            def plain(self, value):
+                return self, value
+
+        class Child(Engine):
+            pass
+
+        module = types.ModuleType("synthetic_hook")
+        module.Engine = Engine
+        module.Child = Child
+        events = []
+        with patch.dict(sys.modules, synthetic_hook=module):
+            for event, when in [("generation_started", "before"), ("generation_finished", "after")]:
+                adapter.install_hook(f"{event}={when}:synthetic_hook:Engine.{kind}", events.append)
+            for owner in [Engine, Child]:
+                instance = owner()
+                if kind == "static":
+                    self.assertEqual(getattr(owner, kind)("class"), "class")
+                    self.assertEqual(getattr(instance, kind)("instance"), "instance")
+                    self.assertIsInstance(Engine.__dict__[kind], staticmethod)
+                elif kind == "class_method":
+                    self.assertEqual(getattr(owner, kind)("class"), (owner, "class"))
+                    self.assertEqual(getattr(instance, kind)("instance"), (owner, "instance"))
+                    self.assertIsInstance(Engine.__dict__[kind], classmethod)
+                else:
+                    self.assertEqual(getattr(owner, kind)(instance, "class"), (instance, "class"))
+                    self.assertEqual(getattr(instance, kind)("instance"), (instance, "instance"))
+        self.assertEqual(events, ["generation_started", "generation_finished"])
+
+    def test_staticmethod_binding(self):
+        self.check_method_binding("static")
+
+    def test_classmethod_subclass_binding(self):
+        self.check_method_binding("class_method")
+
+    def test_plain_method_binding(self):
+        self.check_method_binding("plain")
+
     def test_reentrant_hooks_stamp_once(self):
         module = types.ModuleType("synthetic_hook")
         events = []

@@ -4,6 +4,7 @@ import argparse
 import functools
 import importlib
 import importlib.metadata
+import inspect
 import json
 import os
 import sys
@@ -21,7 +22,9 @@ def install_hook(spec, stamp):
     parts = qualname.split(".")
     for part in parts[:-1]:
         owner = getattr(owner, part)
-    original = getattr(owner, parts[-1])
+    descriptor = inspect.getattr_static(owner, parts[-1])
+    descriptor_type = type(descriptor) if isinstance(descriptor, (staticmethod, classmethod)) else None
+    original = descriptor.__func__ if descriptor_type else getattr(owner, parts[-1])
     if not callable(original):
         raise ValueError("hook target is not callable")
     called = False
@@ -38,7 +41,7 @@ def install_hook(spec, stamp):
             stamp(event)
         return result
 
-    setattr(owner, parts[-1], wrapped)
+    setattr(owner, parts[-1], descriptor_type(wrapped) if descriptor_type else wrapped)
 
 
 def main():

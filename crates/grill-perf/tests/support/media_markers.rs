@@ -49,7 +49,10 @@ fn marker_admission_and_projection() {
     f.reject("duplicate");
     f.workload["gates"].as_array_mut().unwrap().pop();
     f.runner.as_object_mut().unwrap().remove("markers");
+    f.runner["args"] = json!(["{output}"]);
     f.reject("requires runner.markers");
+    f.workload["gates"].as_array_mut().unwrap().pop();
+    f.report();
 }
 
 #[test]
@@ -216,7 +219,8 @@ fn reference_adapter_capture_inspect_compare_and_forwarding() {
         "[console_scripts]\nfake-generate = fakegen:main\n",
     )
     .unwrap();
-    fs::write(f.root.path("fakegen.py"), "import os, sys, time, shutil\n\ndef denoise():\n    time.sleep(float(os.environ.get('DELAY', '0')))\n\ndef main():\n    denoise()\n    denoise()\n    shutil.copyfile(os.environ['PREPARED'], sys.argv[sys.argv.index('--output') + 1])\n    return int(os.environ.get('EXIT', '0'))\n").unwrap();
+    // The fixture injects its clock after import so gate direction cannot depend on scheduling.
+    fs::write(f.root.path("fakegen.py"), "import os, sys, time, shutil\n\nclock = time.monotonic_ns()\ntime.monotonic_ns = lambda: clock\n\ndef denoise():\n    global clock\n    clock += 1\n\ndef main():\n    denoise()\n    denoise()\n    shutil.copyfile(os.environ['PREPARED'], sys.argv[sys.argv.index('--output') + 1])\n    return int(os.environ.get('EXIT', '0'))\n").unwrap();
     f.runner["program"] = json!(python);
     f.runner["markers"] = json!("file");
     f.runner["env"]["PYTHONPATH"] = json!(f.root.0);
@@ -237,11 +241,20 @@ fn reference_adapter_capture_inspect_compare_and_forwarding() {
         "{output}"
     ]);
     f.workload["gates"][0]["metric"] = json!("generation_us");
-    f.workload["gates"][0]["max_adverse_bps"] = json!(5000);
-    for (slot, delay) in [("a", "0.08"), ("b", "0.005"), ("a2", "0.08")] {
+    f.workload["gates"][0]["max_adverse_bps"] = json!(0);
+    f.workload["gates"][0]["max_reference_spread_bps"] = json!(0);
+    for (slot, delay) in [("a", "reference"), ("b", "candidate"), ("a2", "reference")] {
         f.capture_timed_slot(slot, delay);
     }
     let report = f.comparison(false, 0);
+    assert_eq!(
+        report["gates"][0]["reference"][0],
+        json!({"numerator":1,"denominator":1000})
+    );
+    assert_eq!(
+        report["gates"][0]["candidate"][0],
+        json!({"numerator":1,"denominator":1000})
+    );
     let markers = &report["acquisitions"][0]["runs"][0]["markers"];
     assert_eq!(markers["status"], "valid");
     assert_eq!(

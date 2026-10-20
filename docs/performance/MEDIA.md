@@ -128,7 +128,8 @@ Without the marker-file option the adapter forwards without writing markers.
 Repeated `--grill-hook` options accept
 `generation_started=before:pkg.mod:Qual.name`,
 `generation_finished=after:pkg.mod:Qual.name`, or `model_loaded` equivalents.
-Each hook stamps only its first invocation.
+Each hook stamps only its first invocation and preserves instance-method,
+staticmethod and classmethod binding, including subclass calls.
 
 Without hooks the adapter observes only control after interpreter startup and
 stdlib imports, and output existence after console main returns. It cannot
