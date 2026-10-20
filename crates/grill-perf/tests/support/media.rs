@@ -1578,7 +1578,7 @@ fn compare_rejects_reference_runner_declaration_drift() {
     f.capture_slot("a2", "0");
     f.comparison_rejected(
         false,
-        "A and A2 runner bytes, program or setup hash, or deployment differ",
+        "A and A2 runner bytes, program, setup or deployment differ",
     );
 }
 
@@ -1595,7 +1595,7 @@ fn compare_rejects_reference_program_drift() {
     f.capture_slot("a2", "0");
     f.comparison_rejected(
         false,
-        "A and A2 runner bytes, program or setup hash, or deployment differ",
+        "A and A2 runner bytes, program, setup or deployment differ",
     );
 }
 
@@ -1608,7 +1608,7 @@ fn compare_rejects_reference_deployment_drift() {
     f.capture_slot("a2", "0");
     f.comparison_rejected(
         false,
-        "A and A2 runner bytes, program or setup hash, or deployment differ",
+        "A and A2 runner bytes, program, setup or deployment differ",
     );
 }
 
@@ -2110,7 +2110,7 @@ fn compare_rejects_reference_setup_program_drift() {
     f.capture_slot("a2", "0");
     f.comparison_rejected(
         false,
-        "A and A2 runner bytes, program or setup hash, or deployment differ",
+        "A and A2 runner bytes, program, setup or deployment differ",
     );
 }
 
