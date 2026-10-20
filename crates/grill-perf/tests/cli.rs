@@ -2519,10 +2519,13 @@ fn faster_streaming_decode_has_positive_matched_rate_change() {
     let server = Server::new(|mut s, i, _| {
         header(&mut s, "text/event-stream");
         frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
-        thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
+        // Only a stall longer than this gap could make the candidate slower.
+        thread::sleep(Duration::from_millis(if i == 0 { 2000 } else { 30 }));
         finish(&mut s, Some(8), None);
     });
-    let work = workload(1, 0, 1);
+    let mut work = workload(1, 0, 1);
+    work["limits"]["total_ms"] = json!(15000);
+    work["limits"]["idle_ms"] = json!(12000);
     successful(&run(&temp, &server, "baseline", &work));
     successful(&run(&temp, &server, "candidate", &work));
     let output = cli()

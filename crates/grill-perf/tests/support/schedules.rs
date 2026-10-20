@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Mutex;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 fn scheduled() -> Value {
     let mut work = workload(1, 0, 1);
@@ -36,7 +38,14 @@ fn replay(temp: &Temp, name: &str) -> Output {
         .unwrap()
 }
 
-fn paced(mut stream: TcpStream, _: usize, body: Value) {
+/// Requests 0 and 1 are the solo controls. In later overlap waves the decode lane
+/// keeps generating until the prefill lane has generated, however late it is scheduled.
+fn paced(
+    mut stream: TcpStream,
+    index: usize,
+    body: Value,
+    (prefill_generated, prefill_seen): (&Sender<()>, &Mutex<Receiver<()>>),
+) {
     let a = body["messages"][0]["content"] == "A";
     let tokens = if a { 8 } else { 3 };
     assert_eq!(body["max_tokens"], tokens);
@@ -62,7 +71,19 @@ fn paced(mut stream: TcpStream, _: usize, body: Value) {
         &mut stream,
         json!({"choices":[{"delta":{"content":"first"}}]}),
     );
-    thread::sleep(Duration::from_millis(if a { 300 } else { 40 }));
+    if index >= 2 {
+        if a {
+            // A prefill lane that never arrives fails the overlap assertions.
+            let _ = prefill_seen
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        } else {
+            prefill_generated.send(()).unwrap();
+        }
+    }
+    // Text written on separate connections must also be read in that order.
+    thread::sleep(Duration::from_millis(300));
     frame(
         &mut stream,
         json!({"choices":[{"delta":{"content":"last"}}]}),
@@ -74,8 +95,14 @@ fn paced(mut stream: TcpStream, _: usize, body: Value) {
 #[test]
 fn schedule4_mixed_and_fixed_arrivals_replay_named_controls_and_real_overlap() {
     let temp = Temp::new();
-    let server = Server::new(paced);
+    let (prefill_generated, prefill_seen) = channel();
+    let prefill_seen = Mutex::new(prefill_seen);
+    let server = Server::new(move |stream, index, body| {
+        paced(stream, index, body, (&prefill_generated, &prefill_seen));
+    });
     let mut work = scheduled();
+    work["limits"]["total_ms"] = json!(15000);
+    work["limits"]["idle_ms"] = json!(12000);
     let mut fixed = work["schedule"][2].clone();
     fixed["id"] = json!("fixed");
     fixed["lanes"][0]["arrival"]["offset_us"] = json!(30000);
