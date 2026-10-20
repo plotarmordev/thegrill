@@ -10,6 +10,10 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 too_many_lines = "warn"
 
+# Debug binaries hash their own executable; optimize sha2 so they start quickly.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [package]
 name = "grill"
 version = "0.9.1"

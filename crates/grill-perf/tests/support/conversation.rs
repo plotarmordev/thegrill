@@ -394,13 +394,13 @@ fn oversized_declared_root_is_rejected_before_any_sequence_traffic() {
 #[test]
 fn interrupted_sequence_retains_partial_response_without_followups_or_resume() {
     let temp = Temp::new();
-    let started = Arc::new(AtomicBool::new(false));
-    let observed = started.clone();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, gate) = std::sync::mpsc::channel();
     let server = Server::new(move |mut stream, _, _| {
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"{{\"}}}}]}}\n\n").unwrap();
         stream.flush().unwrap();
-        observed.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_secs(2));
+        entered.send(()).unwrap();
+        let _ = gate.recv_timeout(Duration::from_secs(10));
     });
     let child = command()
         .arg("run")
@@ -419,14 +419,12 @@ fn interrupted_sequence_retains_partial_response_without_followups_or_resume() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !started.load(Ordering::SeqCst) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(1));
-    }
-    assert!(started.load(Ordering::SeqCst));
+    // Startup hashes the unoptimized collector binary, which takes seconds on a loaded host.
+    ready.recv_timeout(Duration::from_secs(60)).unwrap();
     // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     let output = child.wait_with_output().unwrap();
+    let _ = release.send(());
     assert_eq!(decoded(&output)["status"], "interrupted");
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
     let wave = read_json(&temp.path("run/wave-000000/wave.json"));

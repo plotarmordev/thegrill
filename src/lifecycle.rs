@@ -111,9 +111,18 @@ fn directory(path: &Path) -> Result<()> {
 fn encoded(value: &impl Serialize) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(value).map_err(|e| e.to_string())
 }
-fn prefix(loaded: &Loaded) -> Result<usize> {
+fn prefix(attempts: &[store::LoadedAttempt]) -> Result<usize> {
     let mut next = 0;
-    for a in &loaded.attempts {
+    for a in attempts {
+        if let Some(followup) = &a.followup {
+            match &followup.state {
+                AttemptState::Terminal(_) => {}
+                AttemptState::Invalid(why) => {
+                    return Err(format!("damaged follow-up evidence: {why}"));
+                }
+                _ => return Err("uncertain tool follow-up; resume refuses replay".into()),
+            }
+        }
         match &a.state {
             AttemptState::Terminal(_) if a.attempt as usize == next => next += 1,
             AttemptState::NotStarted => {}
@@ -144,6 +153,9 @@ fn snapshot_matches(saved: &RunView, current: &RunView, next: usize) -> bool {
                         && old.input == now.input
                         && old.attempt == now.attempt
                         && old.terminal.is_none()
+                        && old.call.is_none()
+                        && old.followup.is_none()
+                        && old.tool_call == now.tool_call.map(|_| ToolCall::Unknown)
                         && old.reason.is_none()
                         && old.artifact.is_none()
                         && old.evidence == RunEvidence::NotStarted
@@ -277,7 +289,7 @@ impl Session {
                         .into(),
                 );
             }
-            let next = prefix(loaded)?;
+            let next = prefix(&loaded.attempts)?;
             if next != h.next {
                 return Err("attempt evidence changed after session settlement".into());
             }
@@ -322,7 +334,7 @@ impl Session {
     }
     pub fn finish(&self, loaded: &Loaded, state: &str) -> Result<()> {
         let (_gate, pause_requested) = self.admission()?;
-        let next = prefix(loaded)?;
+        let next = prefix(&loaded.attempts)?;
         let view = store::receipt(&store::run_view(loaded)?)?;
         store::publish_receipt(&self.dir, "view.json", &view)?;
         let end = End {
@@ -361,7 +373,7 @@ pub(crate) fn resumable(root: &Path, loaded: &Loaded) -> Result<usize> {
     if h.state == "uncertain" {
         return Err("unsettled session; crash uncertainty remains explicit".into());
     }
-    let next = prefix(loaded)?;
+    let next = prefix(&loaded.attempts)?;
     if next != h.next {
         return Err("attempt evidence changed after settlement".into());
     }
@@ -456,4 +468,43 @@ pub(crate) fn inspect(root: &Path, loaded: &Loaded) -> Status {
 }
 pub(crate) fn historical_initial(root: &Path, loaded: &Loaded) -> bool {
     history(root, loaded).is_ok_and(|h| h.count > 1 && h.first_view.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attempt(state: AttemptState) -> store::LoadedAttempt {
+        store::LoadedAttempt {
+            attempt: 0,
+            state,
+            reservation: None,
+            terminal: None,
+            artifact: None,
+            call: None,
+            tool_call: None,
+            followup: None,
+            outcome: Outcome::Unknown,
+            recovered_metadata: None,
+        }
+    }
+
+    #[test]
+    fn settled_prefix_requires_terminal_followup_after_valid_call() {
+        let mut parent = attempt(AttemptState::Terminal(Box::new(store::tests::terminal(
+            b"body", b"call",
+        ))));
+        parent.tool_call = Some(ToolCall::Valid);
+        parent.followup = Some(Box::new(attempt(AttemptState::Unresolved)));
+        let mut attempts = [parent];
+        assert_eq!(
+            prefix(&attempts).unwrap_err(),
+            "uncertain tool follow-up; resume refuses replay"
+        );
+        attempts[0].followup.as_mut().unwrap().state = AttemptState::NotStarted;
+        assert!(prefix(&attempts).is_err());
+        attempts[0].followup.as_mut().unwrap().state =
+            AttemptState::Terminal(Box::new(store::tests::terminal(b"body", b"call")));
+        assert_eq!(prefix(&attempts).unwrap(), 1);
+    }
 }

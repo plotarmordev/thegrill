@@ -13,7 +13,7 @@ the engine, a flag, the model build, the machine. Run it again and get a plain a
 | I want to... | Use | What you get |
 |---|---|---|
 | Check whether a serving setup is faster | [Speed benchmarks](#speed-benchmarks)<br>`grill-perf` ![Ready to try](https://img.shields.io/badge/ready_to_try-0969da?style=flat-square) | A plain faster / slower / inconclusive answer, the measured change, and the saved evidence |
-| Check whether a model answers tasks correctly | [Quality evaluation](#quality-evaluation-wip)<br>`grill` ![Work in progress](https://img.shields.io/badge/work_in_progress-a16207?style=flat-square) | Graded answers, with wrong, refused, cut-off, and missing results kept separate |
+| Check whether a model answers tasks correctly | [Quality evaluation](#quality-evaluation-wip)<br>`grill` ![Work in progress](https://img.shields.io/badge/work_in_progress-a16207?style=flat-square) | Graded answers and tool-call validity, with wrong, refused, cut-off, and missing results kept separate |
 
 Both tools run on your machine and connect to a server you already run. No account,
 nothing uploaded. Works with any OpenAI-compatible server that reports token usage

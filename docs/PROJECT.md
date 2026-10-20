@@ -31,7 +31,7 @@ The offline contracts and direct-answer runner below are implemented. Local chec
 
 ## Scope
 
-The quality binary, `grill`, provides serial direct-answer collection, offline study manifests, deterministic synthetic examples, and paired family/unit reports. This guide describes those current capabilities, not a calibrated aggregate intelligence score. The separate serving-performance companion is documented in [its own guide](performance/README.md).
+The quality binary, `grill`, provides serial direct-answer and fixture-tool collection, offline study manifests, deterministic synthetic examples, and paired family/unit reports. This guide describes those current capabilities, not a calibrated aggregate intelligence score. The separate serving-performance companion is documented in [its own guide](performance/README.md).
 
 ## Implemented offline contract v1
 
@@ -71,7 +71,7 @@ Protocol sampling fields use integer thousandths to avoid floating-point encodin
 
 Profile v2 request controls sit between `seed` and `collection` in serialization order: `reasoning_effort` is one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `include_usage` is a boolean. They are optional strictly by absence: a present field must carry its real value, and unlike the nullable v1 fields an explicit `null` or wrong-type spelling is rejected, matching the frozen v1 reader's refusal of these fields entirely. Under `declared-chat-completions-v1` both must be absent; under `declared-chat-completions-v2` `include_usage` is a required explicit declaration and `include_usage: true` additionally requires `stream: true`. An absent control is omitted from the typed identity encoding rather than encoded as null, so every v1 protocol identity stays byte-stable; a v2 record always differs through its profile string. These are requested fields only: provider support, effective backend settings and usage accuracy are not verified by admission or by a committed response, and no negotiation, fallback or retry reshapes a rejected request.
 
-The profile binds text-only, one choice, no tools, serial pack order, one attempt, no retries and omission of all other generation settings. These constants participate in protocol identity. The pack fixes equal weights and one attempt. A `"known"` rendering declaration requires nonempty template and tokenizer identifiers of at most 4096 bytes each; `"unknown"` requires both null/omitted. They are declarations only, not templates to execute. Matching unknown declarations never establish matched effective prompts. The report explicitly restricts that comparison to declared submissions/services; known matching declarations are also not independently authenticated.
+Profiles v1/v2 bind text-only, one choice, no tools, serial pack order, one attempt, no retries and omission of all other generation settings. These constants participate in protocol identity. The pack fixes equal weights and one attempt. A `"known"` rendering declaration requires nonempty template and tokenizer identifiers of at most 4096 bytes each; `"unknown"` requires both null/omitted. They are declarations only, not templates to execute. Matching unknown declarations never establish matched effective prompts. The report explicitly restricts that comparison to declared submissions/services; known matching declarations are also not independently authenticated. Tool-profile semantics are defined in [the v5/v3 contract](#tool-call-pack-contract-v5-and-profile-v3).
 
 ### Exact grading and missingness
 
@@ -83,7 +83,7 @@ A supplied artifact is `evidence: "submitted"` and grades `success`, `wrong` or 
 
 All digests are lowercase 64-character SHA-256 hex. Define `H(domain, bytes) = SHA256(UTF8("the-grill") || 0x00 || UTF8(domain) || 0x00 || UTF8("v1") || 0x00 || bytes)`. This is not a general JSON canonicalizer. `J(value)` is compact UTF-8 JSON from serde_json 1.x over the typed projection: tuples/lists become arrays, records emit the field order above, nulls are explicit, integers are decimal, strings use JSON control/quote/backslash escaping and emit other Unicode as UTF-8 without normalization, no insignificant whitespace or trailing newline. Incoming field order/whitespace/escape spelling does not affect typed projections. Raw source digests intentionally differ.
 
-The exact definitions are:
+The exact definitions follow; the protocol projection applies to profiles v1/v2.
 
 ```text
 R = "json-answer-set-v1"
@@ -256,6 +256,8 @@ Use bound study-family summaries rather than treating a mixed total as a general
 
 ## Implemented runner v1
 
+This section describes the text-only profiles v1/v2. Their formats and output versions remain unchanged; [pack v5/profile v3](#tool-call-pack-contract-v5-and-profile-v3) adds a separately versioned tool-call path.
+
 ### Commands and boundary
 
 `grill run PACK --endpoint URL --model MODEL --out NEW_RUN --token-cap N [options]` admits the pack, freezes the plan, then collects exactly one attempt per case in pack order over one reusable HTTP/1 client per collection session on a current-thread Tokio runtime, and finally writes `grades/initial` by regrading what reached disk. `grill pause RUN` requests cooperative admission stop; `grill resume RUN` continues only never-started cases from validated settled lifecycle evidence. `grill inspect RUN_OR_VIEW [--json]` is read-only and works on interrupted or crashed runs. `grill regrade RUN --out NEW_VIEW` publishes a fresh self-contained grade view from saved evidence without credentials or networking. Neither `check`, `grade`, `pause`, `inspect`, `regrade` nor `compare` opens a socket; a completed `resume` also returns before credential lookup or client construction.
@@ -270,9 +272,11 @@ Planning JSON version 1 contains `claim: "offline-preparation-not-dispatched"`, 
 
 The endpoint is one absolute URL of the Chat Completions resource. Userinfo, query strings and fragments are rejected. `https://` uses rustls with the AWS-LC provider and the platform verifier (system trust store on Linux); certificate and hostname validation are never disabled. `http://` is accepted only with `--local-http` and a literal loopback IPv4/IPv6 host; `localhost` and other names are rejected. The client sets no redirects, `retry::never`, no proxies, HTTP/1 only, `https_only` outside local mode, no compression, no referer and one idle pooled connection. Each request is `POST` with `content-type: application/json`, `accept` of `application/json` or `text/event-stream`, `accept-encoding: identity`, `user-agent: grill/<version>` and, only when `--auth-env` names a variable, `authorization: Bearer <value>` resolved while that request is built. The variable must exist at preflight and hold nonempty visible ASCII of at most 8192 bytes; its value is never written, hashed, or printed, and raw transport errors (which can embed URLs) are classified into fixed phrases instead of being displayed.
 
-The body is exactly `{"model", "messages", "stream", <token cap field>, ["temperature"], ["top_p"], ["seed"], ["reasoning_effort"], ["stream_options"]}` in that order with the case's messages verbatim and thousandths converted to decimal numbers. Bracketed fields appear only when declared. Under profile v1 neither control can appear; under profile v2 `reasoning_effort` is the declared enum string and `stream_options` is exactly `{"include_usage":true}` when usage was requested — a declared-false `include_usage` is not a request and stays off the wire, leaving the v1 byte shape. No `n`, tools, functions, response format, logprobs, modalities or extra fields are sent, and no parameter is stripped for a resend. Requests are limited to 256 KiB; a pack whose escaped request would exceed that is refused before any directory or connection exists, as are invalid options and a missing credential variable.
+For profiles v1/v2, the body is exactly `{"model", "messages", "stream", <token cap field>, ["temperature"], ["top_p"], ["seed"], ["reasoning_effort"], ["stream_options"]}` in that order with the case's messages verbatim and thousandths converted to decimal numbers. Bracketed fields appear only when declared. Under profile v1 neither control can appear; under profile v2 `reasoning_effort` is the declared enum string and `stream_options` is exactly `{"include_usage":true}` when usage was requested — a declared-false `include_usage` is not a request and stays off the wire, leaving the v1 byte shape. No `n`, tools, functions, response format, logprobs, modalities or extra fields are sent, and no parameter is stripped for a resend. Requests are limited to 256 KiB; a pack whose escaped request would exceed that is refused before any directory or connection exists, as are invalid options and a missing credential variable.
 
 ### Response semantics and commitment
+
+The following text-only channel restrictions apply to profiles v1/v2 and to the v3 follow-up. The [v3 first-turn exceptions](#tool-call-pack-contract-v5-and-profile-v3) do not change archival response handling.
 
 Only a 200 status with exactly one `content-type` header whose media type matches the mode and with every `content-encoding` member equal to `identity` is parsed; repeated media types are ambiguous, other statuses (including redirects) and out-of-profile entities are captured as bounded evidence and never re-sent. The entity or event must be strict UTF-8 as a whole before parsing, one JSON object with a `choices` array of objects; unknown fields anywhere are skipped through the parser's own recursive path (so its 128-level nesting guard applies) and never copied; positional arrays where records are required are malformed. A non-null top-level `error` makes the attempt `provider_error`, uncommitted. Exactly one choice with index 0 (or no index) is allowed; zero-choice chunks are metadata. A nonempty `id`, when present, must stay identical across all chunks of one response; empty preamble ids carry no identity. `role`, when present, must be `assistant`; `content`/`refusal` must be null, absent or strings; `tool_calls`, `function_call` and `audio` that are non-null and non-empty are unsupported; a streamed choice must carry `delta` and no `message`, a complete entity `message` and no `delta`. Recognized `finish_reason` values are `stop`, `length` and `content_filter`; `tool_calls`/`function_call` and unknown values are unsupported. A nonempty `refusal` string or a `content_filter` finish is a completed refusal. Reasoning fields stay in the raw body only.
 
@@ -343,6 +347,7 @@ For raw-body-free version-1 regrades, facts discarded by the old writer are unav
 | `client_limit` | Client response, artifact or framing limit—not the provider's output limit. |
 | `interrupted`, `local_error`, `invalid_evidence` | Explicit interruption, local I/O error or failed evidence validation. |
 | `other_ungraded` | Other unsupported/incomplete responses, unresolved attempts or unstarted cases; inspect `state` and `reason`. |
+| `invalid_tool_call` | A wrong or malformed first-turn call without a length stop; exposed only in tool-profile reports. |
 
 These explanations do not change grades, denominators, task/protocol identities or grader revisions. In particular, `output_limit` can accompany canonical `malformed` or `unknown`; neither is silently regraded. Human output names the categories and metadata source and continues to escape untrusted text.
 
@@ -397,6 +402,8 @@ Study comparison requires each view's source, task, target, qualification, gradi
 
 ### Reports and interpretation
 
+The report versions below apply to text-only evidence; [tool-profile reports](#evidence-and-reports) retain the same arithmetic with a separate call axis.
+
 JSON study report **version 2** contains `claim`, the admitted `study` (manifest and computed identities), the verified `comparison`, and `families`. Ordinary comparison output is also **version 2** and adds `left_results`/`right_results` diagnostic counts alongside unchanged grading arithmetic. Each family contains `group`, a paired `summary`, and `units`. Every summary includes the same left/right result counts. Each unit contains `world`, its summary, and case rows with canonical `left`/`right` outcomes plus `left_result`/`right_result` explanations. Families follow pack group order; units follow pack world order within each group; cases retain pack order within each unit. Output order never depends on hash-map traversal.
 
 Every summary uses the same accumulator as whole-pack comparison: `n`, left/right coverage, paired both-success/both-fail/gains/losses/either-unknown counts, fixed-denominator `delta_b_minus_a` bounds, and nullable complete-case delta explicitly labeled diagnostic. Wrong, malformed and provider-signaled refused outcomes are known failures; unknowns remain in the declared denominator at every level. `wrong` counts can be obtained as `failure - malformed - refused`; case rows preserve the exact outcome. Gain/loss counts exclude any pair with an unknown side.
@@ -419,3 +426,64 @@ Each `(seed, family, unit)` selects a parameter block with SHA-256 over the ASCI
 Both variants accept a canonical decimal answer string or the deliberately permitted equivalent `value=<decimal>`, as stated in the prompt. The relation is `final-string-set`: exactly one standalone `===FINAL===` line followed by one strict answer object. Generated qualifications exercise both accepted forms, reasoning before a valid answer, incorrect finals mentioning the correct number in reasoning, conflicting finals, prose refusal, absent boundary, duplicate keys, numeric instead of string values, and trailing prose.
 
 Generation serializes the pack and runs it through the real pack reader and grader before emitting it. That self-check does not establish that the prompt describes the intended construct or that the oracle is correct; independent solver checks are separate. Recipe v1 has narrow, synthetic coverage and no calibrated difficulty, population validity or contamination guarantee. It is suitable for exercising the study workflow and collecting pilot diagnostics, not assigning model tiers. Any future change to parameter selection, prompt semantics or expected answers needs an explicit new recipe identity rather than silently changing v1.
+
+## Tool-call pack contract v5 and profile v3
+
+Pack v5 extends the v4 case with required `tool` and `call_qualification` records. Every case is a tool case; v1–v4 remain closed archival readers. Provenance and ordinary answer acceptance retain the v4 rules.
+
+`tool` contains `functions`, `expected`, and `result`, in that order. Each function contains `name`, `description`, and `parameters`. Declare 1–8 functions in request order, with unique names of 1–64 ASCII letters, digits, underscores or hyphens, and nonempty descriptions at most 4096 bytes. Decoy functions are permitted. Parameters are bounded duplicate-rejecting exact-JSON objects, not an executable schema. `expected` contains a declared function `name` and `arguments`: 1–16 pairwise unequal exact-JSON objects. Argument comparison uses the existing exact-decimal equality, including key-order independence and equivalent decimal spellings. `result` is inert text, included in the existing decoded case-message budget and sent verbatim; Grill never executes tools or fetches results.
+
+`call_qualification` has the existing `valid` and `wrong` artifact-string lists. Artifacts contain the complete raw tool-call array. Each valid artifact must pass, each wrong artifact must fail, and every accepted argument alternative must be covered by a valid artifact. These self-checks do not independently establish task or oracle correctness.
+
+### Call grading and case composition
+
+The relation is `tool-call-exact-arguments-v1`, implementation `grill-tool-call-exact-arguments-impl-v1`. It binds these rules, including composition with final-answer grading:
+
+| First turn | `tool_call` | Case outcome and continuation |
+|---|---|---|
+| Uncommitted, unresolved or not started | `unknown` | `unknown`; no result sent |
+| Refusal or content filter | `absent` | `refused`; refusal takes precedence |
+| No call (including null or an empty array, even with a `tool_calls` stop) | `absent` | Retain the observed stop and grade the direct answer normally; missing final content remains unknown |
+| Wrong function name or argument values | `wrong` | `wrong`; no result sent |
+| Bad call shape | `malformed` | `malformed`; no result sent |
+| Any call under a length stop | `malformed` | Existing `output_limit` handling; never accepted or followed up |
+| Valid call | `valid` | Grade only the follow-up outcome; validity alone is never success |
+
+A call artifact must be an array containing exactly one object with a nonempty `id` at most 256 bytes and no control characters, `type: "function"`, and a function object with string `name` and string `arguments`. Missing name or id, another type, multiple calls, non-object or unparseable argument JSON, duplicate argument keys at any depth, and trailing argument content are malformed. Known call fields must occur once. Missing or extra argument values are wrong when the argument object itself is well-formed. Unknown provider fields are ignored for grading and retained verbatim in evidence. Text alongside a call is permitted and retained in the raw response, but is neither graded nor replayed; the call takes precedence over content. These decisions belong to the implementation revision and cannot change silently.
+
+### Requests and protocol identity
+
+`declared-chat-completions-v3` requires pack v5 and non-streaming collection; pack v5 requires that profile. It uses the v2 optional reasoning-effort and explicit usage-declaration presence rules. Offline `grade` and submissions refuse v5/v3 because Submission v1 has no call channel.
+
+The first request appends `tools` (declared function records wrapped as `{"type":"function","function":...}`) and `tool_choice: "auto"` to the existing request fields. Only a valid call permits the follow-up, which uses `tool_choice: "none"` and the same tools. It appends an assistant message with null content and one canonical call, followed by `{"role":"tool","tool_call_id":<model id>,"content":<fixed result>}`. Canonical call arguments serialize the matched accepted alternative; the id comes from the model. Reasoning and alongside-content are not replayed. A follow-up call stays unsupported and yields `unknown`, without another request.
+
+The protocol projection replaces the text-only constant with `"one-choice-at-most-one-fixture-tool-round-nonstream"`, `"tool-choice-auto-then-none"` and `"valid-call-replayed-canonical-arguments-null-content"`. Existing profile projections and request bytes remain unchanged.
+
+Using the existing `H` and typed `J`:
+
+```text
+(TR, TG) = ("tool-call-exact-arguments-v1", "grill-tool-call-exact-arguments-impl-v1")
+input(c) = H("case-input-v5",
+             J([5, [R(c), G(c)], [TR, TG], c.id, c.messages, c.acceptance,
+                c.provenance, c.tool]))
+qualification = H("qualification-v5",
+                  J([[c.id, c.qualification, c.call_qualification] for c in pack order]))
+grading = H("grading-v5",
+            J([5, [[c.id, [R(c), G(c)], [TR, TG]] for c in pack order], qualification]))
+```
+
+Target binds pack version 5 with the existing selection/grouping projection. Function declarations, accepted calls and result text are task gold; call qualifications affect qualification and grading identity, not task gold.
+
+### Evidence and reports
+
+The first exchange retains the existing reservation, raw body and terminal. A committed call writes exact raw `tool_calls` JSON to `call.json`, not `final.txt`; a direct answer keeps `final.txt`. Only after publishing a valid call's terminal is `followup/` created for its own reservation, body, optional final artifact and terminal. Regrading copies both exchanges and the call artifact. Loading checks every digest and reconstructs both request bodies from the plan, case and verified call. A valid call with missing or unsettled follow-up remains unresolved and cannot be resumed; its final outcome is unknown, not wrong.
+
+Only profile v3 writes terminal v3 and run-view v2. Terminal v3 permits `stop: "tool_calls"` and includes nullable `call: {bytes, sha256}`. A call requires committed evidence, no final artifact, and that version. Run-view v2 rows are ordered `case_id, input, attempt, terminal, call, tool_call, followup, reason, artifact, evidence, outcome`. `call` is `H("call", call.json bytes)`; `followup` is the follow-up terminal-source digest, or null. Reason, evidence and answer artifact describe the deciding exchange: the follow-up after a valid call, otherwise the first exchange.
+
+Only tool-profile evidence emits inspect v6, compare v3 and study report v3; legacy outputs retain their previous versions and fields. Inspect adds per-case `tool_call`, a nullable follow-up exchange, and top-level `tool_calls`. Comparison and every study family/unit summary add `left_tool_calls` and `right_tool_calls` through the same accumulator. Each count object contains `cases, valid, wrong, malformed, absent, unknown, after_valid_call`; the last contains outcome counts `success, wrong, malformed, refused, unknown` restricted to valid calls. Call counts sum to cases, and after-valid-call outcomes sum to valid calls. Utility arithmetic remains unchanged. Mixed legacy/tool comparisons are incompatible, not partially reported.
+
+Inspect usage coverage still counts first-turn exchanges; follow-up usage remains separately visible. The new result explanation is observational, not another grading relation. Planning remains version 1: per-case request bytes describe the first request, while requested output tokens cover both possible exchanges. Preflight bounds each follow-up argument alternative with a maximum-length call id and accounts for both exchanges and call evidence.
+
+Each exchange starts fresh total and idle collection-protection deadlines after its durable reservation. Cooperative pause applies between cases, not between their exchanges; SIGINT still interrupts an active follow-up. The preflight id bound uses maximally escaped permitted characters, not just unescaped byte length.
+
+Streaming calls, parallel or multiple rounds, actual tool execution, MCP, Responses API, legacy `function_call`, forced tool choice, JSON-Schema validation, submitted tool artifacts, and paired call-axis gains/losses are outside this contract. `chat_template_kwargs`/`enable_thinking` are not preserved; only declared reasoning effort and rendering settings are available. Tool-result execution graders, oracle generation and divergence injection are separate work.

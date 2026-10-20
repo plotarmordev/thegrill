@@ -8,6 +8,7 @@ pub(crate) enum ResultKind {
     Correct,
     WrongAnswer,
     MalformedAnswer,
+    InvalidToolCall,
     Refused,
     OutputLimit,
     Timeout,
@@ -47,14 +48,24 @@ pub(crate) struct ResultCounts {
     pub local_error: u32,
     pub invalid_evidence: u32,
     pub other_ungraded: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_tool_call: Option<u32>,
 }
 
 impl ResultCounts {
+    fn with_tool_calls(mut self, present: bool) -> Self {
+        if present {
+            self.invalid_tool_call.get_or_insert(0);
+        }
+        self
+    }
+
     fn record(&mut self, result: ResultKind) {
         let count = match result {
             ResultKind::Correct => &mut self.correct,
             ResultKind::WrongAnswer => &mut self.wrong_answer,
             ResultKind::MalformedAnswer => &mut self.malformed_answer,
+            ResultKind::InvalidToolCall => self.invalid_tool_call.get_or_insert(0),
             ResultKind::Refused => &mut self.refused,
             ResultKind::OutputLimit => &mut self.output_limit,
             ResultKind::Timeout => &mut self.timeout,
@@ -77,11 +88,24 @@ pub(crate) fn attempt_result(attempt: &crate::store::LoadedAttempt) -> ResultKin
         AttemptState::Terminal(t) => t,
         _ => return ResultKind::OtherUngraded,
     };
+    if let Some(followup) = &attempt.followup {
+        return attempt_result(followup);
+    }
     let stop = attempt
         .recovered_metadata
         .as_ref()
         .map(|m| m.stop)
         .or(terminal.stop);
+    if matches!(
+        attempt.tool_call,
+        Some(ToolCall::Wrong | ToolCall::Malformed)
+    ) {
+        return if stop == Some(Finish::Length) {
+            ResultKind::OutputLimit
+        } else {
+            ResultKind::InvalidToolCall
+        };
+    }
     match attempt.outcome {
         Outcome::Success | Outcome::Wrong | Outcome::Refused => ResultKind::graded(attempt.outcome),
         Outcome::Malformed if stop == Some(Finish::Length) => ResultKind::OutputLimit,
@@ -104,6 +128,7 @@ pub(crate) struct VerifiedCase {
     pub input: String,
     pub outcome: Outcome,
     pub result: ResultKind,
+    pub tool_call: Option<ToolCall>,
 }
 
 /// A recomputed, receipt-matched grade view of either evidence kind.
@@ -170,6 +195,10 @@ pub(crate) struct Comparison<'a> {
     pub complete_case_delta_diagnostic: Option<DiagnosticDelta>,
     pub left_results: ResultCounts,
     pub right_results: ResultCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_tool_calls: Option<ToolCallCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_tool_calls: Option<ToolCallCounts>,
 }
 
 impl Coverage {
@@ -206,6 +235,49 @@ pub(crate) fn coverage(outcomes: impl ExactSizeIterator<Item = Outcome>) -> Cove
     c.finish()
 }
 
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct OutcomeCounts {
+    pub success: u32,
+    pub wrong: u32,
+    pub malformed: u32,
+    pub refused: u32,
+    pub unknown: u32,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct ToolCallCounts {
+    pub cases: u32,
+    pub valid: u32,
+    pub wrong: u32,
+    pub malformed: u32,
+    pub absent: u32,
+    pub unknown: u32,
+    pub after_valid_call: OutcomeCounts,
+}
+
+fn record_tool_call(counts: &mut Option<ToolCallCounts>, call: Option<ToolCall>, outcome: Outcome) {
+    let Some(call) = call else { return };
+    let counts = counts.get_or_insert_with(ToolCallCounts::default);
+    counts.cases += 1;
+    match call {
+        ToolCall::Valid => {
+            counts.valid += 1;
+            let after = &mut counts.after_valid_call;
+            match outcome {
+                Outcome::Success => after.success += 1,
+                Outcome::Wrong => after.wrong += 1,
+                Outcome::Malformed => after.malformed += 1,
+                Outcome::Refused => after.refused += 1,
+                Outcome::Unknown => after.unknown += 1,
+            }
+        }
+        ToolCall::Wrong => counts.wrong += 1,
+        ToolCall::Malformed => counts.malformed += 1,
+        ToolCall::Absent => counts.absent += 1,
+        ToolCall::Unknown => counts.unknown += 1,
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct PairSummary {
     pub n: u32,
@@ -216,6 +288,10 @@ pub(crate) struct PairSummary {
     pub complete_case_delta_diagnostic: Option<DiagnosticDelta>,
     pub left_results: ResultCounts,
     pub right_results: ResultCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_tool_calls: Option<ToolCallCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_tool_calls: Option<ToolCallCounts>,
 }
 
 // One arithmetic implementation for whole-pack, family and problem-unit reports.
@@ -227,6 +303,8 @@ struct PairTally {
     paired: Paired,
     left_results: ResultCounts,
     right_results: ResultCounts,
+    left_tool_calls: Option<ToolCallCounts>,
+    right_tool_calls: Option<ToolCallCounts>,
 }
 
 impl PairTally {
@@ -235,6 +313,8 @@ impl PairTally {
         self.right.record(right.outcome);
         self.left_results.record(left.result);
         self.right_results.record(right.result);
+        record_tool_call(&mut self.left_tool_calls, left.tool_call, left.outcome);
+        record_tool_call(&mut self.right_tool_calls, right.tool_call, right.outcome);
         match (left.outcome, right.outcome) {
             (Outcome::Unknown, _) | (_, Outcome::Unknown) => self.paired.either_unknown += 1,
             (Outcome::Success, Outcome::Success) => self.paired.both_success += 1,
@@ -263,8 +343,14 @@ impl PairTally {
             left,
             right,
             paired: self.paired,
-            left_results: self.left_results,
-            right_results: self.right_results,
+            left_results: self
+                .left_results
+                .with_tool_calls(self.left_tool_calls.is_some()),
+            right_results: self
+                .right_results
+                .with_tool_calls(self.right_tool_calls.is_some()),
+            left_tool_calls: self.left_tool_calls,
+            right_tool_calls: self.right_tool_calls,
         }
     }
 }
@@ -293,7 +379,11 @@ pub(crate) fn compare<'a>(a: &'a Verified, b: &'a Verified) -> Result<Comparison
     }
     let summary = tally.finish();
     Ok(Comparison {
-        version: 2,
+        version: if summary.left_tool_calls.is_some() {
+            3
+        } else {
+            2
+        },
         claim: if a.claim == b.claim && a.claim.starts_with("submitted") {
             "descriptive-finite-pack-submitted-artifacts-not-verified-execution"
         } else {
@@ -316,6 +406,8 @@ pub(crate) fn compare<'a>(a: &'a Verified, b: &'a Verified) -> Result<Comparison
         complete_case_delta_diagnostic: summary.complete_case_delta_diagnostic,
         left_results: summary.left_results,
         right_results: summary.right_results,
+        left_tool_calls: summary.left_tool_calls,
+        right_tool_calls: summary.right_tool_calls,
     })
 }
 
@@ -326,6 +418,10 @@ pub(crate) struct StudyCase<'a> {
     pub right: Outcome,
     pub left_result: ResultKind,
     pub right_result: ResultKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_tool_call: Option<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_tool_call: Option<ToolCall>,
 }
 
 #[derive(Serialize)]
@@ -389,6 +485,8 @@ pub(crate) fn study_analysis<'a>(
             right: b.outcome,
             left_result: a.result,
             right_result: b.result,
+            left_tool_call: a.tool_call,
+            right_tool_call: b.tool_call,
         });
     }
     let mut families: Vec<_> = pack
@@ -415,7 +513,7 @@ pub(crate) fn study_analysis<'a>(
         });
     }
     Ok(StudyAnalysis {
-        version: 2,
+        version: comparison.version,
         claim: "descriptive-finite-pack-study; provenance-exposure-and-independent-units-are-declarations; no-confidence-intervals-or-causal-verdict",
         study,
         comparison,
@@ -462,6 +560,11 @@ pub(crate) struct InspectedAttempt<'a> {
     pub metadata_source: MetadataSource,
     pub result: ResultKind,
     pub outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<ToolCall>,
+    // Outer presence marks a tool case; inner presence marks a started follow-up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub followup: Option<Option<Box<InspectedAttempt<'a>>>>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -545,32 +648,23 @@ pub(crate) struct Inspection<'a> {
     pub usage_coverage: UsageCoverage,
     pub result_counts: ResultCounts,
     pub lifecycle: Option<crate::lifecycle::Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<ToolCallCounts>,
 }
 
 pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> Inspection<'a> {
     let mut counts = InspectedCounts::default();
     let mut usage_coverage = UsageCoverage::default();
     let mut result_counts = ResultCounts::default();
+    let mut tool_calls = None;
     let attempts = loaded
         .pack
         .cases
         .iter()
         .zip(&loaded.attempts)
         .map(|(case, a)| {
-            let (state, terminal) = match &a.state {
-                AttemptState::NotStarted => (InspectedState::NotStarted, None),
-                AttemptState::Unresolved => (InspectedState::Unresolved, None),
-                AttemptState::Invalid(_) => (InspectedState::Invalid, None),
-                AttemptState::Terminal(t) => (
-                    match t.reason {
-                        Reason::Committed => InspectedState::Collected,
-                        Reason::Refused => InspectedState::Refused,
-                        _ => InspectedState::Uncommitted,
-                    },
-                    Some(t),
-                ),
-            };
-            match state {
+            let inspected = inspect_attempt(&case.id, a);
+            match inspected.state {
                 InspectedState::NotStarted => counts.not_started += 1,
                 InspectedState::Unresolved => counts.unresolved += 1,
                 InspectedState::Collected => counts.collected += 1,
@@ -578,49 +672,10 @@ pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> 
                 InspectedState::Uncommitted => counts.uncommitted += 1,
                 InspectedState::Invalid => counts.invalid += 1,
             }
-            let recovered = terminal.and(a.recovered_metadata.as_ref());
-            let stop = recovered
-                .map(|m| m.stop)
-                .or_else(|| terminal.and_then(|t| t.stop));
-            let usage = match recovered {
-                Some(metadata) => metadata.usage.as_ref(),
-                None => terminal.and_then(|t| t.usage.as_ref()),
-            };
-            let result = attempt_result(a);
-            result_counts.record(result);
-            usage_coverage.observe(usage);
-            InspectedAttempt {
-                attempt: a.attempt,
-                case_id: &case.id,
-                state,
-                reason: terminal.map(|t| t.reason),
-                detail: match &a.state {
-                    AttemptState::Invalid(what) => Some(*what),
-                    AttemptState::Terminal(t) => Some(t.detail.as_str()),
-                    _ => None,
-                },
-                stop,
-                dispatched: terminal.map(|t| t.dispatched),
-                http_status: terminal.and_then(|t| t.http.as_ref().map(|h| h.status)),
-                body_bytes: terminal.map(|t| t.body.bytes),
-                body_complete: terminal.map(|t| t.body.complete),
-                settle_ms: terminal.map(|t| t.timing.settle_ms),
-                usage,
-                metadata_source: if recovered.is_some() {
-                    MetadataSource::VerifiedRawBody
-                } else if stop.is_some() || usage.is_some() {
-                    MetadataSource::Terminal
-                } else {
-                    MetadataSource::Unavailable
-                },
-                result,
-                usage_status: if usage.is_some() {
-                    "unvalidated-provider-snapshot"
-                } else {
-                    "unknown"
-                },
-                outcome: a.outcome,
-            }
+            result_counts.record(inspected.result);
+            usage_coverage.observe(inspected.usage);
+            record_tool_call(&mut tool_calls, a.tool_call, a.outcome);
+            inspected
         })
         .collect();
     let (view, coverage) = match view {
@@ -633,7 +688,7 @@ pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> 
         Err(_) => (ViewStatus::Mismatch, None),
     };
     Inspection {
-        version: 5,
+        version: if loaded.pack.version == 5 { 6 } else { 5 },
         kind: match loaded.kind {
             crate::store::Kind::Run => "run",
             _ => "run-grade-view",
@@ -657,8 +712,79 @@ pub(crate) fn inspect<'a>(loaded: &'a Loaded, view: Result<Option<RunView>>) -> 
         usage_status: "unvalidated-provider-snapshot",
         usage_semantics: "last-provider-snapshot-not-complete-or-validated-billing; verified-raw-recovery-for-complete-v1-absent-content; field-coverage-denominator-is-all-cases",
         usage_coverage,
-        result_counts,
+        result_counts: result_counts.with_tool_calls(tool_calls.is_some()),
         lifecycle: None,
+        tool_calls,
+    }
+}
+
+fn inspect_attempt<'a>(
+    case_id: &'a str,
+    a: &'a crate::store::LoadedAttempt,
+) -> InspectedAttempt<'a> {
+    let (state, terminal) = match &a.state {
+        AttemptState::NotStarted => (InspectedState::NotStarted, None),
+        AttemptState::Unresolved => (InspectedState::Unresolved, None),
+        AttemptState::Invalid(_) => (InspectedState::Invalid, None),
+        AttemptState::Terminal(t) => (
+            match t.reason {
+                Reason::Committed => InspectedState::Collected,
+                Reason::Refused => InspectedState::Refused,
+                _ => InspectedState::Uncommitted,
+            },
+            Some(t),
+        ),
+    };
+    let state = match a.followup.as_deref().map(|next| &next.state) {
+        Some(AttemptState::NotStarted | AttemptState::Unresolved) => InspectedState::Unresolved,
+        Some(AttemptState::Invalid(_)) => InspectedState::Invalid,
+        _ => state,
+    };
+    let recovered = terminal.and(a.recovered_metadata.as_ref());
+    let stop = recovered
+        .map(|m| m.stop)
+        .or_else(|| terminal.and_then(|t| t.stop));
+    let usage = match recovered {
+        Some(metadata) => metadata.usage.as_ref(),
+        None => terminal.and_then(|t| t.usage.as_ref()),
+    };
+    InspectedAttempt {
+        attempt: a.attempt,
+        case_id,
+        state,
+        reason: terminal.map(|t| t.reason),
+        detail: match &a.state {
+            AttemptState::Invalid(what) => Some(*what),
+            AttemptState::Terminal(t) => Some(t.detail.as_str()),
+            _ => None,
+        },
+        stop,
+        dispatched: terminal.map(|t| t.dispatched),
+        http_status: terminal.and_then(|t| t.http.as_ref().map(|h| h.status)),
+        body_bytes: terminal.map(|t| t.body.bytes),
+        body_complete: terminal.map(|t| t.body.complete),
+        settle_ms: terminal.map(|t| t.timing.settle_ms),
+        usage,
+        metadata_source: if recovered.is_some() {
+            MetadataSource::VerifiedRawBody
+        } else if stop.is_some() || usage.is_some() {
+            MetadataSource::Terminal
+        } else {
+            MetadataSource::Unavailable
+        },
+        result: attempt_result(a),
+        usage_status: if usage.is_some() {
+            "unvalidated-provider-snapshot"
+        } else {
+            "unknown"
+        },
+        outcome: a.outcome,
+        tool_call: a.tool_call,
+        followup: a.tool_call.map(|_| {
+            a.followup
+                .as_ref()
+                .map(|next| Box::new(inspect_attempt(case_id, next)))
+        }),
     }
 }
 
@@ -715,6 +841,7 @@ mod tests {
                     input: c.input,
                     outcome: *o,
                     result: ResultKind::graded(*o),
+                    tool_call: None,
                 })
                 .collect(),
         }
@@ -751,5 +878,41 @@ mod tests {
             (2, 2, 3)
         );
         assert_eq!((c.delta_b_minus_a.lower, c.delta_b_minus_a.upper), (-3, -2));
+    }
+
+    #[test]
+    fn call_counts_partition_cases_and_preserve_valid_call_failures() {
+        let mut counts = None;
+        for outcome in [
+            Outcome::Success,
+            Outcome::Wrong,
+            Outcome::Malformed,
+            Outcome::Refused,
+            Outcome::Unknown,
+        ] {
+            record_tool_call(&mut counts, Some(ToolCall::Valid), outcome);
+        }
+        for call in [
+            ToolCall::Wrong,
+            ToolCall::Malformed,
+            ToolCall::Absent,
+            ToolCall::Unknown,
+        ] {
+            record_tool_call(&mut counts, Some(call), Outcome::Unknown);
+        }
+        let c = counts.unwrap();
+        assert_eq!(
+            c.cases,
+            c.valid + c.wrong + c.malformed + c.absent + c.unknown
+        );
+        let a = c.after_valid_call;
+        assert_eq!(
+            c.valid,
+            a.success + a.wrong + a.malformed + a.refused + a.unknown
+        );
+        assert_eq!(
+            (a.success, a.wrong, a.malformed, a.refused, a.unknown),
+            (1, 1, 1, 1, 1)
+        );
     }
 }

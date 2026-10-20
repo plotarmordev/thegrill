@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix microbench and media captures whose killed descendants close inherited
+  pipes late: after leader exit, pipe drainage now uses the remaining run
+  deadline instead of 100 ms, so these captures can succeed and receipt
+  `duration_ms` can extend toward the deadline. See the
+  [external capture contract](KERNEL-FABRIC.md).
 - Add audio WAV and video MP4 media workloads with container expectation rechecks.
 - Report standard audio real-time factor and end-to-end video frame rates.
   Existing image workload identities and the end-to-end duration gate are unchanged.

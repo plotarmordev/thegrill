@@ -37,6 +37,39 @@ pub(crate) struct Case {
     pub acceptance: Acceptance,
     pub qualification: Qualification,
     pub provenance: Option<CaseProvenance>,
+    /// Present exactly in version 5 packs, together with `call_qualification`.
+    pub tool: Option<ToolTask>,
+    pub call_qualification: Option<Qualification>,
+}
+
+/// One fixture tool round. Grill never executes a tool: `result` is inert pack
+/// text sent back only after a valid call.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolTask {
+    #[serde(deserialize_with = "crate::record::objects")]
+    pub functions: Vec<Function>,
+    #[serde(deserialize_with = "crate::record::object")]
+    pub expected: ExpectedCall,
+    pub result: String,
+}
+
+/// A declared function; `parameters` is inert schema data for the model and
+/// never validates arguments.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Function {
+    pub name: String,
+    pub description: String,
+    pub parameters: crate::grade::atlas::ExactJson,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExpectedCall {
+    pub name: String,
+    /// Semantically distinct accepted argument objects, in pack order.
+    pub arguments: Vec<crate::grade::atlas::ExactJson>,
 }
 
 // Archival v1 remains a distinct relation, never inferred from a v2 string set.
@@ -184,7 +217,15 @@ impl<'de> Deserialize<'de> for Grid {
 impl Serialize for Case {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut record = s.serialize_struct("Case", 6 + usize::from(self.provenance.is_some()))?;
+        let optional = [
+            self.provenance.is_some(),
+            self.tool.is_some(),
+            self.call_qualification.is_some(),
+        ];
+        let mut record = s.serialize_struct(
+            "Case",
+            6 + optional.into_iter().filter(|present| *present).count(),
+        )?;
         record.serialize_field("id", &self.id)?;
         record.serialize_field("world", &self.world)?;
         record.serialize_field("group", &self.group)?;
@@ -196,6 +237,12 @@ impl Serialize for Case {
         record.serialize_field("qualification", &self.qualification)?;
         if let Some(provenance) = &self.provenance {
             record.serialize_field("provenance", provenance)?;
+        }
+        if let Some(tool) = &self.tool {
+            record.serialize_field("tool", tool)?;
+        }
+        if let Some(qualification) = &self.call_qualification {
+            record.serialize_field("call_qualification", qualification)?;
         }
         record.end()
     }
@@ -392,11 +439,13 @@ pub(crate) struct Protocol {
     pub rendering: Rendering,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Profile {
     DeclaredChatCompletionsV1,
     DeclaredChatCompletionsV2,
+    /// Profile v2 controls plus one nonstreaming fixture tool round per case.
+    DeclaredChatCompletionsV3,
 }
 
 /// The closed request-schema reasoning-effort ladder, sent verbatim when
@@ -487,6 +536,19 @@ pub(crate) enum Outcome {
     Wrong,
     Malformed,
     Refused,
+    Unknown,
+}
+
+/// Tool-call validity, a separate axis from the case outcome: `wrong` is a
+/// well-formed call to the wrong function or with wrong arguments, `absent` a
+/// committed turn without a call, `unknown` an unobserved turn.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ToolCall {
+    Valid,
+    Wrong,
+    Malformed,
+    Absent,
     Unknown,
 }
 
@@ -627,6 +689,8 @@ pub(crate) enum Finish {
     Stop,
     Length,
     ContentFilter,
+    /// Only in version 3 terminals of the tool-call profile.
+    ToolCalls,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Default, Clone)]
@@ -676,8 +740,7 @@ pub(crate) struct Timing {
     pub local_ms: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Terminal {
     pub version: u32,
     pub attempt: u32,
@@ -686,23 +749,136 @@ pub(crate) struct Terminal {
     pub reservation: String,
     pub request: String,
     pub dispatched: bool,
-    #[serde(deserialize_with = "crate::record::string_enum")]
     pub reason: Reason,
     pub detail: String,
-    #[serde(deserialize_with = "crate::record::string_enum")]
     pub commitment: Commitment,
-    #[serde(deserialize_with = "crate::record::nullable_string_enum")]
     pub stop: Option<Finish>,
-    #[serde(deserialize_with = "crate::record::nullable_object")]
     pub http: Option<Http>,
-    #[serde(deserialize_with = "crate::record::object")]
     pub body: Body,
-    #[serde(rename = "final", deserialize_with = "crate::record::nullable_object")]
     pub final_artifact: Option<Artifact>,
-    #[serde(deserialize_with = "crate::record::nullable_object")]
     pub usage: Option<Usage>,
-    #[serde(deserialize_with = "crate::record::object")]
     pub timing: Timing,
+    /// The retained `tool_calls` JSON (`call.json`); a required nullable field
+    /// of version 3 and absent from versions 1 and 2.
+    pub call: Option<Artifact>,
+}
+
+/// A field of a newer record version: absent from older versions, required
+/// (possibly null) in its own. The version gate is applied while parsing, on
+/// purpose: older records keep their exact bytes and field order, and any
+/// spelling of a newer field in them (null included) is a closed-schema
+/// error before any consistency check runs.
+#[derive(Default)]
+enum Slot<T> {
+    #[default]
+    Absent,
+    Present(Option<T>),
+}
+
+impl<T> Slot<T> {
+    fn gate<E: serde::de::Error>(self, required: bool, name: &'static str) -> Result<Option<T>, E> {
+        match (self, required) {
+            (Self::Present(value), true) => Ok(value),
+            (Self::Absent, false) => Ok(None),
+            (Self::Absent, true) => Err(E::missing_field(name)),
+            (Self::Present(_), false) => Err(E::custom(format!(
+                "field `{name}` is not part of this record version"
+            ))),
+        }
+    }
+}
+
+fn object_slot<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Slot<T>, D::Error> {
+    crate::record::nullable_object(d).map(Slot::Present)
+}
+
+fn string_slot<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Slot<String>, D::Error> {
+    Option::<String>::deserialize(d).map(Slot::Present)
+}
+
+impl Serialize for Terminal {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let tool = self.version == 3;
+        let mut record = s.serialize_struct("Terminal", 16 + usize::from(tool))?;
+        record.serialize_field("version", &self.version)?;
+        record.serialize_field("attempt", &self.attempt)?;
+        record.serialize_field("case_id", &self.case_id)?;
+        record.serialize_field("input", &self.input)?;
+        record.serialize_field("reservation", &self.reservation)?;
+        record.serialize_field("request", &self.request)?;
+        record.serialize_field("dispatched", &self.dispatched)?;
+        record.serialize_field("reason", &self.reason)?;
+        record.serialize_field("detail", &self.detail)?;
+        record.serialize_field("commitment", &self.commitment)?;
+        record.serialize_field("stop", &self.stop)?;
+        record.serialize_field("http", &self.http)?;
+        record.serialize_field("body", &self.body)?;
+        record.serialize_field("final", &self.final_artifact)?;
+        record.serialize_field("usage", &self.usage)?;
+        record.serialize_field("timing", &self.timing)?;
+        if tool {
+            record.serialize_field("call", &self.call)?;
+        }
+        record.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Terminal {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Record {
+            version: u32,
+            attempt: u32,
+            case_id: String,
+            input: String,
+            reservation: String,
+            request: String,
+            dispatched: bool,
+            #[serde(deserialize_with = "crate::record::string_enum")]
+            reason: Reason,
+            detail: String,
+            #[serde(deserialize_with = "crate::record::string_enum")]
+            commitment: Commitment,
+            #[serde(deserialize_with = "crate::record::nullable_string_enum")]
+            stop: Option<Finish>,
+            #[serde(deserialize_with = "crate::record::nullable_object")]
+            http: Option<Http>,
+            #[serde(deserialize_with = "crate::record::object")]
+            body: Body,
+            #[serde(rename = "final", deserialize_with = "crate::record::nullable_object")]
+            final_artifact: Option<Artifact>,
+            #[serde(deserialize_with = "crate::record::nullable_object")]
+            usage: Option<Usage>,
+            #[serde(deserialize_with = "crate::record::object")]
+            timing: Timing,
+            #[serde(default, deserialize_with = "object_slot")]
+            call: Slot<Artifact>,
+        }
+        let r = Record::deserialize(d)?;
+        Ok(Self {
+            call: r.call.gate(r.version == 3, "call")?,
+            version: r.version,
+            attempt: r.attempt,
+            case_id: r.case_id,
+            input: r.input,
+            reservation: r.reservation,
+            request: r.request,
+            dispatched: r.dispatched,
+            reason: r.reason,
+            detail: r.detail,
+            commitment: r.commitment,
+            stop: r.stop,
+            http: r.http,
+            body: r.body,
+            final_artifact: r.final_artifact,
+            usage: r.usage,
+            timing: r.timing,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq, Clone, Copy)]
@@ -715,20 +891,87 @@ pub(crate) enum RunEvidence {
     NotStarted,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+/// A run-view row. Version 2 rows (tool-call profile) carry `call`,
+/// `tool_call` and `followup`, with `call`/`followup` nullable; version 1 rows
+/// carry none of them, so their bytes are unchanged.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RunCaseGrade {
     pub case_id: String,
     pub input: String,
     pub attempt: u32,
     pub terminal: Option<String>,
-    #[serde(deserialize_with = "crate::record::nullable_string_enum")]
+    /// `H("call", call.json bytes)`.
+    pub call: Option<String>,
+    pub tool_call: Option<ToolCall>,
+    /// `H("terminal-source", follow-up terminal bytes)`.
+    pub followup: Option<String>,
     pub reason: Option<Reason>,
     pub artifact: Option<String>,
-    #[serde(deserialize_with = "crate::record::string_enum")]
     pub evidence: RunEvidence,
-    #[serde(deserialize_with = "crate::record::string_enum")]
     pub outcome: Outcome,
+}
+
+impl Serialize for RunCaseGrade {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let tool = self.tool_call.is_some();
+        let mut record = s.serialize_struct("RunCaseGrade", 8 + 3 * usize::from(tool))?;
+        record.serialize_field("case_id", &self.case_id)?;
+        record.serialize_field("input", &self.input)?;
+        record.serialize_field("attempt", &self.attempt)?;
+        record.serialize_field("terminal", &self.terminal)?;
+        if tool {
+            record.serialize_field("call", &self.call)?;
+            record.serialize_field("tool_call", &self.tool_call)?;
+            record.serialize_field("followup", &self.followup)?;
+        }
+        record.serialize_field("reason", &self.reason)?;
+        record.serialize_field("artifact", &self.artifact)?;
+        record.serialize_field("evidence", &self.evidence)?;
+        record.serialize_field("outcome", &self.outcome)?;
+        record.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RunCaseGrade {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Record {
+            case_id: String,
+            input: String,
+            attempt: u32,
+            terminal: Option<String>,
+            #[serde(default, deserialize_with = "string_slot")]
+            call: Slot<String>,
+            #[serde(default, deserialize_with = "crate::record::present_string_enum")]
+            tool_call: Option<ToolCall>,
+            #[serde(default, deserialize_with = "string_slot")]
+            followup: Slot<String>,
+            #[serde(deserialize_with = "crate::record::nullable_string_enum")]
+            reason: Option<Reason>,
+            artifact: Option<String>,
+            #[serde(deserialize_with = "crate::record::string_enum")]
+            evidence: RunEvidence,
+            #[serde(deserialize_with = "crate::record::string_enum")]
+            outcome: Outcome,
+        }
+        let r = Record::deserialize(d)?;
+        let tool = r.tool_call.is_some();
+        Ok(Self {
+            call: r.call.gate(tool, "call")?,
+            followup: r.followup.gate(tool, "followup")?,
+            tool_call: r.tool_call,
+            case_id: r.case_id,
+            input: r.input,
+            attempt: r.attempt,
+            terminal: r.terminal,
+            reason: r.reason,
+            artifact: r.artifact,
+            evidence: r.evidence,
+            outcome: r.outcome,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -757,4 +1000,62 @@ pub(crate) struct RunView {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RunViewClaim {
     ClientCollectedArtifactsNotAuthenticatedExecution,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip<T: Serialize + serde::de::DeserializeOwned>(wire: &str) -> Result<String> {
+        let record: T = crate::record::parse(wire.as_bytes()).map_err(|e| e.to_string())?;
+        serde_json::to_string(&record).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn tool_fields_are_version_gated_in_receipts() {
+        let v2 = r#"{"version":2,"attempt":0,"case_id":"c","input":"i","reservation":"r","request":"q","dispatched":true,"reason":"committed","detail":"d","commitment":"committed","stop":"stop","http":null,"body":{"bytes":0,"sha256":"s","complete":true,"truncated":false,"terminal_offset":null,"surplus_retained":0,"surplus_observed":0},"final":null,"usage":null,"timing":{"started_unix_ms":0,"reserve_ms":0,"headers_ms":null,"first_body_ms":null,"settle_ms":0,"local_ms":0}}"#;
+        assert_eq!(
+            roundtrip::<Terminal>(v2).unwrap(),
+            v2,
+            "legacy bytes unchanged"
+        );
+        let v3 = v2.replacen(r#""version":2"#, r#""version":3"#, 1);
+        let with = |call: &str| format!("{},\"call\":{call}}}", &v3[..v3.len() - 1]);
+        for wire in [with("null"), with(r#"{"bytes":2,"sha256":"s"}"#)] {
+            assert_eq!(roundtrip::<Terminal>(&wire).unwrap(), wire);
+        }
+        assert!(roundtrip::<Terminal>(&v3).is_err(), "v3 requires call");
+        assert!(roundtrip::<Terminal>(&with("[2,\"s\"]")).is_err());
+        let v1 = v2.replacen(r#""version":2"#, r#""version":1"#, 1);
+        assert_eq!(
+            roundtrip::<Terminal>(&v1).unwrap(),
+            v1,
+            "legacy bytes unchanged"
+        );
+        for legacy in [v1.as_str(), v2] {
+            for call in ["null", r#"{"bytes":2,"sha256":"s"}"#] {
+                let wire = format!("{},\"call\":{call}}}", &legacy[..legacy.len() - 1]);
+                assert!(roundtrip::<Terminal>(&wire).is_err(), "{wire}");
+            }
+        }
+
+        let v1 = r#"{"case_id":"c","input":"i","attempt":0,"terminal":null,"reason":null,"artifact":null,"evidence":"not_started","outcome":"unknown"}"#;
+        assert_eq!(
+            roundtrip::<RunCaseGrade>(v1).unwrap(),
+            v1,
+            "legacy bytes unchanged"
+        );
+        let tool = r#"{"case_id":"c","input":"i","attempt":0,"terminal":null,"call":null,"tool_call":"unknown","followup":null,"reason":null,"artifact":null,"evidence":"not_started","outcome":"unknown"}"#;
+        assert_eq!(roundtrip::<RunCaseGrade>(tool).unwrap(), tool);
+        for bad in [
+            tool.replacen(r#""followup":null,"#, "", 1),
+            tool.replacen(r#""call":null,"#, "", 1),
+            tool.replacen(r#""tool_call":"unknown""#, r#""tool_call":null"#, 1),
+            tool.replacen(r#""tool_call":"unknown","#, "", 1),
+            v1.replacen(r#""terminal":null"#, r#""terminal":null,"call":null"#, 1),
+            v1.replacen(r#""terminal":null"#, r#""terminal":null,"followup":"f""#, 1),
+        ] {
+            assert!(roundtrip::<RunCaseGrade>(&bad).is_err(), "{bad}");
+        }
+    }
 }

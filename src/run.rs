@@ -60,6 +60,7 @@ pub(crate) enum CapField {
 pub(crate) enum ProfileArg {
     DeclaredChatCompletionsV1,
     DeclaredChatCompletionsV2,
+    DeclaredChatCompletionsV3,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -106,25 +107,25 @@ pub(crate) struct Options {
     /// Seed; omitted when absent.
     #[arg(long)]
     pub seed: Option<i64>,
-    /// Declared request profile; v2 adds reasoning_effort and include_usage.
+    /// Declared request profile; v2 adds controls, v3 allows one fixture tool round.
     #[arg(long, value_enum, default_value_t = ProfileArg::DeclaredChatCompletionsV1)]
     pub profile: ProfileArg,
-    /// Requested reasoning effort sent verbatim (profile v2); per-model support and effective effort are unverified.
+    /// Requested reasoning effort (profiles v2/v3); effective effort is unverified.
     #[arg(long, value_enum)]
     pub reasoning_effort: Option<EffortArg>,
     /// Request streaming usage via stream_options.include_usage (profile v2, streaming only).
     #[arg(long)]
     pub include_usage: bool,
-    /// Total collection-protection deadline per attempt in milliseconds.
+    /// Total collection-protection deadline per exchange in milliseconds.
     #[arg(long, default_value_t = 30_000)]
     pub total_ms: u32,
-    /// Nonempty-body idle deadline per attempt in milliseconds.
+    /// Nonempty-body idle deadline per exchange in milliseconds.
     #[arg(long, default_value_t = 10_000)]
     pub idle_ms: u32,
-    /// Raw entity byte cap per attempt.
+    /// Raw entity byte cap per exchange.
     #[arg(long, default_value_t = RESPONSE_CAP as u32)]
     pub response_bytes: u32,
-    /// Final artifact byte cap per attempt.
+    /// Final answer or call artifact byte cap per exchange.
     #[arg(long, default_value_t = ARTIFACT_CAP as u32)]
     pub artifact_bytes: u32,
     /// Declared (not executed) rendering template identifier.
@@ -199,6 +200,7 @@ pub(crate) fn plan(o: &Options) -> Result<PlanningReport> {
         request_bytes: prepared.sizes.iter().map(|s| s.request_bytes).sum(),
         requested_output_tokens: u64::from(prepared.plan.cases)
             .checked_mul(u64::from(prepared.plan.protocol.token_cap.value))
+            .and_then(|n| n.checked_mul(if prepared.pack.version == 5 { 2 } else { 1 }))
             .ok_or("requested token envelope overflow")?,
         provider_cap_enforcement: "unknown",
         payload_bound_status: "conservative-file-payload-bound-not-reserved-capacity",
@@ -223,6 +225,7 @@ fn protocol(o: &Options) -> Result<Protocol> {
         profile: match o.profile {
             ProfileArg::DeclaredChatCompletionsV1 => Profile::DeclaredChatCompletionsV1,
             ProfileArg::DeclaredChatCompletionsV2 => Profile::DeclaredChatCompletionsV2,
+            ProfileArg::DeclaredChatCompletionsV3 => Profile::DeclaredChatCompletionsV3,
         },
         stream: o.stream,
         token_cap: TokenCap {
@@ -247,7 +250,9 @@ fn protocol(o: &Options) -> Result<Protocol> {
         // validation instead of silently dropped.
         include_usage: match o.profile {
             ProfileArg::DeclaredChatCompletionsV1 => o.include_usage.then_some(true),
-            ProfileArg::DeclaredChatCompletionsV2 => Some(o.include_usage),
+            ProfileArg::DeclaredChatCompletionsV2 | ProfileArg::DeclaredChatCompletionsV3 => {
+                Some(o.include_usage)
+            }
         },
         collection: Collection {
             total_ms: o.total_ms,
@@ -272,12 +277,26 @@ fn protocol(o: &Options) -> Result<Protocol> {
     Ok(protocol)
 }
 
-fn bound(pack_bytes: usize, plan_bytes: usize, cases: usize, c: &Collection) -> Result<u64> {
+fn bound(
+    pack_bytes: usize,
+    plan_bytes: usize,
+    cases: usize,
+    c: &Collection,
+    tools: bool,
+) -> Result<u64> {
     let per_attempt = (RESERVATION_CAP as u64)
         .checked_add(u64::from(c.response_bytes))
         .and_then(|n| n.checked_add(u64::from(c.artifact_bytes)))
         .and_then(|n| n.checked_add(TERMINAL_CAP as u64))
         .ok_or("run bound overflow")?;
+    let per_attempt = if tools {
+        per_attempt
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(u64::from(c.artifact_bytes)))
+            .ok_or("run bound overflow")?
+    } else {
+        per_attempt
+    };
     per_attempt
         .checked_mul(cases as u64)
         .and_then(|n| n.checked_add(pack_bytes as u64))
@@ -292,7 +311,7 @@ fn bound(pack_bytes: usize, plan_bytes: usize, cases: usize, c: &Collection) -> 
 fn receipt_fits(pack: &Pack, inputs: &[String], identities: &PackIdentities) -> Result<()> {
     let digest = "f".repeat(64);
     let view = RunView {
-        version: 1,
+        version: if pack.version == 5 { 2 } else { 1 },
         claim: RunViewClaim::ClientCollectedArtifactsNotAuthenticatedExecution,
         identities: RunIdentities {
             pack: PackIdentities {
@@ -316,6 +335,9 @@ fn receipt_fits(pack: &Pack, inputs: &[String], identities: &PackIdentities) -> 
                 input: input.clone(),
                 attempt: i as u32,
                 terminal: Some(digest.clone()),
+                call: (pack.version == 5).then(|| digest.clone()),
+                tool_call: (pack.version == 5).then_some(ToolCall::Malformed),
+                followup: (pack.version == 5).then(|| digest.clone()),
                 reason: Some(Reason::UnsupportedResponse),
                 artifact: Some(digest.clone()),
                 evidence: RunEvidence::Uncommitted,
@@ -419,6 +441,7 @@ struct Settle {
     detail: &'static str,
     stop: Option<Finish>,
     artifact: Option<Vec<u8>>,
+    call: Option<Vec<u8>>,
     usage: Option<Usage>,
     complete: bool,
     terminal_offset: Option<u64>,
@@ -433,6 +456,7 @@ impl Settle {
             detail,
             stop: None,
             artifact: None,
+            call: None,
             usage: None,
             complete: false,
             terminal_offset: None,
@@ -444,21 +468,30 @@ impl Settle {
         Self::plain(fault.reason(), fault.detail())
     }
     fn completed(settled: transport::Settled) -> Self {
-        let (reason, detail, artifact) = match settled.delivery {
+        let (reason, detail, artifact, call) = match settled.delivery {
             transport::Delivery::Answer(artifact) => (
                 Reason::Committed,
                 "recognized finish and protocol commitment",
                 Some(artifact),
+                None,
             ),
             transport::Delivery::Refused => (
                 Reason::Refused,
                 "completed refusal or content filter; observed failed answer delivery",
+                None,
                 None,
             ),
             transport::Delivery::Absent => (
                 Reason::UnsupportedResponse,
                 "absent final content channel",
                 None,
+                None,
+            ),
+            transport::Delivery::Call(call) => (
+                Reason::Committed,
+                "recognized finish and retained tool call",
+                None,
+                Some(call),
             ),
         };
         Self {
@@ -466,6 +499,7 @@ impl Settle {
             detail,
             stop: Some(settled.stop),
             artifact,
+            call,
             usage: settled.usage,
             complete: true,
             terminal_offset: None,
@@ -492,6 +526,7 @@ enum Step<B> {
 struct Exchange<'a> {
     client: &'a Client,
     stream: bool,
+    accepts_calls: bool,
     response_cap: u64,
     artifact_cap: usize,
     interrupt: &'a mut Signal,
@@ -560,7 +595,7 @@ impl Exchange<'_> {
         } else {
             usize::try_from(declared.unwrap_or(0).min(self.response_cap)).unwrap_or(0)
         });
-        let mut collector = Collector::new(self.artifact_cap);
+        let mut collector = Collector::new(self.artifact_cap, self.accepts_calls);
         // A pre-decided status/entity verdict names the reason for anything
         // short of a local failure; a local failure always wins and stops admission.
         let decided = |fallback: Settle, complete: bool| -> Settle {
@@ -699,16 +734,17 @@ struct Attempt<'a> {
 /// Persist the reservation for one attempt. Every recorded field is derived
 /// from the frozen plan and case, exactly as the loader later recomputes it.
 fn reserve<'a>(
-    run: &RunDir,
+    dir: PathBuf,
     attempt: u32,
     case: &'a Case,
     input: &'a str,
     plan: &Plan,
     plan_digest: &str,
+    // Both exchanges are projected before reservation from frozen task data.
+    body: String,
 ) -> Result<(Attempt<'a>, String)> {
     let started = Instant::now();
     let started_unix_ms = unix_ms();
-    let body = transport::request_body(&plan.system.model, &case.messages, &plan.protocol)?;
     if body.len() > REQUEST_CAP {
         return Err(format!(
             "request for case {} exceeds the request cap",
@@ -735,9 +771,8 @@ fn reserve<'a>(
     if bytes.len() > RESERVATION_CAP {
         return Err("reservation exceeds its byte limit".into());
     }
-    let dir = run.attempt(attempt);
     store::create_directory(&dir)?;
-    store::sync_directory(&run.attempts)?;
+    store::sync_directory(dir.parent().ok_or("attempt directory has no parent")?)?;
     store::write_new(&dir.join("reservation.json"), &bytes)?;
     store::sync_directory(&dir)?;
     Ok((
@@ -776,9 +811,19 @@ fn finalize(
         }
         None => None,
     };
+    let call = match &settle.call {
+        Some(bytes) => {
+            store::write_new(&a.dir.join("call.json"), bytes)?;
+            Some(Artifact {
+                bytes: bytes.len() as u64,
+                sha256: identity::sha256(bytes),
+            })
+        }
+        None => None,
+    };
     store::sync_directory(&a.dir)?;
     let terminal = Terminal {
-        version: 2,
+        version: if a.case.tool.is_some() { 3 } else { 2 },
         attempt: a.attempt,
         case_id: a.case.id.clone(),
         input: a.input.to_owned(),
@@ -800,6 +845,7 @@ fn finalize(
             surplus_observed: settle.surplus_observed,
         },
         final_artifact,
+        call,
         usage: settle.usage,
         timing: Timing {
             started_unix_ms: a.started_unix_ms,
@@ -833,17 +879,31 @@ fn prepare(o: &Options) -> Result<Prepared> {
     };
     pack::system(&system)?;
     let protocol = protocol(o)?;
+    pack::tool_profile(&pack, &protocol)?;
     if let Some(name) = &o.auth_env {
         transport::credential(name)?;
     }
     let mut sizes = Vec::with_capacity(pack.cases.len());
     for case in &pack.cases {
-        let request_bytes = transport::request_size(&o.model, &case.messages, &protocol)?;
+        let request_bytes = transport::request_size(&o.model, case, &protocol, None)?;
         if request_bytes > REQUEST_CAP {
             return Err(format!(
                 "request for case {} exceeds the request cap",
                 case.id
             ));
+        }
+        if let Some(tool) = &case.tool {
+            // A backslash id escapes to two bytes: the largest replayed id.
+            let longest_id = "\\".repeat(transport::CALL_ID_CAP);
+            for alternative in 0..tool.expected.arguments.len() {
+                let followup = Some((longest_id.as_str(), alternative));
+                if transport::request_size(&o.model, case, &protocol, followup)? > REQUEST_CAP {
+                    return Err(format!(
+                        "follow-up request for case {} exceeds the request cap",
+                        case.id
+                    ));
+                }
+            }
         }
         sizes.push(CaseSize {
             case_id: case.id.clone(),
@@ -876,6 +936,7 @@ fn prepare(o: &Options) -> Result<Prepared> {
         PLAN_CAP,
         pack.cases.len(),
         &plan.protocol.collection,
+        pack.version == 5,
     )?;
     let plan_bytes = serde_json::to_vec_pretty(&plan).map_err(|e| format!("plan encoding: {e}"))?;
     if plan_bytes.len() > PLAN_CAP {
@@ -945,6 +1006,73 @@ pub(crate) fn resume(root: &Path) -> Result<Summary> {
     collect(prepared, run, owner, session, next)
 }
 
+async fn execute(
+    a: &Attempt<'_>,
+    run: &RunDir,
+    plan: &Plan,
+    client: &Client,
+    interrupt: &mut Signal,
+    body: String,
+    accepts_calls: bool,
+) -> Result<(Reason, Option<(String, usize)>)> {
+    let collection = &plan.protocol.collection;
+    let mut exchange = Exchange {
+        client,
+        stream: plan.protocol.stream,
+        accepts_calls,
+        response_cap: u64::from(collection.response_bytes),
+        artifact_cap: collection.artifact_bytes as usize,
+        interrupt,
+        capture: Capture::open(
+            &a.dir.join("body.partial"),
+            u64::from(collection.response_bytes),
+        )?,
+        deadline: Deadline::start(
+            Duration::from_millis(u64::from(collection.total_ms)),
+            Duration::from_millis(u64::from(collection.idle_ms)),
+        ),
+        headers_ms: None,
+        first_body_ms: None,
+        http: None,
+    };
+    // Each exchange receives a fresh collection budget after durable reservation.
+    let sent = Instant::now();
+    let (settle, dispatched) = if interrupted() {
+        (
+            Settle::plain(Reason::Interrupted, "first interrupt before dispatch"),
+            false,
+        )
+    } else {
+        match client.request(body, plan.transport.auth_env.as_deref()) {
+            Ok(request) => (exchange.collect(request, sent).await, true),
+            Err(_) => (
+                Settle::plain(Reason::TransportFailure, "request construction failed"),
+                false,
+            ),
+        }
+    };
+    let settle_ms = ms(sent.elapsed());
+    let next = match (&settle.call, &a.case.tool) {
+        (Some(bytes), Some(tool)) if settle.stop != Some(Finish::Length) => {
+            let (validity, alternative) = crate::grade::tool_call(bytes, tool);
+            if validity == ToolCall::Valid {
+                let record =
+                    transport::call_record(bytes).ok_or("validated call cannot be replayed")?;
+                Some((
+                    record.id,
+                    alternative.ok_or("valid call has no matched alternative")?,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let reason = settle.reason;
+    finalize(a, run, exchange, settle, dispatched, settle_ms)?;
+    Ok((reason, next))
+}
+
 fn collect(
     prepared: Prepared,
     run: RunDir,
@@ -968,9 +1096,6 @@ fn collect(
         .enable_all()
         .build()
         .map_err(|e| format!("runtime: {e}"))?;
-    let collection = &plan.protocol.collection;
-    let total = Duration::from_millis(u64::from(collection.total_ms));
-    let idle = Duration::from_millis(u64::from(collection.idle_ms));
     let (attempts, local_failure, paused) = runtime.block_on(async {
         let client = Client::new(&endpoint, plan.protocol.stream)?;
         let mut interrupt =
@@ -990,45 +1115,49 @@ fn collect(
                 break;
             }
             let attempt = i as u32;
-            let (a, body) = reserve(&run, attempt, case, input, &plan, &plan_digest)?;
+            let body = transport::request_body(&plan.system.model, case, &plan.protocol, None)?;
+            let (a, body) = reserve(
+                run.attempt(attempt),
+                attempt,
+                case,
+                input,
+                &plan,
+                &plan_digest,
+                body,
+            )?;
             drop(admission);
-            let mut exchange = Exchange {
-                client: &client,
-                stream: plan.protocol.stream,
-                response_cap: u64::from(collection.response_bytes),
-                artifact_cap: collection.artifact_bytes as usize,
-                interrupt: &mut interrupt,
-                capture: Capture::open(
-                    &a.dir.join("body.partial"),
-                    u64::from(collection.response_bytes),
-                )?,
-                deadline: Deadline::start(total, idle),
-                headers_ms: None,
-                first_body_ms: None,
-                http: None,
-            };
-            // Budgets began with the deadline inside the exchange, after the durable
-            // reservation and immediately before dispatch. An interrupt latched
-            // during the reservation's synchronous publication stops here: the
-            // reservation stands as honest "reserved, never dispatched" evidence.
-            let sent = Instant::now();
-            let (settle, dispatched) = if interrupted() {
-                (
-                    Settle::plain(Reason::Interrupted, "first interrupt before dispatch"),
-                    false,
-                )
-            } else {
-                match client.request(body, plan.transport.auth_env.as_deref()) {
-                    Ok(request) => (exchange.collect(request, sent).await, true),
-                    Err(_) => (
-                        Settle::plain(Reason::TransportFailure, "request construction failed"),
-                        false,
-                    ),
-                }
-            };
-            let settle_ms = ms(sent.elapsed());
-            let reason = settle.reason;
-            finalize(&a, &run, exchange, settle, dispatched, settle_ms)?;
+            let (mut reason, followup) = execute(
+                &a,
+                &run,
+                &plan,
+                &client,
+                &mut interrupt,
+                body,
+                case.tool.is_some(),
+            )
+            .await?;
+            if let Some((id, alternative)) = followup {
+                // Pause applies between cases, not between the exchanges of one case.
+                // An interrupt still produces an undispatched follow-up receipt.
+                let body = transport::request_body(
+                    &plan.system.model,
+                    case,
+                    &plan.protocol,
+                    Some((id.as_str(), alternative)),
+                )?;
+                let (followup, body) = reserve(
+                    a.dir.join("followup"),
+                    attempt,
+                    case,
+                    input,
+                    &plan,
+                    &plan_digest,
+                    body,
+                )?;
+                reason = execute(&followup, &run, &plan, &client, &mut interrupt, body, false)
+                    .await?
+                    .0;
+            }
             attempts += 1;
             if reason == Reason::LocalIo {
                 // Local capture failed: never start more cases on failing storage.
@@ -1069,4 +1198,23 @@ fn collect(
         attempts,
         view,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_bound_includes_both_exchanges_and_call() {
+        let collection = Collection {
+            total_ms: 1000,
+            idle_ms: 1000,
+            response_bytes: 8192,
+            artifact_bytes: 1024,
+        };
+        let plain = bound(100, 200, 3, &collection, false).unwrap();
+        let tools = bound(100, 200, 3, &collection, true).unwrap();
+        let exchange = RESERVATION_CAP as u64 + 8192 + 1024 + TERMINAL_CAP as u64;
+        assert_eq!(tools - plain, 3 * (exchange + 1024));
+    }
 }
