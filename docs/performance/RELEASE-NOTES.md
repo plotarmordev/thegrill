@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Fix media runner and setup execution to preserve declared symlink paths, including virtualenv interpreters, while recording resolved targets and their hashes.
+- Add audio WAV and video MP4 media workloads, container expectation rechecks and
+  descriptive audio real-time factor and end-to-end frame rates. Existing image
+  workload identities and the end-to-end duration gate are unchanged.
 
 ## Version 0.9.0 — experimental image benchmarking
 

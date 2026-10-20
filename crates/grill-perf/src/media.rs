@@ -1,4 +1,4 @@
-//! Admission and retained evidence for operator-declared image processes.
+//! Admission and retained evidence for operator-declared media processes.
 mod cache;
 mod capture;
 use crate::{
@@ -51,12 +51,16 @@ impl OutputPlaceholder {
 pub(crate) enum Container {
     Png,
     Jpeg,
+    Wav,
+    Mp4,
 }
 impl Container {
     fn extension(self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg => "jpeg",
+            Self::Wav => "wav",
+            Self::Mp4 => "mp4",
         }
     }
 }
@@ -113,16 +117,60 @@ struct Request {
     )]
     negative_prompt: Option<String>,
     seeds: Vec<u64>,
-    width: u32,
-    height: u32,
-    steps: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    width: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    height: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    steps: Option<u32>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
     guidance_milli: Option<u32>,
-    images_per_run: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    images_per_run: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    frames: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    fps: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    duration_us: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sample_rate: Option<u32>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -134,8 +182,54 @@ struct Output {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Expect {
-    width: u32,
-    height: u32,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    width: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    height: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    frames: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    fps: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    duration_us: Option<u64>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    sample_rate: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    channels: Option<u16>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    audio: Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -295,7 +389,50 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 fn nul_free(s: &str) -> bool {
     !s.contains('\0')
 }
-fn validate_request(r: &Request, context: &str) -> Result<()> {
+fn validate_expect(output: &Output, modality: &Modality) -> Result<()> {
+    let e = &output.expect;
+    let dimensions = e.width.is_some_and(|v| (1..=MAX_CANVAS).contains(&v))
+        && e.height.is_some_and(|v| (1..=MAX_CANVAS).contains(&v));
+    let valid = match modality {
+        Modality::Image => {
+            matches!(output.container, Container::Png | Container::Jpeg)
+                && dimensions
+                && e.frames.is_none()
+                && e.fps.is_none()
+                && e.duration_us.is_none()
+                && e.sample_rate.is_none()
+                && e.channels.is_none()
+                && e.audio.is_none()
+        }
+        Modality::Audio => {
+            output.container == Container::Wav
+                && e.width.is_none()
+                && e.height.is_none()
+                && e.frames.is_none()
+                && e.fps.is_none()
+                && e.audio.is_none()
+                && e.duration_us.is_some()
+                && e.sample_rate.is_some_and(|v| v > 0)
+                && e.channels.is_some_and(|v| v > 0)
+        }
+        Modality::Video => {
+            output.container == Container::Mp4
+                && dimensions
+                && e.frames.is_some_and(|v| (1..=100_000).contains(&v))
+                && e.fps.is_some_and(|v| (1..=240).contains(&v))
+                && e.sample_rate.is_none()
+                && e.channels.is_none()
+        }
+    };
+    if !valid
+        || e.duration_us
+            .is_some_and(|v| !(1..=3_600_000_000).contains(&v))
+    {
+        return Err("output expectations do not match modality or bounds".into());
+    }
+    Ok(())
+}
+fn validate_request(r: &Request, modality: &Modality, context: &str) -> Result<()> {
     for (field, value) in [
         ("prompt", Some(r.prompt.as_str())),
         ("negative_prompt", r.negative_prompt.as_deref()),
@@ -315,9 +452,50 @@ fn validate_request(r: &Request, context: &str) -> Result<()> {
         ("steps", r.steps, MAX_STEPS),
         ("images_per_run", r.images_per_run, MAX_IMAGES),
     ] {
-        if !(1..=max).contains(&value) {
+        if *modality == Modality::Image && value.is_none() {
+            return Err(format!("{context}: missing field `{field}`"));
+        }
+        if value.is_some_and(|value| !(1..=max).contains(&value)) {
             return Err(format!("{context}.{field} must be 1..={max}"));
         }
+    }
+    let valid = match modality {
+        Modality::Image => {
+            r.width.is_some()
+                && r.height.is_some()
+                && r.steps.is_some()
+                && r.images_per_run.is_some()
+                && r.frames.is_none()
+                && r.fps.is_none()
+                && r.duration_us.is_none()
+                && r.sample_rate.is_none()
+        }
+        Modality::Audio => {
+            r.width.is_none()
+                && r.height.is_none()
+                && r.images_per_run.is_none()
+                && r.frames.is_none()
+                && r.fps.is_none()
+                && r.duration_us.is_some()
+                && r.sample_rate.is_some()
+        }
+        Modality::Video => {
+            r.width.is_some()
+                && r.height.is_some()
+                && r.images_per_run.is_none()
+                && r.frames.is_some()
+                && r.fps.is_some()
+                && r.sample_rate.is_none()
+        }
+    };
+    if !valid
+        || r.frames.is_some_and(|v| !(1..=100_000).contains(&v))
+        || r.fps.is_some_and(|v| !(1..=240).contains(&v))
+        || r.duration_us
+            .is_some_and(|v| !(1..=3_600_000_000).contains(&v))
+        || r.sample_rate == Some(0)
+    {
+        return Err(format!("{context}: invalid modality fields or bounds"));
     }
     Ok(())
 }
@@ -328,13 +506,10 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if w.version != 1 {
         return Err("workload.version must be 1".into());
     }
-    if w.modality != Modality::Image {
-        return Err("workload.modality: audio/video not supported yet".into());
-    }
     if !identifier(&w.name) {
         return Err(format!("invalid workload.name: {}", w.name));
     }
-    validate_request(&w.request, "request")?;
+    validate_request(&w.request, &w.modality, "request")?;
     if !(1..=MAX_CELLS).contains(&w.cells.len()) {
         return Err(format!("cells needs 1..={MAX_CELLS} entries"));
     }
@@ -356,7 +531,7 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
             ));
         }
         if let Some(req) = &c.request {
-            validate_request(req, &format!("cell {}.request", c.id))?;
+            validate_request(req, &w.modality, &format!("cell {}.request", c.id))?;
         }
     }
     validate_outputs(w, r)?;
@@ -415,13 +590,7 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
         if !outputs.insert(o.placeholder) {
             return Err(format!("outputs.{name}: duplicate declaration"));
         }
-        for (field, value) in [("width", o.expect.width), ("height", o.expect.height)] {
-            if !(1..=MAX_CANVAS).contains(&value) {
-                return Err(format!(
-                    "outputs.{name}.expect.{field} must be 1..={MAX_CANVAS}"
-                ));
-            }
-        }
+        validate_expect(o, &w.modality)?;
     }
     validate_output_args(&outputs, &r.args, "runner.args", true)?;
     if let Some(setup) = &r.setup {
@@ -429,7 +598,14 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
     }
     if outputs.contains(&OutputPlaceholder::Output) {
         for cell in &w.cells {
-            if cell.request.as_ref().unwrap_or(&w.request).images_per_run > 1 {
+            if cell
+                .request
+                .as_ref()
+                .unwrap_or(&w.request)
+                .images_per_run
+                .unwrap_or(1)
+                > 1
+            {
                 return Err(format!(
                     "cell {}.images_per_run: multiple images require only output_dir",
                     cell.id
@@ -566,9 +742,19 @@ fn substitute(
             "prompt" => request.prompt.clone(),
             "negative_prompt" => request.negative_prompt.clone().unwrap_or_default(),
             "seed" => seed.to_string(),
-            "width" => request.width.to_string(),
-            "height" => request.height.to_string(),
-            "steps" => request.steps.to_string(),
+            "width" => request.width.ok_or("width is unavailable")?.to_string(),
+            "height" => request.height.ok_or("height is unavailable")?.to_string(),
+            "steps" => request.steps.ok_or("steps is unavailable")?.to_string(),
+            "frames" => request.frames.ok_or("frames is unavailable")?.to_string(),
+            "fps" => request.fps.ok_or("fps is unavailable")?.to_string(),
+            "sample_rate" => request
+                .sample_rate
+                .ok_or("sample_rate is unavailable")?
+                .to_string(),
+            "duration_s" => {
+                let us = request.duration_us.ok_or("duration_s is unavailable")?;
+                format!("{}.{:06}", us / 1_000_000, us % 1_000_000)
+            }
             "output" => format!(
                 "{dir}/output-00.{}",
                 ext.ok_or("args uses undeclared output")?

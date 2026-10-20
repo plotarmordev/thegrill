@@ -123,8 +123,15 @@ enum ValidationLabel {
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ValidationReason {
-    Container { failure: crate::imagefile::Failure },
+    Container {
+        failure: crate::imagefile::Failure,
+    },
     OutputDimensions,
+    MediaContainer {
+        failure: String,
+        detail: Option<String>,
+    },
+    OutputExpectations,
 }
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +141,20 @@ struct Validation {
     width: Option<u32>,
     height: Option<u32>,
     reason: Option<ValidationReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duration_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_duration_us: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    channels: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frames: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fps: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio: Option<bool>,
 }
 impl Validation {
     fn valid(&self) -> bool {
@@ -257,6 +278,7 @@ pub(super) struct Inspection {
     slot: Slot,
     cells: Vec<CellSummary>,
     runs: Vec<Run>,
+    descriptive_metrics: Vec<DescriptiveMetrics>,
     setup: Option<SetupRecord>,
     cache_mutated_during_measurement: Option<bool>,
     evidence_sha256: String,
@@ -290,6 +312,39 @@ fn reservation(sample: &Scheduled<'_>, plan: &Plan, root: &Path) -> Result<Reser
         env: plan.runner.env.clone(),
     })
 }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DescriptiveMetrics {
+    audio_realtime_factor: Option<f64>,
+    frames_per_second_end_to_end: Option<f64>,
+}
+
+fn descriptive_metrics(run: &Run) -> DescriptiveMetrics {
+    let mut result = DescriptiveMetrics {
+        audio_realtime_factor: None,
+        frames_per_second_end_to_end: None,
+    };
+    if !run.eligible || run.process.end_to_end_us == 0 {
+        return result;
+    }
+    for output in &run.outputs {
+        let v = &output.validation;
+        if v.container == Container::Wav {
+            result.audio_realtime_factor = v.duration_us.map(|duration| {
+                result.audio_realtime_factor.unwrap_or(0.0)
+                    + duration as f64 / run.process.end_to_end_us as f64
+            });
+        }
+        if let Some(frames) = v.frames {
+            result.frames_per_second_end_to_end = Some(
+                result.frames_per_second_end_to_end.unwrap_or(0.0)
+                    + frames as f64 * 1_000_000.0 / run.process.end_to_end_us as f64,
+            );
+        }
+    }
+    result
+}
+
 fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
     let mut result = Validation {
         label: ValidationLabel::Invalid,
@@ -297,22 +352,108 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
         width: None,
         height: None,
         reason: None,
+        duration_us: None,
+        media_duration_us: None,
+        sample_rate: None,
+        channels: None,
+        frames: None,
+        fps: None,
+        audio: None,
     };
-    match crate::imagefile::check(bytes, declaration.container) {
-        Ok(checked) => {
-            result.width = Some(checked.width);
-            result.height = Some(checked.height);
-            if checked.width == declaration.expect.width
-                && checked.height == declaration.expect.height
-            {
-                result.label = ValidationLabel::ContainerChecked;
-            } else {
-                result.reason = Some(ValidationReason::OutputDimensions);
+    match declaration.container {
+        Container::Png | Container::Jpeg => {
+            match crate::imagefile::check(bytes, declaration.container) {
+                Ok(checked) => {
+                    result.width = Some(checked.width);
+                    result.height = Some(checked.height);
+                    if result.width != declaration.expect.width
+                        || result.height != declaration.expect.height
+                    {
+                        result.reason = Some(ValidationReason::OutputDimensions);
+                    }
+                }
+                Err(failure) => result.reason = Some(ValidationReason::Container { failure }),
             }
         }
-        Err(failure) => result.reason = Some(ValidationReason::Container { failure }),
+        Container::Wav => match crate::wavfile::check(bytes) {
+            Ok(checked) => {
+                result.duration_us = Some(checked.duration_us);
+                result.sample_rate = Some(checked.sample_rate);
+                result.channels = Some(checked.channels);
+                if result.duration_us != declaration.expect.duration_us
+                    || result.sample_rate != declaration.expect.sample_rate
+                    || result.channels != declaration.expect.channels
+                {
+                    result.reason = Some(ValidationReason::OutputExpectations);
+                }
+            }
+            Err(failure) => {
+                result.reason = Some(ValidationReason::MediaContainer {
+                    failure: failure.as_str().into(),
+                    detail: None,
+                })
+            }
+        },
+        Container::Mp4 => validate_video(bytes, &declaration.expect, &mut result),
+    }
+    if result.reason.is_none() {
+        result.label = ValidationLabel::ContainerChecked;
     }
     result
+}
+
+fn validate_video(bytes: &[u8], expect: &Expect, result: &mut Validation) {
+    let checked = match crate::mp4file::check(bytes) {
+        Ok(checked) => checked,
+        Err(failure) => {
+            result.reason = Some(ValidationReason::MediaContainer {
+                failure: failure.as_str().into(),
+                detail: Some(failure.detail().into()),
+            });
+            return;
+        }
+    };
+    let mut videos = checked
+        .tracks
+        .iter()
+        .filter(|track| track.kind == crate::mp4file::TrackKind::Video);
+    let Some(video) = videos.next() else {
+        result.reason = Some(ValidationReason::OutputExpectations);
+        return;
+    };
+    result.width = video.width;
+    result.height = video.height;
+    result.frames = Some(video.sample_count);
+    result.duration_us = Some(video.duration_us);
+    result.media_duration_us = Some(video.media_duration_us);
+    result.fps = video
+        .fps
+        .as_ref()
+        .map(|fps| (fps.numerator, fps.denominator));
+    result.audio = Some(
+        checked
+            .tracks
+            .iter()
+            .any(|track| track.kind == crate::mp4file::TrackKind::Audio),
+    );
+    if videos.next().is_some()
+        || result.width != expect.width
+        || result.height != expect.height
+        || result.frames != expect.frames.map(u64::from)
+        || !result.fps.is_some_and(|(n, d)| {
+            expect
+                .fps
+                .is_some_and(|fps| u128::from(n) == u128::from(fps) * u128::from(d))
+        })
+        || expect
+            .duration_us
+            .is_some_and(|duration| result.duration_us != Some(duration))
+        || expect
+            .audio
+            .is_some_and(|audio| result.audio != Some(audio))
+    {
+        result.reason = Some(ValidationReason::OutputExpectations);
+    }
 }
 
 fn output_sources(
@@ -411,7 +552,7 @@ fn expected_outputs(output: &Output, request: &Request, args: &[String], setup: 
     } else if output.placeholder == OutputPlaceholder::Output {
         1
     } else {
-        request.images_per_run
+        request.images_per_run.unwrap_or(1)
     }
 }
 fn collect_outputs(
@@ -1261,6 +1402,7 @@ fn inspection(
         } else {
             Some(false)
         },
+        descriptive_metrics: runs.iter().map(descriptive_metrics).collect(),
         runs,
         setup,
         evidence_sha256,

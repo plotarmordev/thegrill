@@ -34,6 +34,8 @@ struct ArmSummary {
     samples: CellSummary,
     seconds_per_image: Option<f64>,
     images_per_second_end_to_end: Option<f64>,
+    audio_realtime_factor: Option<f64>,
+    frames_per_second_end_to_end: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -113,18 +115,38 @@ fn admit(captures: &[Loaded], arms: &[Arm]) -> Result<()> {
 
 fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
     let samples = summarize(cell, runs.iter().copied());
-    let images = f64::from(
-        cell.request
-            .as_ref()
-            .unwrap_or(&workload.request)
-            .images_per_run,
-    );
+    let images = cell
+        .request
+        .as_ref()
+        .unwrap_or(&workload.request)
+        .images_per_run
+        .map(f64::from);
     let mean = samples.end_to_end_us.as_ref().map(|summary| summary.mean);
+    let (mut elapsed, mut audio, mut frames) = (0u128, 0u128, 0u128);
+    for run in runs
+        .iter()
+        .filter(|run| run.cell == cell.id && run.eligible && run.phase == Phase::Measured)
+    {
+        elapsed += u128::from(run.process.end_to_end_us);
+        for output in &run.outputs {
+            if output.validation.container == Container::Wav {
+                audio += u128::from(output.validation.duration_us.unwrap_or(0));
+            }
+            frames += u128::from(output.validation.frames.unwrap_or(0));
+        }
+    }
     ArmSummary {
-        seconds_per_image: mean.map(|us| us / images / 1_000_000.0),
+        seconds_per_image: mean
+            .zip(images)
+            .map(|(us, images)| us / images / 1_000_000.0),
         images_per_second_end_to_end: mean
             .filter(|us| *us > 0.0)
-            .map(|us| images * 1_000_000.0 / us),
+            .zip(images)
+            .map(|(us, images)| images * 1_000_000.0 / us),
+        audio_realtime_factor: (elapsed > 0 && workload.modality == Modality::Audio)
+            .then(|| audio as f64 / elapsed as f64),
+        frames_per_second_end_to_end: (elapsed > 0 && workload.modality == Modality::Video)
+            .then(|| frames as f64 * 1_000_000.0 / elapsed as f64),
         samples,
     }
 }

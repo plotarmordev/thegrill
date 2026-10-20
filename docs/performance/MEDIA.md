@@ -1,8 +1,8 @@
 # Media CLI benchmarking
 
 `media preflight`, `media capture`, `media inspect` and `media compare` are
-experimental and image-only. Capture supports Linux and macOS.
-Audio/video, runner markers and external probes are not supported.
+experimental and support image, audio and video workloads on Linux and macOS.
+Runner markers and external probes are not supported.
 Preflight prints JSON without starting processes or creating directories.
 
 ```text
@@ -24,13 +24,17 @@ records are rejected. Documents are bounded to 4 MiB; resolved programs to 1 GiB
 Optional fields are omitted, not null; absent optional workload fields are omitted
 from typed serialization so later optional additions need not change existing hashes.
 
-The shared workload declares `name`, `modality: image`, `request`, `outputs`,
-`cells`, `slots`, `limits` and `gates`. Names and IDs use ASCII letters, digits,
-`-_.`, with length 1–64. Requests contain `prompt`, `seeds`, `width`, `height`,
-`steps`, `images_per_run`, optional `negative_prompt` and optional
-`guidance_milli` (descriptive only; no guidance substitution). Bounds: prompts
-are control-free and at most 16 KiB (no newlines/tabs), seeds 1–16, canvas
-1–16384, steps 1–1000, images per run 1–64.
+The shared workload declares `name`, `modality` (`image`, `audio` or `video`),
+`request`, `outputs`, `cells`, `slots`, `limits` and `gates`. Names and IDs use ASCII
+letters, digits, `-_.`, with length 1–64. All requests contain `prompt`, `seeds`,
+optional `negative_prompt` and optional `guidance_milli` (descriptive only).
+Image requests require `width`, `height`, `steps` and `images_per_run`.
+Audio requests require `duration_us` and `sample_rate`; video requests require
+`width`, `height`, `frames` and `fps`, with optional `duration_us`.
+Audio and video may declare `steps`; image-only and other-modality fields are
+rejected. Bounds: prompts are control-free and at most 16 KiB, seeds 1–16,
+canvas 1–16384, steps 1–1000, images per run 1–64, frames 1–100000,
+integer fps 1–240, duration 1–3600000000 microseconds, sample rate positive.
 
 Cells (1–64) declare `id`, `warmup_runs` (0–20), `measured_runs` (1–100), optional
 `pause_between_runs_ms` (default zero) and optional `request`, which replaces the
@@ -41,8 +45,13 @@ Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 `stdout_bytes` and `stderr_bytes`.
 
 Outputs declare unique `placeholder` (`output` or `output_dir`), `container`
-(`png` or `jpeg`) and `expect: {width, height}` with the same canvas bounds.
-At least one is required. The declared set must equal the output placeholders
+and `expect`. Images use `png` or `jpeg` and expect `width` and `height`.
+Audio uses `wav` and expects `duration_us`, `sample_rate` and positive `channels`.
+Video uses `mp4` and expects `width`, `height`, `frames` and integer `fps`;
+optional `duration_us` and `audio` check duration and audio-track presence or
+absence. Expectations use the request bounds and exact equality; container
+durations are rounded down to whole microseconds.
+At least one output is required. The declared set must equal the output placeholders
 used in sample argv. Setup arguments may use only declared output placeholders
 but need not use any. `{output}` occurs at most once in each argv; samples with
 multiple images require only `{output_dir}`. The file extension comes from the
@@ -66,7 +75,9 @@ most 4096 bytes; preflight does not inspect caches. Pins contain `path` and
 `sha256`; only their form is checked.
 
 Only argv is templated: `{prompt}`, `{negative_prompt}`, `{seed}`, `{width}`,
-`{height}`, `{steps}`, `{output}`, `{output_dir}`. Substitution is single-pass;
+`{height}`, `{steps}`, `{frames}`, `{fps}`, `{duration_s}`, `{sample_rate}`,
+`{output}`, `{output_dir}`. A numeric placeholder requires its request field;
+`duration_s` renders microseconds as decimal seconds. Substitution is single-pass;
 spaces, quotes and shell syntax stay literal in their argv element. An absent
 negative prompt substitutes an empty string without removing the element.
 Unknown or unclosed placeholders fail. There is no literal opening-brace escape;
@@ -103,16 +114,25 @@ Grill-monotonic time through observed process exit; the polling interval is
 2 ms, not microsecond resolution. One capture represents one declared slot.
 
 `{output}` names a collector-owned file. `{output_dir}` must contain exactly
-`images_per_run` direct regular files: no symlinks, subdirectories or hidden-file
+`images_per_run` direct regular files for images, or one for audio/video:
+no symlinks, subdirectories or hidden-file
 exceptions. Names must be UTF-8 and are ordered lexically; a wrong count or entry
 type makes the sample ineligible rather than selecting a subset.
 
-Bounded outputs, including invalid images, are retained with SHA-256 hashes.
+Bounded outputs, including invalid media, are retained with SHA-256 hashes.
 PNG signature, IHDR, every chunk CRC, IDAT presence and terminal IEND, or JPEG
 SOI, SOF dimensions, SOS presence and terminal EOI are checked by content.
-Validation is `container_checked`, never `decoded`; it establishes neither pixel
-correctness nor quality. Eligibility requires successful exit within the
-deadline and every expected output with matching dimensions and count.
+WAV checks RIFF framing, PCM/float format, sample alignment and byte rate.
+MP4 checks box framing, movie and sample-description headers, nonempty media data
+and progressive or fragmented track/sample timing. Frame rate derives from sample
+count, durations and timescale, not a declared nominal rate. A single unit-rate
+edit with nonnegative media time supplies presentation `duration_us`; otherwise
+duration comes from sample timing, also retained as `media_duration_us`.
+Multi-entry or empty edits, encrypted sample entries, multiple video tracks and
+unsupported handlers fail closed. Compressed sample payloads are not validated.
+Validation is `container_checked`, never `decoded`; it establishes neither
+decoded correctness nor quality. Eligibility requires successful exit within the
+deadline and every expected output with matching metadata and count.
 Oversized and missing outputs are recorded as failures.
 
 Declared cache paths are observed before setup, after setup and after runs:
@@ -135,6 +155,10 @@ samples; setup, warmups and failed samples are excluded. Ineligible counts are
 grouped by reason.
 Determinism is reported by seed among eligible samples, unavailable without a
 repeat. These observations are descriptive, not a comparison verdict.
+`descriptive_metrics` aligns with `runs`: audio real-time factor is checked WAV
+duration divided by end-to-end time; video frames per second is checked frame
+count times microseconds per second divided by end-to-end time. Ineligible or
+zero-duration runs have null rates. These values add no gates.
 
 Capture and inspect print JSON with capture status `complete`, `setup_failed`
 or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
@@ -188,7 +212,9 @@ The JSON report retains each capture's execution declaration and reports pooled
 sample counts, minimum, median, mean, maximum, ineligible counts by reason and
 within-arm determinism by seed. Seconds per image and images per second derive
 from mean eligible duration and declared image count; they are display values,
-not separate gates. Cross-arm hash equality is only a byte-equality fact; it is
+not separate gates. Audio/video rates use summed checked durations or frame counts
+over summed eligible measured end-to-end time, with the same definitions as
+capture. Cross-arm hash equality is only a byte-equality fact; it is
 unavailable if either arm lacks eligible samples for the seed or is
 nondeterministic.
 Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and

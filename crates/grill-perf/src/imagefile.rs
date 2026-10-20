@@ -25,12 +25,14 @@ pub(crate) enum Failure {
     InvalidHeader,
     MissingIdat,
     MissingSos,
+    UnsupportedContainer,
 }
 
 pub(crate) fn check(bytes: &[u8], kind: Container) -> Result<Checked, Failure> {
     match kind {
         Container::Png => png(bytes),
         Container::Jpeg => jpeg(bytes),
+        Container::Wav | Container::Mp4 => Err(Failure::UnsupportedContainer),
     }
 }
 
