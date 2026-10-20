@@ -1,23 +1,15 @@
 //! Container framing and sample metadata only; sample values are not decoded.
 //! Durations use integer division, rounding down to whole microseconds.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
-    Pcm,
-    Float,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Checked {
-    pub kind: Kind,
     pub channels: u16,
     pub sample_rate: u32,
-    pub bits: u16,
-    pub frames: u64,
     pub duration_us: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Failure {
     BadSignature,
     Truncated,
@@ -34,24 +26,10 @@ pub(crate) enum Failure {
     InvalidDataLength,
 }
 
-impl Failure {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::BadSignature => "bad_signature",
-            Self::Truncated => "truncated",
-            Self::InvalidLength => "invalid_length",
-            Self::TrailingBytes => "trailing_bytes",
-            Self::MissingFmt => "missing_fmt",
-            Self::DuplicateFmt => "duplicate_fmt",
-            Self::MissingData => "missing_data",
-            Self::DuplicateData => "duplicate_data",
-            Self::UnsupportedFormat => "unsupported_format",
-            Self::InvalidFormat => "invalid_format",
-            Self::InvalidBlockAlign => "invalid_block_align",
-            Self::InvalidByteRate => "invalid_byte_rate",
-            Self::InvalidDataLength => "invalid_data_length",
-        }
-    }
+struct Format {
+    channels: u16,
+    sample_rate: u32,
+    block_align: u16,
 }
 
 fn u16_le(bytes: &[u8]) -> u16 {
@@ -62,9 +40,9 @@ fn u32_le(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().unwrap())
 }
 
-fn format(bytes: &[u8]) -> Result<(Checked, u16), Failure> {
+fn format(bytes: &[u8]) -> Result<Format, Failure> {
     if bytes.len() < 16 {
-        return Err(Failure::Truncated);
+        return Err(Failure::InvalidLength);
     }
     if bytes.len() != 16
         && (bytes.len() < 18 || usize::from(u16_le(&bytes[16..])) != bytes.len() - 18)
@@ -86,11 +64,9 @@ fn format(bytes: &[u8]) -> Result<(Checked, u16), Failure> {
             return Err(Failure::InvalidFormat);
         }
     }
-    let kind = match tag {
-        1 => Kind::Pcm,
-        3 => Kind::Float,
-        _ => return Err(Failure::UnsupportedFormat),
-    };
+    if !matches!(tag, 1 | 3) {
+        return Err(Failure::UnsupportedFormat);
+    }
     let channels = u16_le(&bytes[2..]);
     let sample_rate = u32_le(&bytes[4..]);
     let block_align = u16_le(&bytes[12..]);
@@ -99,7 +75,7 @@ fn format(bytes: &[u8]) -> Result<(Checked, u16), Failure> {
         || sample_rate == 0
         || bits == 0
         || !bits.is_multiple_of(8)
-        || (kind == Kind::Float && !matches!(bits, 32 | 64))
+        || (tag == 3 && !matches!(bits, 32 | 64))
     {
         return Err(Failure::InvalidFormat);
     }
@@ -109,17 +85,11 @@ fn format(bytes: &[u8]) -> Result<(Checked, u16), Failure> {
     if u64::from(u32_le(&bytes[8..])) != u64::from(sample_rate) * u64::from(block_align) {
         return Err(Failure::InvalidByteRate);
     }
-    Ok((
-        Checked {
-            kind,
-            channels,
-            sample_rate,
-            bits,
-            frames: 0,
-            duration_us: 0,
-        },
+    Ok(Format {
+        channels,
+        sample_rate,
         block_align,
-    ))
+    })
 }
 
 pub(crate) fn check(bytes: &[u8]) -> Result<Checked, Failure> {
@@ -137,7 +107,7 @@ pub(crate) fn check(bytes: &[u8]) -> Result<Checked, Failure> {
         return Err(Failure::Truncated);
     }
     let length = length as usize;
-    // Some writers leave a single zero pad outside the declared RIFF payload.
+    // Tolerate a final zero pad outside the declared RIFF extent.
     if bytes.len() != length && bytes[length..] != [0] {
         return Err(Failure::TrailingBytes);
     }
@@ -150,9 +120,11 @@ pub(crate) fn check(bytes: &[u8]) -> Result<Checked, Failure> {
         }
         let size = u32_le(&rest[4..]) as usize;
         let payload = &rest[8..];
-        if size > payload.len() || size % 2 > payload.len() - size {
+        if size > payload.len() {
             return Err(Failure::Truncated);
         }
+        // Some writers omit the final chunk pad or place it outside the RIFF extent.
+        let padding = if size == payload.len() { 0 } else { size % 2 };
         match &rest[..4] {
             b"fmt " => {
                 if fmt.is_some() {
@@ -170,17 +142,20 @@ pub(crate) fn check(bytes: &[u8]) -> Result<Checked, Failure> {
             }
             _ => {}
         }
-        rest = &payload[size + size % 2..];
+        rest = &payload[size + padding..];
     }
-    let (mut checked, block_align) = fmt.ok_or(Failure::MissingFmt)?;
+    let format = fmt.ok_or(Failure::MissingFmt)?;
     let data_len = data_len.ok_or(Failure::MissingData)?;
-    if !data_len.is_multiple_of(usize::from(block_align)) {
+    if !data_len.is_multiple_of(usize::from(format.block_align)) {
         return Err(Failure::InvalidDataLength);
     }
-    checked.frames = (data_len / usize::from(block_align)) as u64;
+    let frames = (data_len / usize::from(format.block_align)) as u64;
     // RIFF lengths are bounded by u32, so the product fits in u64.
-    checked.duration_us = checked.frames * 1_000_000 / u64::from(checked.sample_rate);
-    Ok(checked)
+    Ok(Checked {
+        channels: format.channels,
+        sample_rate: format.sample_rate,
+        duration_us: frames * 1_000_000 / u64::from(format.sample_rate),
+    })
 }
 
 #[cfg(test)]
@@ -224,11 +199,7 @@ mod tests {
 
     #[test]
     fn pcm_float_and_extensible_metadata() {
-        for (tag, channels, bits, kind) in [
-            (1, 1, 16, Kind::Pcm),
-            (1, 2, 16, Kind::Pcm),
-            (3, 2, 32, Kind::Float),
-        ] {
+        for (tag, channels, bits) in [(1, 1, 16), (1, 2, 16), (3, 2, 32)] {
             let data = vec![0; usize::from(channels * bits / 8)];
             let mut format = fmt(tag, channels, bits);
             for extensible in [false, true] {
@@ -243,11 +214,8 @@ mod tests {
                 assert_eq!(
                     check(&wav(&format, &data)),
                     Ok(Checked {
-                        kind,
                         channels,
                         sample_rate: 44_100,
-                        bits,
-                        frames: 1,
                         duration_us: 22
                     })
                 );
@@ -257,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn failures_have_stable_reasons() {
+    fn malformed_containers_report_typed_failures() {
         let format = fmt(1, 1, 16);
         let valid = wav(&format, &[0, 0]);
         let mut bad_signature = valid.clone();
@@ -269,29 +237,19 @@ mod tests {
         let mut malformed_chunk = chunk(b"JUNK", &[]);
         malformed_chunk[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         let cases = [
-            (bad_signature, Failure::BadSignature, "bad_signature"),
-            (
-                valid[..valid.len() - 1].to_vec(),
-                Failure::Truncated,
-                "truncated",
-            ),
-            (short_riff, Failure::InvalidLength, "invalid_length"),
-            (trailing, Failure::TrailingBytes, "trailing_bytes"),
+            (bad_signature, Failure::BadSignature),
+            (valid[..valid.len() - 1].to_vec(), Failure::Truncated),
+            (short_riff, Failure::InvalidLength),
+            (trailing, Failure::TrailingBytes),
             (
                 riff(&[chunk(b"data", &[]), chunk(b"fmt ", &format)]),
                 Failure::MissingFmt,
-                "missing_fmt",
             ),
             (
                 riff(&[chunk(b"fmt ", &format), chunk(b"fmt ", &format)]),
                 Failure::DuplicateFmt,
-                "duplicate_fmt",
             ),
-            (
-                riff(&[chunk(b"fmt ", &format)]),
-                Failure::MissingData,
-                "missing_data",
-            ),
+            (riff(&[chunk(b"fmt ", &format)]), Failure::MissingData),
             (
                 riff(&[
                     chunk(b"fmt ", &format),
@@ -299,40 +257,25 @@ mod tests {
                     chunk(b"data", &[]),
                 ]),
                 Failure::DuplicateData,
-                "duplicate_data",
             ),
-            (
-                wav(&fmt(2, 1, 16), &[]),
-                Failure::UnsupportedFormat,
-                "unsupported_format",
-            ),
-            (
-                wav(&fmt(1, 0, 16), &[]),
-                Failure::InvalidFormat,
-                "invalid_format",
-            ),
-            (
-                wav(&format, &[0]),
-                Failure::InvalidDataLength,
-                "invalid_data_length",
-            ),
-            (riff(&[malformed_chunk]), Failure::Truncated, "truncated"),
+            (wav(&fmt(2, 1, 16), &[]), Failure::UnsupportedFormat),
+            (wav(&fmt(1, 0, 16), &[]), Failure::InvalidFormat),
+            (wav(&format, &[0]), Failure::InvalidDataLength),
+            (riff(&[malformed_chunk]), Failure::Truncated),
         ];
-        for (bytes, failure, reason) in cases {
+        for (bytes, failure) in cases {
             assert_eq!(check(&bytes), Err(failure));
-            assert_eq!(failure.as_str(), reason);
         }
-        for (offset, failure, reason) in [
-            (12, Failure::InvalidBlockAlign, "invalid_block_align"),
-            (8, Failure::InvalidByteRate, "invalid_byte_rate"),
-            (4, Failure::InvalidFormat, "invalid_format"),
-            (14, Failure::InvalidFormat, "invalid_format"),
+        for (offset, failure) in [
+            (12, Failure::InvalidBlockAlign),
+            (8, Failure::InvalidByteRate),
+            (4, Failure::InvalidFormat),
+            (14, Failure::InvalidFormat),
         ] {
             let mut broken = format.clone();
             let width = if offset == 4 || offset == 8 { 4 } else { 2 };
             broken[offset..offset + width].fill(0);
             assert_eq!(check(&wav(&broken, &[])), Err(failure));
-            assert_eq!(failure.as_str(), reason);
         }
     }
 
@@ -341,16 +284,43 @@ mod tests {
         let format = chunk(b"fmt ", &fmt(1, 1, 8));
         let data = chunk(b"data", &[0]);
         let bytes = riff(&[chunk(b"JUNK", &[1, 2, 3]), format.clone(), data.clone()]);
-        assert_eq!(check(&bytes).unwrap().frames, 1);
+        assert_eq!(check(&bytes).unwrap().duration_us, 22);
         let mut padded = bytes.clone();
         padded.push(0);
         assert!(check(&padded).is_ok());
         *padded.last_mut().unwrap() = 1;
         assert_eq!(check(&padded), Err(Failure::TrailingBytes));
+        let unpadded = riff(&[format.clone(), data[..data.len() - 1].to_vec()]);
+        assert_eq!(check(&unpadded), check(&bytes));
+        let mut external_pad = unpadded.clone();
+        external_pad.push(0);
+        assert_eq!(check(&external_pad), check(&bytes));
+        let mut truncated = unpadded.clone();
+        truncated.pop();
+        assert_eq!(check(&truncated), Err(Failure::Truncated));
         assert_eq!(
-            check(&riff(&[format.clone(), data[..data.len() - 1].to_vec()])),
+            check(&riff(&[format.clone(), data[..data.len() - 2].to_vec()])),
             Err(Failure::Truncated)
         );
+        for tag in [b"JUNK", b"LIST"] {
+            let chunk = chunk(tag, &[0]);
+            let mut final_chunk = riff(&[
+                format.clone(),
+                data.clone(),
+                chunk[..chunk.len() - 1].to_vec(),
+            ]);
+            assert_eq!(check(&final_chunk), check(&bytes));
+            final_chunk.push(0);
+            assert_eq!(check(&final_chunk), check(&bytes));
+            assert_eq!(
+                check(&riff(&[
+                    format.clone(),
+                    data.clone(),
+                    chunk[..chunk.len() - 2].to_vec(),
+                ])),
+                Err(Failure::Truncated)
+            );
+        }
         assert_eq!(
             check(&riff(&[format, data, vec![0; 7]])),
             Err(Failure::Truncated)
@@ -359,7 +329,7 @@ mod tests {
 
     #[test]
     fn invalid_format_extensions_and_widths() {
-        assert_eq!(check(&wav(&[0; 15], &[])), Err(Failure::Truncated));
+        assert_eq!(check(&wav(&[0; 15], &[])), Err(Failure::InvalidLength));
         for extra in [1, 2] {
             let mut format = fmt(1, 1, 16);
             format.extend(vec![1; extra]);

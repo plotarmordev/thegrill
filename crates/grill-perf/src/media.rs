@@ -19,13 +19,16 @@ const MAX_SEEDS: usize = 16;
 const MAX_CANVAS: u32 = 16384;
 const MAX_STEPS: u32 = 1000;
 const MAX_IMAGES: u32 = 64;
+const MAX_FRAMES: u64 = 100_000;
+const MAX_FPS: u64 = 240;
+const MAX_DURATION_US: u64 = 3_600_000_000;
 const MAX_WARMUPS: u32 = 20;
 const MAX_MEASURED: u32 = 100;
 const PROMPT_CAP: usize = 16 * 1024;
 const PROGRAM_CAP: usize = 1024 * 1024 * 1024;
 const SUPPORT: &str = "experimental-extension-first-released-v0.9";
 
-#[derive(Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum Modality {
     Image,
@@ -389,50 +392,167 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 fn nul_free(s: &str) -> bool {
     !s.contains('\0')
 }
-fn validate_expect(output: &Output, modality: &Modality) -> Result<()> {
-    let e = &output.expect;
-    let dimensions = e.width.is_some_and(|v| (1..=MAX_CANVAS).contains(&v))
-        && e.height.is_some_and(|v| (1..=MAX_CANVAS).contains(&v));
-    let valid = match modality {
-        Modality::Image => {
-            matches!(output.container, Container::Png | Container::Jpeg)
-                && dimensions
-                && e.frames.is_none()
-                && e.fps.is_none()
-                && e.duration_us.is_none()
-                && e.sample_rate.is_none()
-                && e.channels.is_none()
-                && e.audio.is_none()
-        }
-        Modality::Audio => {
-            output.container == Container::Wav
-                && e.width.is_none()
-                && e.height.is_none()
-                && e.frames.is_none()
-                && e.fps.is_none()
-                && e.audio.is_none()
-                && e.duration_us.is_some()
-                && e.sample_rate.is_some_and(|v| v > 0)
-                && e.channels.is_some_and(|v| v > 0)
-        }
-        Modality::Video => {
-            output.container == Container::Mp4
-                && dimensions
-                && e.frames.is_some_and(|v| (1..=100_000).contains(&v))
-                && e.fps.is_some_and(|v| (1..=240).contains(&v))
-                && e.sample_rate.is_none()
-                && e.channels.is_none()
-        }
+#[derive(Clone, Copy)]
+enum Presence {
+    Required,
+    Optional,
+    Forbidden,
+}
+
+struct FieldRule {
+    name: &'static str,
+    min: u64,
+    max: u64,
+    request: [Presence; 3],
+    expect: [Presence; 3],
+}
+
+fn validate_fields(
+    modality: Modality,
+    context: &str,
+    expect: bool,
+    values: [Option<u64>; 10],
+) -> Result<()> {
+    use Presence::{Forbidden as F, Optional as O, Required as R};
+    const RULES: [FieldRule; 10] = [
+        FieldRule {
+            name: "width",
+            min: 1,
+            max: MAX_CANVAS as u64,
+            request: [R, F, R],
+            expect: [R, F, R],
+        },
+        FieldRule {
+            name: "height",
+            min: 1,
+            max: MAX_CANVAS as u64,
+            request: [R, F, R],
+            expect: [R, F, R],
+        },
+        FieldRule {
+            name: "steps",
+            min: 1,
+            max: MAX_STEPS as u64,
+            request: [R, O, O],
+            expect: [F, F, F],
+        },
+        FieldRule {
+            name: "images_per_run",
+            min: 1,
+            max: MAX_IMAGES as u64,
+            request: [R, F, F],
+            expect: [F, F, F],
+        },
+        FieldRule {
+            name: "frames",
+            min: 1,
+            max: MAX_FRAMES,
+            request: [F, F, R],
+            expect: [F, F, R],
+        },
+        FieldRule {
+            name: "fps",
+            min: 1,
+            max: MAX_FPS,
+            request: [F, F, R],
+            expect: [F, F, R],
+        },
+        FieldRule {
+            name: "duration_us",
+            min: 1,
+            max: MAX_DURATION_US,
+            request: [F, R, O],
+            expect: [F, R, O],
+        },
+        FieldRule {
+            name: "sample_rate",
+            min: 1,
+            max: u32::MAX as u64,
+            request: [F, R, F],
+            expect: [F, R, F],
+        },
+        FieldRule {
+            name: "channels",
+            min: 1,
+            max: u16::MAX as u64,
+            request: [F, F, F],
+            expect: [F, R, F],
+        },
+        FieldRule {
+            name: "audio",
+            min: 0,
+            max: 1,
+            request: [F, F, F],
+            expect: [F, F, O],
+        },
+    ];
+    let index = match modality {
+        Modality::Image => 0,
+        Modality::Audio => 1,
+        Modality::Video => 2,
     };
-    if !valid
-        || e.duration_us
-            .is_some_and(|v| !(1..=3_600_000_000).contains(&v))
-    {
-        return Err("output expectations do not match modality or bounds".into());
+    for (rule, value) in RULES.iter().zip(values) {
+        let presence = if expect {
+            rule.expect[index]
+        } else {
+            rule.request[index]
+        };
+        match (presence, value) {
+            (Presence::Required, None) => {
+                return Err(format!(
+                    "{context}.{}: missing field `{}`",
+                    rule.name, rule.name
+                ));
+            }
+            (Presence::Forbidden, Some(_)) => {
+                return Err(format!(
+                    "{context}.{} is forbidden for this modality",
+                    rule.name
+                ));
+            }
+            (_, Some(value)) if !(rule.min..=rule.max).contains(&value) => {
+                return Err(format!(
+                    "{context}.{} must be {}..={}",
+                    rule.name, rule.min, rule.max
+                ));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
-fn validate_request(r: &Request, modality: &Modality, context: &str) -> Result<()> {
+
+fn validate_expect(output: &Output, modality: Modality) -> Result<()> {
+    let name = output.placeholder.name();
+    let compatible = match modality {
+        Modality::Image => matches!(output.container, Container::Png | Container::Jpeg),
+        Modality::Audio => output.container == Container::Wav,
+        Modality::Video => output.container == Container::Mp4,
+    };
+    if !compatible {
+        return Err(format!("outputs.{name}.container does not match modality"));
+    }
+    let e = &output.expect;
+    validate_fields(
+        modality,
+        &format!("outputs.{name}.expect"),
+        true,
+        [
+            e.width.map(u64::from),
+            e.height.map(u64::from),
+            None,
+            None,
+            e.frames.map(u64::from),
+            e.fps.map(u64::from),
+            e.duration_us,
+            e.sample_rate.map(u64::from),
+            e.channels.map(u64::from),
+            e.audio.map(u64::from),
+        ],
+    )
+}
+
+fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()> {
     for (field, value) in [
         ("prompt", Some(r.prompt.as_str())),
         ("negative_prompt", r.negative_prompt.as_deref()),
@@ -446,58 +566,23 @@ fn validate_request(r: &Request, modality: &Modality, context: &str) -> Result<(
     if !(1..=MAX_SEEDS).contains(&r.seeds.len()) {
         return Err(format!("{context}.seeds needs 1..={MAX_SEEDS} entries"));
     }
-    for (field, value, max) in [
-        ("width", r.width, MAX_CANVAS),
-        ("height", r.height, MAX_CANVAS),
-        ("steps", r.steps, MAX_STEPS),
-        ("images_per_run", r.images_per_run, MAX_IMAGES),
-    ] {
-        if *modality == Modality::Image && value.is_none() {
-            return Err(format!("{context}: missing field `{field}`"));
-        }
-        if value.is_some_and(|value| !(1..=max).contains(&value)) {
-            return Err(format!("{context}.{field} must be 1..={max}"));
-        }
-    }
-    let valid = match modality {
-        Modality::Image => {
-            r.width.is_some()
-                && r.height.is_some()
-                && r.steps.is_some()
-                && r.images_per_run.is_some()
-                && r.frames.is_none()
-                && r.fps.is_none()
-                && r.duration_us.is_none()
-                && r.sample_rate.is_none()
-        }
-        Modality::Audio => {
-            r.width.is_none()
-                && r.height.is_none()
-                && r.images_per_run.is_none()
-                && r.frames.is_none()
-                && r.fps.is_none()
-                && r.duration_us.is_some()
-                && r.sample_rate.is_some()
-        }
-        Modality::Video => {
-            r.width.is_some()
-                && r.height.is_some()
-                && r.images_per_run.is_none()
-                && r.frames.is_some()
-                && r.fps.is_some()
-                && r.sample_rate.is_none()
-        }
-    };
-    if !valid
-        || r.frames.is_some_and(|v| !(1..=100_000).contains(&v))
-        || r.fps.is_some_and(|v| !(1..=240).contains(&v))
-        || r.duration_us
-            .is_some_and(|v| !(1..=3_600_000_000).contains(&v))
-        || r.sample_rate == Some(0)
-    {
-        return Err(format!("{context}: invalid modality fields or bounds"));
-    }
-    Ok(())
+    validate_fields(
+        modality,
+        context,
+        false,
+        [
+            r.width.map(u64::from),
+            r.height.map(u64::from),
+            r.steps.map(u64::from),
+            r.images_per_run.map(u64::from),
+            r.frames.map(u64::from),
+            r.fps.map(u64::from),
+            r.duration_us,
+            r.sample_rate.map(u64::from),
+            None,
+            None,
+        ],
+    )
 }
 fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if w.kind != "media-workload-v1" {
@@ -509,7 +594,7 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if !identifier(&w.name) {
         return Err(format!("invalid workload.name: {}", w.name));
     }
-    validate_request(&w.request, &w.modality, "request")?;
+    validate_request(&w.request, w.modality, "request")?;
     if !(1..=MAX_CELLS).contains(&w.cells.len()) {
         return Err(format!("cells needs 1..={MAX_CELLS} entries"));
     }
@@ -531,7 +616,7 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
             ));
         }
         if let Some(req) = &c.request {
-            validate_request(req, &w.modality, &format!("cell {}.request", c.id))?;
+            validate_request(req, w.modality, &format!("cell {}.request", c.id))?;
         }
     }
     validate_outputs(w, r)?;
@@ -590,7 +675,7 @@ fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
         if !outputs.insert(o.placeholder) {
             return Err(format!("outputs.{name}: duplicate declaration"));
         }
-        validate_expect(o, &w.modality)?;
+        validate_expect(o, w.modality)?;
     }
     validate_output_args(&outputs, &r.args, "runner.args", true)?;
     if let Some(setup) = &r.setup {

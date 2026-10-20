@@ -48,9 +48,11 @@ Outputs declare unique `placeholder` (`output` or `output_dir`), `container`
 and `expect`. Images use `png` or `jpeg` and expect `width` and `height`.
 Audio uses `wav` and expects `duration_us`, `sample_rate` and positive `channels`.
 Video uses `mp4` and expects `width`, `height`, `frames` and integer `fps`;
-optional `duration_us` and `audio` check duration and audio-track presence or
-absence. Expectations use the request bounds and exact equality; container
-durations are rounded down to whole microseconds.
+optional `duration_us` checks sample-timing `media_duration_us`, not presentation
+duration. `audio: true` requires an audio track with nonzero samples, sample bytes
+and media duration; `false` requires its absence. Expectations use the request
+bounds and exact equality. WAV and MP4 media durations round down to whole
+microseconds.
 At least one output is required. The declared set must equal the output placeholders
 used in sample argv. Setup arguments may use only declared output placeholders
 but need not use any. `{output}` occurs at most once in each argv; samples with
@@ -114,22 +116,28 @@ Grill-monotonic time through observed process exit; the polling interval is
 2 ms, not microsecond resolution. One capture represents one declared slot.
 
 `{output}` names a collector-owned file. `{output_dir}` must contain exactly
-`images_per_run` direct regular files for images, or one for audio/video:
-no symlinks, subdirectories or hidden-file
-exceptions. Names must be UTF-8 and are ordered lexically; a wrong count or entry
+`images_per_run` direct regular files for images, or one for audio/video.
+No symlinks, subdirectories or hidden-file exceptions are allowed.
+Names must be UTF-8 and are ordered lexically; a wrong count or entry
 type makes the sample ineligible rather than selecting a subset.
 
 Bounded outputs, including invalid media, are retained with SHA-256 hashes.
 PNG signature, IHDR, every chunk CRC, IDAT presence and terminal IEND, or JPEG
 SOI, SOF dimensions, SOS presence and terminal EOI are checked by content.
 WAV checks RIFF framing, PCM/float format, sample alignment and byte rate.
-MP4 checks box framing, movie and sample-description headers, nonempty media data
-and progressive or fragmented track/sample timing. Frame rate derives from sample
-count, durations and timescale, not a declared nominal rate. A single unit-rate
-edit with nonnegative media time supplies presentation `duration_us`; otherwise
-duration comes from sample timing, also retained as `media_duration_us`.
-Multi-entry or empty edits, encrypted sample entries, multiple video tracks and
-unsupported handlers fail closed. Compressed sample payloads are not validated.
+MP4 checks box framing, movie and sample-description headers, sample byte ranges,
+and progressive or fragmented track timing. Declared sample bytes must fit the
+media-data payloads; progressive chunks must lie within a payload and fragment
+runs within the following payload. Frame rate comes from sample count, durations
+and timescale; retained `fps` has exact `numerator` and `denominator` fields.
+Width and height expectations use coded sample-entry dimensions;
+track-header display dimensions are reported separately, allowing anamorphic output.
+Both sample-timing `media_duration_us` and presentation `duration_us` are retained.
+A single unit-rate edit with nonnegative media time sets presentation duration;
+its segment may exceed media duration by at most one movie-timescale tick for
+muxer rounding. Without an edit, the durations are equal. Multi-entry or empty
+edits, encrypted sample entries, multiple video tracks and unsupported handlers
+fail closed.
 Validation is `container_checked`, never `decoded`; it establishes neither
 decoded correctness nor quality. Eligibility requires successful exit within the
 deadline and every expected output with matching metadata and count.
@@ -155,10 +163,13 @@ samples; setup, warmups and failed samples are excluded. Ineligible counts are
 grouped by reason.
 Determinism is reported by seed among eligible samples, unavailable without a
 repeat. These observations are descriptive, not a comparison verdict.
-`descriptive_metrics` aligns with `runs`: audio real-time factor is checked WAV
-duration divided by end-to-end time; video frames per second is checked frame
-count times microseconds per second divided by end-to-end time. Ineligible or
-zero-duration runs have null rates. These values add no gates.
+Byte-identical MP4 output requires bit-exact muxing, including stable movie-header
+creation times.
+Each reported run includes `realtime_factor`: end-to-end time divided by checked
+WAV duration, with values below one meaning faster than real time.
+`frames_per_second_end_to_end` is checked video frames per second of end-to-end
+time. Rates are null for other modalities, ineligible runs and zero durations.
+These descriptive values add no gates.
 
 Capture and inspect print JSON with capture status `complete`, `setup_failed`
 or `cancelled`. The latter statuses exit unsuccessfully, as do unreadable,
@@ -212,9 +223,9 @@ The JSON report retains each capture's execution declaration and reports pooled
 sample counts, minimum, median, mean, maximum, ineligible counts by reason and
 within-arm determinism by seed. Seconds per image and images per second derive
 from mean eligible duration and declared image count; they are display values,
-not separate gates. Audio/video rates use summed checked durations or frame counts
-over summed eligible measured end-to-end time, with the same definitions as
-capture. Cross-arm hash equality is only a byte-equality fact; it is
+not separate gates. Audio/video rates apply the per-run definitions to summed
+eligible measured time and output amounts.
+Cross-arm hash equality is only a byte-equality fact; it is
 unavailable if either arm lacks eligible samples for the seed or is
 nondeterministic.
 Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and

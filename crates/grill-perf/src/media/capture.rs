@@ -123,14 +123,10 @@ enum ValidationLabel {
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ValidationReason {
-    Container {
-        failure: crate::imagefile::Failure,
-    },
+    Container { failure: crate::imagefile::Failure },
     OutputDimensions,
-    MediaContainer {
-        failure: String,
-        detail: Option<String>,
-    },
+    Audio { failure: crate::wavfile::Failure },
+    Video { failure: crate::mp4file::Failure },
     OutputExpectations,
 }
 #[derive(Deserialize, Serialize, PartialEq)]
@@ -138,7 +134,9 @@ enum ValidationReason {
 struct Validation {
     label: ValidationLabel,
     container: Container,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
     reason: Option<ValidationReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,13 +144,17 @@ struct Validation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     media_duration_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_width: Option<crate::mp4file::Rational>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_height: Option<crate::mp4file::Rational>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     sample_rate: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     channels: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     frames: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    fps: Option<(u64, u64)>,
+    fps: Option<crate::mp4file::Rational>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audio: Option<bool>,
 }
@@ -266,7 +268,7 @@ struct CellSummary {
     end_to_end_us: Option<Summary>,
     determinism_by_seed: Vec<Determinism>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Inspection {
     version: u32,
@@ -277,8 +279,7 @@ pub(super) struct Inspection {
     execution: Execution,
     slot: Slot,
     cells: Vec<CellSummary>,
-    runs: Vec<Run>,
-    descriptive_metrics: Vec<DescriptiveMetrics>,
+    runs: Vec<ReportedRun>,
     setup: Option<SetupRecord>,
     cache_mutated_during_measurement: Option<bool>,
     evidence_sha256: String,
@@ -312,37 +313,47 @@ fn reservation(sample: &Scheduled<'_>, plan: &Plan, root: &Path) -> Result<Reser
         env: plan.runner.env.clone(),
     })
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DescriptiveMetrics {
-    audio_realtime_factor: Option<f64>,
+#[derive(Serialize)]
+struct ReportedRun {
+    #[serde(flatten)]
+    run: Run,
+    #[serde(flatten)]
+    rates: Rates,
+}
+
+#[derive(Serialize)]
+struct Rates {
+    realtime_factor: Option<f64>,
     frames_per_second_end_to_end: Option<f64>,
 }
 
-fn descriptive_metrics(run: &Run) -> DescriptiveMetrics {
-    let mut result = DescriptiveMetrics {
-        audio_realtime_factor: None,
-        frames_per_second_end_to_end: None,
-    };
-    if !run.eligible || run.process.end_to_end_us == 0 {
-        return result;
-    }
+fn produced(run: &Run) -> (u128, u128) {
+    let mut audio_us = 0;
+    let mut frames = 0;
     for output in &run.outputs {
-        let v = &output.validation;
-        if v.container == Container::Wav {
-            result.audio_realtime_factor = v.duration_us.map(|duration| {
-                result.audio_realtime_factor.unwrap_or(0.0)
-                    + duration as f64 / run.process.end_to_end_us as f64
-            });
+        let validation = &output.validation;
+        if validation.container == Container::Wav {
+            audio_us += u128::from(validation.duration_us.unwrap_or(0));
         }
-        if let Some(frames) = v.frames {
-            result.frames_per_second_end_to_end = Some(
-                result.frames_per_second_end_to_end.unwrap_or(0.0)
-                    + frames as f64 * 1_000_000.0 / run.process.end_to_end_us as f64,
-            );
-        }
+        frames += u128::from(validation.frames.unwrap_or(0));
     }
-    result
+    (audio_us, frames)
+}
+
+fn rates<'a>(runs: impl Iterator<Item = &'a Run>) -> Rates {
+    let (mut elapsed_us, mut audio_us, mut frames) = (0u128, 0u128, 0u128);
+    for run in runs.filter(|run| run.eligible) {
+        let (audio, video) = produced(run);
+        elapsed_us += u128::from(run.process.end_to_end_us);
+        audio_us += audio;
+        frames += video;
+    }
+    Rates {
+        realtime_factor: (audio_us > 0 && elapsed_us > 0)
+            .then(|| elapsed_us as f64 / audio_us as f64),
+        frames_per_second_end_to_end: (frames > 0 && elapsed_us > 0)
+            .then(|| frames as f64 * 1_000_000.0 / elapsed_us as f64),
+    }
 }
 
 fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
@@ -354,6 +365,8 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
         reason: None,
         duration_us: None,
         media_duration_us: None,
+        display_width: None,
+        display_height: None,
         sample_rate: None,
         channels: None,
         frames: None,
@@ -362,15 +375,15 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
     };
     match declaration.container {
         Container::Png | Container::Jpeg => {
-            match crate::imagefile::check(bytes, declaration.container) {
+            let checked = if declaration.container == Container::Png {
+                crate::imagefile::png(bytes)
+            } else {
+                crate::imagefile::jpeg(bytes)
+            };
+            match checked {
                 Ok(checked) => {
                     result.width = Some(checked.width);
                     result.height = Some(checked.height);
-                    if result.width != declaration.expect.width
-                        || result.height != declaration.expect.height
-                    {
-                        result.reason = Some(ValidationReason::OutputDimensions);
-                    }
                 }
                 Err(failure) => result.reason = Some(ValidationReason::Container { failure }),
             }
@@ -380,21 +393,19 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
                 result.duration_us = Some(checked.duration_us);
                 result.sample_rate = Some(checked.sample_rate);
                 result.channels = Some(checked.channels);
-                if result.duration_us != declaration.expect.duration_us
-                    || result.sample_rate != declaration.expect.sample_rate
-                    || result.channels != declaration.expect.channels
-                {
-                    result.reason = Some(ValidationReason::OutputExpectations);
-                }
             }
-            Err(failure) => {
-                result.reason = Some(ValidationReason::MediaContainer {
-                    failure: failure.as_str().into(),
-                    detail: None,
-                })
-            }
+            Err(failure) => result.reason = Some(ValidationReason::Audio { failure }),
         },
-        Container::Mp4 => validate_video(bytes, &declaration.expect, &mut result),
+        Container::Mp4 => validate_video(bytes, &mut result),
+    }
+    if result.reason.is_none() && !expectations_match(&declaration.expect, &result) {
+        result.reason = Some(
+            if matches!(declaration.container, Container::Png | Container::Jpeg) {
+                ValidationReason::OutputDimensions
+            } else {
+                ValidationReason::OutputExpectations
+            },
+        );
     }
     if result.reason.is_none() {
         result.label = ValidationLabel::ContainerChecked;
@@ -402,22 +413,19 @@ fn validate_output(bytes: &[u8], declaration: &Output) -> Validation {
     result
 }
 
-fn validate_video(bytes: &[u8], expect: &Expect, result: &mut Validation) {
+fn validate_video(bytes: &[u8], result: &mut Validation) {
     let checked = match crate::mp4file::check(bytes) {
         Ok(checked) => checked,
         Err(failure) => {
-            result.reason = Some(ValidationReason::MediaContainer {
-                failure: failure.as_str().into(),
-                detail: Some(failure.detail().into()),
-            });
+            result.reason = Some(ValidationReason::Video { failure });
             return;
         }
     };
-    let mut videos = checked
+    let Some(video) = checked
         .tracks
         .iter()
-        .filter(|track| track.kind == crate::mp4file::TrackKind::Video);
-    let Some(video) = videos.next() else {
+        .find(|track| track.kind == crate::mp4file::TrackKind::Video)
+    else {
         result.reason = Some(ValidationReason::OutputExpectations);
         return;
     };
@@ -426,34 +434,44 @@ fn validate_video(bytes: &[u8], expect: &Expect, result: &mut Validation) {
     result.frames = Some(video.sample_count);
     result.duration_us = Some(video.duration_us);
     result.media_duration_us = Some(video.media_duration_us);
-    result.fps = video
-        .fps
-        .as_ref()
-        .map(|fps| (fps.numerator, fps.denominator));
-    result.audio = Some(
-        checked
-            .tracks
-            .iter()
-            .any(|track| track.kind == crate::mp4file::TrackKind::Audio),
-    );
-    if videos.next().is_some()
-        || result.width != expect.width
-        || result.height != expect.height
-        || result.frames != expect.frames.map(u64::from)
-        || !result.fps.is_some_and(|(n, d)| {
-            expect
-                .fps
-                .is_some_and(|fps| u128::from(n) == u128::from(fps) * u128::from(d))
+    result.display_width = video.display_width;
+    result.display_height = video.display_height;
+    result.fps = video.fps;
+    result.audio = Some(checked.tracks.iter().any(|track| {
+        track.kind == crate::mp4file::TrackKind::Audio
+            && track.sample_count > 0
+            && track.sample_bytes > 0
+            && track.media_duration_us > 0
+    }));
+}
+
+fn expectations_match(expect: &Expect, observed: &Validation) -> bool {
+    [
+        (expect.width.map(u64::from), observed.width.map(u64::from)),
+        (expect.height.map(u64::from), observed.height.map(u64::from)),
+        (expect.frames.map(u64::from), observed.frames),
+        (
+            expect.duration_us,
+            observed.media_duration_us.or(observed.duration_us),
+        ),
+        (
+            expect.sample_rate.map(u64::from),
+            observed.sample_rate.map(u64::from),
+        ),
+        (
+            expect.channels.map(u64::from),
+            observed.channels.map(u64::from),
+        ),
+        (expect.audio.map(u64::from), observed.audio.map(u64::from)),
+    ]
+    .into_iter()
+    .all(|(expected, actual)| expected.is_none_or(|value| actual == Some(value)))
+        && expect.fps.is_none_or(|expected| {
+            observed.fps.is_some_and(|actual| {
+                u128::from(actual.numerator)
+                    == u128::from(expected) * u128::from(actual.denominator)
+            })
         })
-        || expect
-            .duration_us
-            .is_some_and(|duration| result.duration_us != Some(duration))
-        || expect
-            .audio
-            .is_some_and(|audio| result.audio != Some(audio))
-    {
-        result.reason = Some(ValidationReason::OutputExpectations);
-    }
 }
 
 fn output_sources(
@@ -1402,8 +1420,13 @@ fn inspection(
         } else {
             Some(false)
         },
-        descriptive_metrics: runs.iter().map(descriptive_metrics).collect(),
-        runs,
+        runs: runs
+            .into_iter()
+            .map(|run| ReportedRun {
+                rates: rates(std::iter::once(&run)),
+                run,
+            })
+            .collect(),
         setup,
         evidence_sha256,
     }

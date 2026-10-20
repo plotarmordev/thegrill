@@ -2,9 +2,17 @@
 
 ## Unreleased
 
-- Add audio WAV and video MP4 media workloads, container expectation rechecks and
-  descriptive audio real-time factor and end-to-end frame rates. Existing image
-  workload identities and the end-to-end duration gate are unchanged.
+- Add audio WAV and video MP4 media workloads with container expectation rechecks.
+- Report standard audio real-time factor and end-to-end video frame rates.
+  Existing image workload identities and the end-to-end duration gate are unchanged.
+
+Verification and limits:
+
+- Synthetic fixture runners exercise capture, offline inspection and comparison;
+  they do not qualify a real model runner.
+- Validation is container-checked, not decoded. MP4 checks declared sample bytes
+  and ranges, coded dimensions and media timing. Presentation edits are
+  descriptive; the supported edit-list rule is documented in [Media](MEDIA.md).
 
 ## Version 0.9.1 — declared media program paths
 
