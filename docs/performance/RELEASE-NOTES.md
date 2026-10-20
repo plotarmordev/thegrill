@@ -2,7 +2,10 @@
 
 ## Version 0.9.1 — declared media program paths
 
-- Fix media runner and setup execution to preserve declared symlink paths, including virtualenv interpreters, while recording resolved targets and their hashes.
+- Fix media runner and setup execution to preserve declared symlink paths,
+  including virtualenv interpreters. Receipts record each program's declared
+  path, resolved target and target hash; compare requires equal declared paths
+  and target hashes for A/A2 and B/B2.
 - Document [MFLUX runner configuration](MEDIA.md#mflux-runner), including the
   virtualenv console script, metadata-free output and offline environment.
 
@@ -10,6 +13,10 @@ Verification and limits of this version:
 
 - Synthetic fixtures cover declared symlink paths for runner and setup execution.
   They do not qualify a real model runner or establish output quality.
+- Compatibility exception for the experimental media CLI: the receipt's program
+  fields changed, so 0.9.1 `media inspect` and `media compare` reject capture
+  directories written by 0.9.0. Recapture with 0.9.1; non-media evidence is
+  unaffected.
 
 ## Version 0.9.0 — experimental image benchmarking
 
