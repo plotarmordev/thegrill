@@ -342,13 +342,17 @@ signal and records a cleanup failure. No group signal occurs after `try_wait`.
 There are no blocking reader threads or joins. Both output pipes are nonblocking;
 each polling turn reads at most 16 chunks of 8192 bytes per stream, then checks
 exit, caps, cancellation and the monotonic deadline. The poll sleep is 2 ms.
-After the group signal, drainage and nonblocking leader reaping have a separate
-100 ms allowance. Open pipes at that boundary are closed, their retained prefixes
-are marked truncated, and cleanup/reap failures remain visible. A descendant
-holding a pipe cannot extend collection until EOF. Under ordinary scheduling,
-the collection budget is the declared deadline plus one bounded polling turn
-and at most 100 ms cleanup plus its final polling turn; receipt `duration_ms`
-includes launch and cleanup, not program hashing or evidence publication.
+After normal leader exit and the group SIGKILL, drainage continues until pipe EOF
+or the run's remaining deadline expires, whichever comes first. This lets killed
+descendants close inherited pipes when scheduled, without imposing a shorter
+drain window. An escaped descendant holding a pipe past the deadline still fails
+with `stdout drainage incomplete at cleanup boundary` or
+`stderr drainage incomplete at cleanup boundary`: retained prefixes are marked
+truncated. Failure, deadline and cancellation cleanup, and nonblocking leader
+reaping, retain their separate 100 ms allowance. Under ordinary scheduling, the
+collection budget is the declared deadline plus one bounded polling turn and at
+most 100 ms cleanup plus its final polling turn; receipt `duration_ms` includes
+launch and cleanup, not program hashing or evidence publication.
 
 These are algorithmic wait bounds, **not hard real-time OS guarantees**.
 Scheduling stalls, blocked kernel execution (including spawn/exec or filesystem
