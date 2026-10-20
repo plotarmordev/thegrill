@@ -38,6 +38,11 @@ run is `cargo test -p grill-perf --locked --test study`. For recipe-facing
 changes, use the [same baseline/check interface and reviewed PR summary](docs/performance/RECIPES.md#contributor-pr-report).
 Recipe facts are explicit data, not a reason to add a provider wrapper.
 
+The System One comparison fixture derives its expected reference and candidate
+envelopes from retained measured waves. Its reference delays follow the preceding
+captures' observed makespans so reference pooling is checked without a fixed
+timing margin.
+
 ## Changes and review
 
 - Use a feature branch and submit a pull request. Describe the behavior changed, assumptions, and checks performed.

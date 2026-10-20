@@ -415,18 +415,33 @@ fn compare_reports_a_declared_change_under_the_observed_envelope() {
     // The candidate is captured first so every reference request can outlast
     // its slowest burst, however long load stretched that burst.
     successful(&capture(&temp, &fast.endpoint, &plan, 1, "b"));
-    let slowest = (0..)
-        .map(|index| temp.path(&format!("b/wave-{index:06}.json")))
-        .take_while(|path| path.exists())
-        .map(|path| value(path)["makespan_us"].as_u64().unwrap())
-        .max()
-        .unwrap();
+    let waves = |arm: &str| {
+        (0..)
+            .map(|index| temp.path(&format!("{arm}/wave-{index:06}.json")))
+            .take_while(|path| path.exists())
+            .map(value)
+            .collect::<Vec<_>>()
+    };
+    let slowest_burst = |waves: &[Value]| {
+        waves
+            .iter()
+            .map(|wave| wave["makespan_us"].as_u64().unwrap())
+            .max()
+            .unwrap()
+    };
+    let b = waves("b");
+    let delay = Arc::new(std::sync::atomic::AtomicU64::new(slowest_burst(&b)));
+    let server_delay = delay.clone();
     let slow = DecisionServer::new(move |request| {
-        thread::sleep(Duration::from_micros(slowest));
+        thread::sleep(Duration::from_micros(server_delay.load(Ordering::SeqCst)));
         immediate(request)
     });
     successful(&capture_server(&temp, &slow, &plan, 0, "a"));
+    let a = waves("a");
+    // A2 must extend A's envelope even when scheduling stretches A's capture.
+    delay.store(slowest_burst(&a), Ordering::SeqCst);
     successful(&capture_server(&temp, &slow, &plan, 2, "a2"));
+    let a2 = waves("a2");
     let output = cli()
         .args(["systemone", "compare", "--plan"])
         .arg(&plan)
@@ -446,11 +461,41 @@ fn compare_reports_a_declared_change_under_the_observed_envelope() {
     assert_eq!(report["acquisitions"].as_array().unwrap().len(), 3);
     let gates = report["gates"].as_array().unwrap();
     assert_eq!(gates.len(), 2);
-    for gate in gates {
+    for (gate, declared) in gates.iter().zip(wide["gates"].as_array().unwrap()) {
         assert_eq!(gate["counts"], json!([3, 3, 3]));
         assert_eq!(gate["outcome"], json!("PASS"));
-        assert!(gate["reference"].is_array());
-        assert!(gate["candidate"].is_array());
+        let extrema = |arms: &[&[Value]]| {
+            let mut samples = Vec::new();
+            for wave in arms
+                .iter()
+                .flat_map(|waves| waves.iter())
+                .filter(|wave| wave["phase"] == "measured" && wave["cell"] == declared["cell"])
+            {
+                assert_eq!(wave["complete"], json!(true));
+                match declared["metric"].as_str().unwrap() {
+                    "latency_us" => {
+                        for attempt in wave["attempts"].as_array().unwrap() {
+                            samples.push((attempt["latency_us"].as_u64().unwrap(), 1));
+                        }
+                    }
+                    "decisions_per_second" => samples.push((
+                        wave["decisions"].as_u64().unwrap() * 1_000_000,
+                        wave["makespan_us"].as_u64().unwrap(),
+                    )),
+                    metric => panic!("unexpected fixture metric {metric}"),
+                }
+            }
+            samples.sort_unstable_by(|&(an, ad), &(bn, bd)| {
+                (u128::from(an) * u128::from(bd)).cmp(&(u128::from(bn) * u128::from(ad)))
+            });
+            [samples[0], *samples.last().unwrap()].map(|(numerator, denominator)| {
+                json!({"numerator": numerator, "denominator": denominator})
+            })
+        };
+        let reference = extrema(&[&a, &a2]);
+        assert_ne!(reference, extrema(&[&a]), "A2 must extend the envelope");
+        assert_eq!(gate["reference"], json!(reference));
+        assert_eq!(gate["candidate"], json!(extrema(&[&b])));
     }
     let latency = &gates[0]["candidate"][1];
     let reference = &gates[0]["reference"][0];
