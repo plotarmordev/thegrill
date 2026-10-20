@@ -34,6 +34,7 @@ struct ArmSummary {
     samples: CellSummary,
     seconds_per_image: Option<f64>,
     images_per_second_end_to_end: Option<f64>,
+    images_per_second_generation: Option<f64>,
     #[serde(flatten)]
     rates: Rates,
 }
@@ -123,6 +124,13 @@ fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
         .map(f64::from);
     let mean = samples.end_to_end_us.as_ref().map(|summary| summary.mean);
     ArmSummary {
+        images_per_second_generation: samples
+            .generation_us
+            .as_ref()
+            .map(|summary| summary.mean)
+            .filter(|us| *us > 0.0)
+            .zip(images)
+            .map(|(us, images)| images * 1_000_000.0 / us),
         seconds_per_image: mean
             .zip(images)
             .map(|(us, images)| us / images / 1_000_000.0),
@@ -190,9 +198,19 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
     let values = arms.each_ref().map(|runs| {
         runs.iter()
             .filter(|run| run.phase == Phase::Measured && run.eligible)
-            .map(|run| Rational {
-                numerator: run.process.end_to_end_us,
-                denominator: 1,
+            .filter_map(|run| match gate.metric {
+                Metric::EndToEnd => Some(Rational {
+                    numerator: run.process.end_to_end_us,
+                    denominator: 1,
+                }),
+                metric => run
+                    .markers
+                    .as_ref()?
+                    .delta_ns(metric)
+                    .map(|numerator| Rational {
+                        numerator,
+                        denominator: 1000,
+                    }),
             })
             .collect::<Vec<_>>()
     });
@@ -217,13 +235,28 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
             return result;
         }
     }
-    if values.iter().any(|values| values.len() < 3)
-        || arms
-            .iter()
-            .flatten()
-            .any(|run| run.phase == Phase::Measured && !run.eligible)
+    if arms.iter().any(|runs| {
+        runs.iter()
+            .filter(|run| run.phase == Phase::Measured && run.eligible)
+            .count()
+            < 3
+    }) || arms
+        .iter()
+        .flatten()
+        .any(|run| run.phase == Phase::Measured && !run.eligible)
     {
         result.reason = Some("insufficient_samples".into());
+        return result;
+    }
+    if gate.metric != Metric::EndToEnd
+        && arms.iter().zip(&values).any(|(runs, values)| {
+            runs.iter()
+                .filter(|run| run.phase == Phase::Measured)
+                .count()
+                != values.len()
+        })
+    {
+        result.reason = Some("markers_unavailable".into());
         return result;
     }
     let reference = result.reference.expect("at least three reference samples");

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add runner-asserted media markers, exact generation interval gates and offline
+  marker re-derivation across image, audio and video captures. The stdlib adapter
+  requires operator-selected hooks for inference boundaries; see
+  [Runner markers](MEDIA.md#runner-markers).
 - Fix microbench and media captures whose killed descendants close inherited
   pipes late: after leader exit, pipe drainage now uses the remaining run
   deadline instead of 100 ms, so these captures can succeed and receipt
