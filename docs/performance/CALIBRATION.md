@@ -200,7 +200,7 @@ Reproduce from the checkout with Python, the pinned Rust toolchain and `jq`:
 
 ```sh
 OUT=$(mktemp -d)
-cargo --config profile.dev.package.sha2.opt-level=3 test -p grill-perf --locked \
+cargo test -p grill-perf --locked \
   --bin grill-perf --no-run --message-format=json > "$OUT/build.jsonl"
 TEST_BINARY=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "grill-perf") | .executable' "$OUT/build.jsonl")
 python3 tools/calibrate-policy.py --seed 32 --replicates 500 --out "$OUT/oracle"
@@ -211,9 +211,8 @@ python3 tools/calibrate-policy.py --seed 32 --replicates 500 --out "$OUT/checked
   --production-results "$OUT/production.jsonl" --production-binary "$TEST_BINARY"
 ```
 
-The development-profile override affects fixture hashing only; never use it
-for release staging. The hook ignores corpus expectations and calls the real
-evaluator. Pins identify corpus, source and executable bytes; the operator must
+The hook ignores corpus expectations and calls the real evaluator.
+Pins identify corpus, source and executable bytes; the operator must
 still establish binary/source correspondence through the actual build.
 Mismatched production rows make the driver fail, not silently revise a verdict.
 
