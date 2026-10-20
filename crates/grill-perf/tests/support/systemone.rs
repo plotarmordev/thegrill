@@ -404,20 +404,28 @@ fn inspect_detects_changed_retained_response_bytes() {
 #[test]
 fn compare_reports_a_declared_change_under_the_observed_envelope() {
     let temp = Temp::new();
-    let slow = DecisionServer::new(|request| {
-        thread::sleep(Duration::from_millis(40));
-        immediate(request)
-    });
     let fast = DecisionServer::new(immediate);
-    // Hosted macOS runners oversleep the 40 ms fixture delay by up to ~150 ms, so a
+    // Hosted macOS runners oversleep the fixture delay by up to ~150 ms, so a
     // tight reference-spread bound tests the host timer, not the comparison.
     let mut wide = plan_json();
     for gate in wide["gates"].as_array_mut().unwrap() {
         gate["max_reference_spread_bps"] = json!(1000000);
     }
     let plan = fixtures(&temp, "compare", &wide);
-    successful(&capture_server(&temp, &slow, &plan, 0, "a"));
+    // The candidate is captured first so every reference request can outlast
+    // its slowest burst, however long load stretched that burst.
     successful(&capture(&temp, &fast.endpoint, &plan, 1, "b"));
+    let slowest = (0..)
+        .map(|index| temp.path(&format!("b/wave-{index:06}.json")))
+        .take_while(|path| path.exists())
+        .map(|path| value(path)["makespan_us"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let slow = DecisionServer::new(move |request| {
+        thread::sleep(Duration::from_micros(slowest));
+        immediate(request)
+    });
+    successful(&capture_server(&temp, &slow, &plan, 0, "a"));
     successful(&capture_server(&temp, &slow, &plan, 2, "a2"));
     let output = cli()
         .args(["systemone", "compare", "--plan"])
