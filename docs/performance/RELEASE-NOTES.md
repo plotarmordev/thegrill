@@ -1,5 +1,13 @@
 # Performance release notes
 
+## Unreleased
+
+- Fix microbench and media captures whose killed descendants close inherited
+  pipes late: after leader exit, pipe drainage now uses the remaining run
+  deadline instead of 100 ms, so these captures can succeed and receipt
+  `duration_ms` can extend toward the deadline. See the
+  [external capture contract](KERNEL-FABRIC.md).
+
 ## Version 0.9.1 — declared media program paths
 
 - Fix media runner and setup execution to preserve declared symlink paths,

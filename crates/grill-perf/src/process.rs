@@ -197,7 +197,7 @@ fn exited_pid(info: &libc::siginfo_t) -> libc::pid_t {
 }
 
 /// The caller holds a program_signals::Guard through capture and publication.
-/// No wait/reader joins: cleanup has its own finite drain/reap allowance.
+/// No wait/reader joins: normal-exit drainage uses the remaining run deadline.
 pub fn run(_guard: &program_signals::Guard, request: &Request<'_>) -> Output {
     use std::os::unix::process::CommandExt;
     let started = Instant::now();
@@ -246,7 +246,6 @@ pub fn run(_guard: &program_signals::Guard, request: &Request<'_>) -> Output {
         err_done = true;
     }
     let mut cleanup_started = None;
-    let mut reaped = false;
     loop {
         if let Err(error) = drain(
             &mut stdout,
@@ -311,19 +310,24 @@ pub fn run(_guard: &program_signals::Guard, request: &Request<'_>) -> Output {
                         run.fail(format!("owned group cleanup signal failed: {error}"));
                     }
                 }
-                cleanup_started = Some(Instant::now());
+                let cleanup = Instant::now();
+                let drain_until = if run.failure.is_none() {
+                    started + request.deadline
+                } else {
+                    cleanup + PROGRAM_CLEANUP
+                };
+                cleanup_started = Some((cleanup, drain_until));
             }
         }
-        if let Some(cleanup) = cleanup_started {
+        if let Some((cleanup, drain_until)) = cleanup_started {
             // No further group signals are permitted after this reap.
-            if !reaped {
+            if run.status.is_none() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         if run.exit_observed_us == 0 {
                             run.exit_observed_us = started.elapsed().as_micros() as u64;
                         }
                         run.status = Some(status);
-                        reaped = true;
                     }
                     Ok(None) => (),
                     Err(error) => {
@@ -332,11 +336,13 @@ pub fn run(_guard: &program_signals::Guard, request: &Request<'_>) -> Output {
                     }
                 }
             }
-            if reaped && out_done && err_done {
+            if run.status.is_some() && out_done && err_done {
                 break;
             }
-            if cleanup.elapsed() >= PROGRAM_CLEANUP {
-                if !reaped {
+            if Instant::now() >= drain_until
+                || (cleanup.elapsed() >= PROGRAM_CLEANUP && (run.status.is_none() || run.cancelled))
+            {
+                if run.status.is_none() {
                     run.fail("owned leader not reaped within 100 ms cleanup allowance");
                 }
                 break;
@@ -382,6 +388,141 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
 
     static ACTIVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    fn delayed_pipe_close(cancel: bool) -> Output {
+        let root =
+            std::env::temp_dir().join(format!("grill-drain-{}-{cancel}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let leader = root.join("leader");
+        let release = root.join("release");
+        let (finished, completion) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !leader.exists() {
+                assert!(Instant::now() < until, "leader did not start");
+                std::thread::sleep(PROGRAM_POLL);
+            }
+            let pid = loop {
+                let pid = std::fs::read_to_string(&leader).unwrap();
+                if !pid.is_empty() {
+                    break pid;
+                }
+                assert!(Instant::now() < until);
+                std::thread::sleep(PROGRAM_POLL);
+            };
+            let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
+            // Duplicated writers model a killed child that has not closed its
+            // pipes yet. SIGSTOP cannot delay SIGKILL on Linux.
+            let stdout = std::fs::OpenOptions::new()
+                .write(true)
+                .open(proc.join("fd/1"))
+                .unwrap();
+            let stderr = std::fs::OpenOptions::new()
+                .write(true)
+                .open(proc.join("fd/2"))
+                .unwrap();
+            std::fs::write(release, b"").unwrap();
+            while proc.exists() {
+                assert!(Instant::now() < until, "leader not reaped");
+                std::thread::sleep(PROGRAM_POLL);
+            }
+            // Reaping happens after group SIGKILL, so this exceeds the old
+            // window regardless of how long startup took.
+            std::thread::sleep(Duration::from_millis(250));
+            if cancel {
+                // The leader is already reaped, so cancellation must interrupt
+                // normal-exit drainage rather than the running-program path.
+                // SAFETY: the collector guard has installed the SIGINT handler.
+                assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+                let completed = completion.recv_timeout(Duration::from_secs(5)).is_ok();
+                drop((stdout, stderr));
+                assert!(completed, "cancellation waited for pipe EOF");
+                return;
+            }
+            drop((stdout, stderr));
+        });
+        let output = shell(
+            &format!(
+                "printf '%s' $$ > '{0}/leader'; while [ ! -e '{0}/release' ]; do sleep 0.01; done; sleep 30 & printf honest; printf evidence >&2",
+                root.display()
+            ),
+            Duration::from_secs(10),
+            1024,
+            true,
+        );
+        let _ = finished.send(());
+        holder.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        output
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn normal_exit_waits_for_delayed_pipe_close() {
+        let output = delayed_pipe_close(false);
+        assert!(output.failure.is_none(), "{:?}", output.failure);
+        assert!(output.status.unwrap().success());
+        assert_eq!(output.stdout, b"honest");
+        assert_eq!(output.stderr, b"evidence");
+        assert!(!output.stdout_truncated && !output.stderr_truncated);
+        assert!(!output.timed_out && !output.cancelled);
+        assert!(output.elapsed_with_cleanup_ms >= output.exit_observed_us / 1000 + 250);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cancellation_interrupts_normal_exit_pipe_drain() {
+        let output = delayed_pipe_close(true);
+        assert!(output.status.unwrap().success());
+        assert!(output.cancelled);
+        assert!(!output.timed_out);
+        assert_eq!(output.stdout, b"honest");
+        assert_eq!(output.stderr, b"evidence");
+        assert!(output.stdout_truncated && output.stderr_truncated);
+        assert_eq!(
+            output.failure.as_deref(),
+            Some(
+                "collector cancelled by SIGINT or SIGTERM; stdout drainage incomplete at cleanup boundary; stderr drainage incomplete at cleanup boundary; raw output is truncated; retained prefixes only"
+            )
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn escaped_descendant_pipe_is_bounded_by_deadline() {
+        let root = std::env::temp_dir().join(format!("grill-escaped-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let pid_file = root.join("pid");
+        let deadline = Duration::from_secs(2);
+        let output = shell(
+            &format!(
+                "setsid sh -c 'printf \"%s\" $$ > \"{}\"; exec sleep 30' & while [ ! -s '{}' ]; do sleep 0.01; done; printf honest",
+                pid_file.display(),
+                pid_file.display()
+            ),
+            deadline,
+            1024,
+            true,
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        // SAFETY: the fixture's escaped sleeper remains alive beyond the deadline.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(output.status.unwrap().success());
+        assert!(!output.timed_out && !output.cancelled);
+        assert_eq!(output.stdout, b"honest");
+        assert!(output.stdout_truncated && output.stderr_truncated);
+        assert_eq!(
+            output.failure.as_deref(),
+            Some(
+                "stdout drainage incomplete at cleanup boundary; stderr drainage incomplete at cleanup boundary; raw output is truncated; retained prefixes only"
+            )
+        );
+        assert!(output.elapsed_with_cleanup_ms >= deadline.as_millis() as u64);
+        // Scheduling can delay observation, but the escaped sleeper is not awaited.
+        assert!(output.elapsed_with_cleanup_ms < deadline.as_millis() as u64 + 5000);
+    }
 
     fn shell(script: &str, deadline: Duration, cap: usize, fatal: bool) -> Output {
         let _lock = ACTIVE_TEST

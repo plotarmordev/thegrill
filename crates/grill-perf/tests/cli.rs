@@ -41,6 +41,20 @@ struct Server {
     join: Option<thread::JoinHandle<()>>,
 }
 type Handler = dyn Fn(TcpStream, usize, Value) + Send + Sync;
+thread_local! {
+    static ACTIVE_REQUEST: std::cell::Cell<Option<Arc<AtomicUsize>>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+fn complete_request() {
+    ACTIVE_REQUEST.with(|slot| {
+        if let Some(active) = slot.take() {
+            active.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
+}
+
 impl Server {
     fn new(handler: impl Fn(TcpStream, usize, Value) + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -84,8 +98,9 @@ impl Server {
                             let index = count.fetch_add(1, Ordering::SeqCst);
                             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                             peak.fetch_max(now, Ordering::SeqCst);
+                            ACTIVE_REQUEST.with(|slot| slot.set(Some(active)));
                             handler(stream, index, request);
-                            active.fetch_sub(1, Ordering::SeqCst);
+                            complete_request();
                         }));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -197,6 +212,9 @@ fn finish(stream: &mut TcpStream, tokens: Option<u64>, cached: Option<u64>) {
         }
         frame(stream, json!({"id":"fixture","choices":[],"usage":usage}));
     }
+    // The client can dispatch its next wave as soon as it reads DONE, even
+    // while this worker is descheduled before returning to the server loop.
+    complete_request();
     stream.write_all(b"data: [DONE]\n\n").unwrap();
 }
 fn normal(mut stream: TcpStream, _: usize, _: Value) {
@@ -2519,10 +2537,13 @@ fn faster_streaming_decode_has_positive_matched_rate_change() {
     let server = Server::new(|mut s, i, _| {
         header(&mut s, "text/event-stream");
         frame(&mut s, json!({"choices":[{"delta":{"content":"x"}}]}));
-        thread::sleep(Duration::from_millis(if i == 0 { 180 } else { 30 }));
+        // Only a stall longer than this gap could make the candidate slower.
+        thread::sleep(Duration::from_millis(if i == 0 { 2000 } else { 30 }));
         finish(&mut s, Some(8), None);
     });
-    let work = workload(1, 0, 1);
+    let mut work = workload(1, 0, 1);
+    work["limits"]["total_ms"] = json!(15000);
+    work["limits"]["idle_ms"] = json!(12000);
     successful(&run(&temp, &server, "baseline", &work));
     successful(&run(&temp, &server, "candidate", &work));
     let output = cli()
