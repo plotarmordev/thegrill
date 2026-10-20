@@ -313,7 +313,8 @@ fn tool_conversation_cancel_retains_partial_without_resume_or_replacement() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Startup hashes the unoptimized collector binary, which takes seconds on a loaded host.
+    ready.recv_timeout(Duration::from_secs(60)).unwrap();
     // SAFETY: kill takes plain integers; the unreaped child keeps its PID reserved.
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     let output = child.wait_with_output().unwrap();
