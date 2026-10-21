@@ -1,7 +1,8 @@
 //! Container framing and sample metadata only; sample values are not decoded.
 //! Durations use integer division, rounding down to whole microseconds.
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Checked {
     pub channels: u16,
     pub sample_rate: u32,

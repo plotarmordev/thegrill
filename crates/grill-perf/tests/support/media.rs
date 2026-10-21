@@ -4,6 +4,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 #[path = "mp4_fixture.rs"]
 mod mp4_fixture;
 use mp4_fixture::{TrackSpec, progressive};
+#[path = "media_speech.rs"]
+mod speech;
 
 struct Fixture {
     root: Temp,

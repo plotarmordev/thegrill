@@ -85,6 +85,9 @@ enum Metric {
     Generation,
     #[serde(rename = "load_to_generation_us")]
     LoadToGeneration,
+    #[serde(rename = "first_audio_us")]
+    FirstAudio,
+    DurationRatio,
 }
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -279,9 +282,24 @@ struct Gate {
     max_reference_spread_bps: u32,
 }
 #[derive(Deserialize)]
+#[serde(tag = "kind")]
+enum Runner {
+    #[serde(rename = "media-runner-v1")]
+    Cli(Cli),
+    #[serde(rename = "media-speech-server-v1")]
+    Speech(capture::speech::Server),
+}
+impl Runner {
+    fn setup(&self) -> Option<&Setup> {
+        match self {
+            Self::Cli(runner) => runner.setup.as_ref(),
+            Self::Speech(_) => None,
+        }
+    }
+}
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Runner {
-    kind: String,
+struct Cli {
     version: u32,
     id: String,
     execution: Execution,
@@ -379,7 +397,7 @@ fn reject_positional_records(value: &serde_json::Value) -> Result<()> {
     for (key, v) in map {
         match key.as_str() {
             "env" if !v.is_object() => return Err("environment must be a JSON object".into()),
-            "request" | "limits" | "expect" | "setup" | "cache" if !v.is_null() => {
+            "request" | "limits" | "expect" | "setup" | "cache" | "pcm" if !v.is_null() => {
                 reject_positional_records(v)?
             }
             "outputs" | "cells" | "slots" | "gates" | "pins" => {
@@ -411,12 +429,22 @@ struct FieldRule {
     name: &'static str,
     min: u64,
     max: u64,
-    request: [Presence; 3],
-    expect: [Presence; 3],
+    request: [Presence; 4],
+    expect: [Presence; 4],
+}
+
+/// Rule-table column after the three modalities: audio requests sent to a speech server.
+const SPEECH: usize = 3;
+fn column(modality: Modality) -> usize {
+    match modality {
+        Modality::Image => 0,
+        Modality::Audio => 1,
+        Modality::Video => 2,
+    }
 }
 
 fn validate_fields(
-    modality: Modality,
+    index: usize,
     context: &str,
     expect: bool,
     values: &[(&str, Option<u64>)],
@@ -427,78 +455,73 @@ fn validate_fields(
             name: "width",
             min: 1,
             max: MAX_CANVAS as u64,
-            request: [R, F, R],
-            expect: [R, F, R],
+            request: [R, F, R, F],
+            expect: [R, F, R, F],
         },
         FieldRule {
             name: "height",
             min: 1,
             max: MAX_CANVAS as u64,
-            request: [R, F, R],
-            expect: [R, F, R],
+            request: [R, F, R, F],
+            expect: [R, F, R, F],
         },
         FieldRule {
             name: "steps",
             min: 1,
             max: MAX_STEPS as u64,
-            request: [R, O, O],
-            expect: [F, F, F],
+            request: [R, O, O, F],
+            expect: [F, F, F, F],
         },
         FieldRule {
             name: "images_per_run",
             min: 1,
             max: MAX_IMAGES as u64,
-            request: [R, F, F],
-            expect: [F, F, F],
+            request: [R, F, F, F],
+            expect: [F, F, F, F],
         },
         FieldRule {
             name: "frames",
             min: 1,
             max: MAX_FRAMES,
-            request: [F, F, R],
-            expect: [F, F, R],
+            request: [F, F, R, F],
+            expect: [F, F, R, F],
         },
         FieldRule {
             name: "fps",
             min: 1,
             max: MAX_FPS,
-            request: [F, F, R],
-            expect: [F, F, R],
+            request: [F, F, R, F],
+            expect: [F, F, R, F],
         },
         FieldRule {
             name: "duration_us",
             min: 1,
             max: MAX_DURATION_US,
-            request: [F, R, O],
-            expect: [F, R, O],
+            request: [F, R, O, F],
+            expect: [F, R, O, F],
         },
         FieldRule {
             name: "sample_rate",
             min: 1,
             max: u32::MAX as u64,
-            request: [F, R, F],
-            expect: [F, R, F],
+            request: [F, R, F, R],
+            expect: [F, R, F, F],
         },
         FieldRule {
             name: "channels",
             min: 1,
             max: u16::MAX as u64,
-            request: [F, F, F],
-            expect: [F, R, F],
+            request: [F, F, F, F],
+            expect: [F, R, F, F],
         },
         FieldRule {
             name: "audio",
             min: 0,
             max: 1,
-            request: [F, F, F],
-            expect: [F, F, O],
+            request: [F, F, F, F],
+            expect: [F, F, O, F],
         },
     ];
-    let index = match modality {
-        Modality::Image => 0,
-        Modality::Audio => 1,
-        Modality::Video => 2,
-    };
     for rule in &RULES {
         let value = values
             .iter()
@@ -515,7 +538,7 @@ fn validate_fields(
             }
             (Presence::Forbidden, Some(_)) => {
                 return Err(format!(
-                    "{context}.{} is forbidden for this modality",
+                    "{context}.{} is forbidden for this modality and runner",
                     rule.name
                 ));
             }
@@ -543,7 +566,7 @@ fn validate_expect(output: &Output, modality: Modality) -> Result<()> {
     }
     let e = &output.expect;
     validate_fields(
-        modality,
+        column(modality),
         &format!("outputs.{name}.expect"),
         true,
         &[
@@ -559,7 +582,7 @@ fn validate_expect(output: &Output, modality: Modality) -> Result<()> {
     )
 }
 
-fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()> {
+fn validate_request(r: &Request, index: usize, context: &str) -> Result<()> {
     for (field, value) in [
         ("prompt", Some(r.prompt.as_str())),
         ("negative_prompt", r.negative_prompt.as_deref()),
@@ -574,7 +597,7 @@ fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()
         return Err(format!("{context}.seeds needs 1..={MAX_SEEDS} entries"));
     }
     validate_fields(
-        modality,
+        index,
         context,
         false,
         &[
@@ -589,7 +612,7 @@ fn validate_request(r: &Request, modality: Modality, context: &str) -> Result<()
         ],
     )
 }
-fn validate(w: &Workload, r: &Runner) -> Result<()> {
+fn validate(w: &Workload, runner: &Runner) -> Result<()> {
     if w.kind != "media-workload-v1" {
         return Err("workload.kind must be media-workload-v1".into());
     }
@@ -599,7 +622,12 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
     if !identifier(&w.name) {
         return Err(format!("invalid workload.name: {}", w.name));
     }
-    validate_request(&w.request, w.modality, "request")?;
+    let index = match runner {
+        Runner::Cli(_) => column(w.modality),
+        Runner::Speech(_) if w.modality == Modality::Audio => SPEECH,
+        Runner::Speech(_) => return Err("speech server runners require audio modality".into()),
+    };
+    validate_request(&w.request, index, "request")?;
     if !(1..=MAX_CELLS).contains(&w.cells.len()) {
         return Err(format!("cells needs 1..={MAX_CELLS} entries"));
     }
@@ -621,10 +649,13 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
             ));
         }
         if let Some(req) = &c.request {
-            validate_request(req, w.modality, &format!("cell {}.request", c.id))?;
+            validate_request(req, index, &format!("cell {}.request", c.id))?;
         }
     }
-    validate_outputs(w, r)?;
+    match runner {
+        Runner::Cli(r) => validate_outputs(w, r)?,
+        Runner::Speech(server) => server.validate(w)?,
+    }
     let mut slots = BTreeSet::new();
     let mut arms = BTreeSet::new();
     for s in &w.slots {
@@ -646,9 +677,19 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
                 g.cell
             ));
         }
-        if g.metric != Metric::EndToEnd && r.markers.is_none() {
+        let requirement = match g.metric {
+            Metric::EndToEnd => None,
+            Metric::Generation | Metric::LoadToGeneration => {
+                (!matches!(runner, Runner::Cli(r) if r.markers.is_some()))
+                    .then_some("runner.markers")
+            }
+            Metric::FirstAudio => (!matches!(runner, Runner::Speech(s) if s.stream))
+                .then_some("a streaming speech server runner"),
+            Metric::DurationRatio => (w.modality != Modality::Audio).then_some("audio modality"),
+        };
+        if let Some(requirement) = requirement {
             return Err(format!(
-                "gate {}: metric {} requires runner.markers",
+                "gate {}: metric {} requires {requirement}",
                 g.cell,
                 serde_json::to_value(g.metric)
                     .expect("metric string")
@@ -678,9 +719,12 @@ fn validate(w: &Workload, r: &Runner) -> Result<()> {
             return Err(format!("limits.{field} must be positive"));
         }
     }
-    validate_runner(r, l)
+    match runner {
+        Runner::Cli(r) => validate_runner(r, l),
+        Runner::Speech(_) => Ok(()),
+    }
 }
-fn validate_outputs(w: &Workload, r: &Runner) -> Result<()> {
+fn validate_outputs(w: &Workload, r: &Cli) -> Result<()> {
     if w.outputs.is_empty() {
         return Err("outputs needs at least one declaration".into());
     }
@@ -740,7 +784,7 @@ fn validate_output_args(
     }
     Ok(())
 }
-fn validate_runner(r: &Runner, limits: &Limits) -> Result<()> {
+fn validate_runner(r: &Cli, limits: &Limits) -> Result<()> {
     let marker_count = r
         .args
         .iter()
@@ -757,9 +801,6 @@ fn validate_runner(r: &Runner, limits: &Limits) -> Result<()> {
         .is_some_and(|setup| setup.args.iter().any(|arg| arg.contains("{marker_file}")))
     {
         return Err("runner.setup.args: {marker_file} is forbidden".into());
-    }
-    if r.kind != "media-runner-v1" {
-        return Err("runner.kind must be media-runner-v1".into());
     }
     if r.version != 1 {
         return Err("runner.version must be 1".into());
@@ -887,11 +928,41 @@ fn substitute(
     Ok(result)
 }
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Rendered {
+    Args(Vec<String>),
+    /// The exact JSON request body sent to a speech server.
+    Body(String),
+}
+#[derive(Serialize)]
 struct Sample {
     cell: String,
     phase: Phase,
     seed: u64,
-    args: Vec<String>,
+    #[serde(flatten)]
+    request: Rendered,
+}
+#[derive(Serialize)]
+#[serde(untagged)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per preflight, moved into the receipt"
+)]
+enum Admitted {
+    Cli {
+        execution: Execution,
+        markers: Option<markers::Transport>,
+        program: Program,
+        setup_program: Option<Program>,
+        setup_args: Option<Vec<String>>,
+        env: BTreeMap<String, String>,
+        cwd: Option<PathBuf>,
+        cache_paths: Vec<PathBuf>,
+        cache_declared_state: CacheState,
+    },
+    Speech {
+        endpoint: String,
+    },
 }
 #[derive(Serialize)]
 struct Preflight {
@@ -899,18 +970,11 @@ struct Preflight {
     kind: &'static str,
     claim: &'static str,
     support: &'static str,
-    execution: Execution,
-    markers: Option<markers::Transport>,
+    #[serde(flatten)]
+    runner: Admitted,
     workload_sha256: String,
     workload_typed_sha256: String,
     runner_sha256: String,
-    program: Program,
-    setup_program: Option<Program>,
-    setup_args: Option<Vec<String>>,
-    env: BTreeMap<String, String>,
-    cwd: Option<PathBuf>,
-    cache_paths: Vec<PathBuf>,
-    cache_declared_state: CacheState,
     warmup_runs: u64,
     measured_runs: u64,
     total_runs: u64,
@@ -995,9 +1059,7 @@ fn render(
         .collect()
 }
 
-fn preflight(plan: &Plan) -> Result<Preflight> {
-    let w = &plan.workload;
-    let r = &plan.runner;
+fn admit_cli(r: &Cli, w: &Workload) -> Result<Admitted> {
     let program = resolve_program(&r.program)?;
     let setup_program = r
         .setup
@@ -1031,43 +1093,9 @@ fn preflight(plan: &Plan) -> Result<Preflight> {
             .map_err(|error| format!("runner.setup.args: {error}"))
         })
         .transpose()?;
-    let mut samples = Vec::new();
-    let (mut warmup_runs, mut measured_runs, mut wall_clock_allowance_ms) = (0u64, 0u64, 0u64);
-    for sample in schedule(w) {
-        match sample.phase {
-            Phase::Warmup => warmup_runs += 1,
-            Phase::Measured => measured_runs += 1,
-        }
-        samples.push(Sample {
-            cell: sample.cell.id.clone(),
-            phase: sample.phase,
-            seed: sample.seed,
-            args: render(
-                &r.args,
-                sample.request,
-                sample.seed,
-                Path::new(&sample.directory()),
-                w,
-            )?,
-        });
-        wall_clock_allowance_ms +=
-            u64::from(w.limits.run_deadline_ms) + u64::from(sample.cell.pause_between_runs_ms);
-    }
-    if let Some(s) = &r.setup {
-        wall_clock_allowance_ms += u64::from(s.deadline_ms.unwrap_or(w.limits.setup_deadline_ms));
-    }
-    Ok(Preflight {
-        version: 1,
-        kind: "media-preflight-v1",
-        claim: "offline-declared-media-plan-admission-launches-nothing",
-        support: SUPPORT,
+    Ok(Admitted::Cli {
         execution: r.execution,
         markers: r.markers,
-        workload_sha256: evidence::digest(&plan.workload_bytes),
-        workload_typed_sha256: evidence::digest(
-            &serde_json::to_vec(&w).map_err(|e| e.to_string())?,
-        ),
-        runner_sha256: evidence::digest(&plan.runner_bytes),
         program,
         setup_program,
         setup_args,
@@ -1080,6 +1108,56 @@ fn preflight(plan: &Plan) -> Result<Preflight> {
             .map(|p| expand(p))
             .collect::<Result<_>>()?,
         cache_declared_state: r.cache.declared_state,
+    })
+}
+
+fn preflight(plan: &Plan) -> Result<Preflight> {
+    let w = &plan.workload;
+    let runner = match &plan.runner {
+        Runner::Cli(r) => admit_cli(r, w)?,
+        Runner::Speech(server) => Admitted::Speech {
+            endpoint: server.url()?.to_string(),
+        },
+    };
+    let mut samples = Vec::new();
+    let (mut warmup_runs, mut measured_runs, mut wall_clock_allowance_ms) = (0u64, 0u64, 0u64);
+    for sample in schedule(w) {
+        match sample.phase {
+            Phase::Warmup => warmup_runs += 1,
+            Phase::Measured => measured_runs += 1,
+        }
+        samples.push(Sample {
+            cell: sample.cell.id.clone(),
+            phase: sample.phase,
+            seed: sample.seed,
+            request: match &plan.runner {
+                Runner::Cli(r) => Rendered::Args(render(
+                    &r.args,
+                    sample.request,
+                    sample.seed,
+                    Path::new(&sample.directory()),
+                    w,
+                )?),
+                Runner::Speech(server) => Rendered::Body(server.body(sample.request)?),
+            },
+        });
+        wall_clock_allowance_ms +=
+            u64::from(w.limits.run_deadline_ms) + u64::from(sample.cell.pause_between_runs_ms);
+    }
+    if let Some(s) = plan.runner.setup() {
+        wall_clock_allowance_ms += u64::from(s.deadline_ms.unwrap_or(w.limits.setup_deadline_ms));
+    }
+    Ok(Preflight {
+        version: 1,
+        kind: "media-preflight-v1",
+        claim: "offline-declared-media-plan-admission-launches-nothing",
+        support: SUPPORT,
+        runner,
+        workload_sha256: evidence::digest(&plan.workload_bytes),
+        workload_typed_sha256: evidence::digest(
+            &serde_json::to_vec(&w).map_err(|e| e.to_string())?,
+        ),
+        runner_sha256: evidence::digest(&plan.runner_bytes),
         warmup_runs,
         measured_runs,
         total_runs: warmup_runs + measured_runs,
@@ -1089,16 +1167,16 @@ fn preflight(plan: &Plan) -> Result<Preflight> {
 }
 #[derive(Subcommand)]
 pub enum Command {
-    /// Validate an image workload and runner, hash programs and print sample argv without starting a process.
+    /// Validate a media workload and runner, hash programs and print sample argv or request bodies without starting a process or contacting a server.
     Preflight {
-        /// Shared image workload document.
+        /// Shared media workload document.
         #[arg(long)]
         workload: PathBuf,
-        /// Per-arm process runner declaration.
+        /// Per-arm CLI or speech-server runner declaration.
         #[arg(long)]
         runner: PathBuf,
     },
-    /// Capture serial fresh-process image samples.
+    /// Capture serial fresh-process or speech-server samples.
     Capture {
         #[arg(long)]
         workload: PathBuf,

@@ -3,7 +3,8 @@
 `media preflight`, `media capture`, `media inspect` and `media compare` are
 experimental and support image, audio and video workloads on Linux and macOS.
 External probes are not supported.
-Preflight prints JSON without starting processes or creating directories.
+Preflight prints JSON without starting processes, contacting servers or creating
+directories.
 
 ```text
 grill-perf media preflight --workload W.json --runner R.json
@@ -18,7 +19,8 @@ Exit codes: **0** admitted; **1** rejected, unreadable or CLI usage error.
 
 ## Documents
 
-Both documents require their `kind` (`media-workload-v1` or `media-runner-v1`)
+Both documents require their `kind` (`media-workload-v1`; for runners
+`media-runner-v1` or [`media-speech-server-v1`](#speech-servers))
 and `version: 1`. Records are JSON objects; unknown/duplicate fields and positional
 records are rejected. Documents are bounded to 4 MiB; resolved programs to 1 GiB.
 Optional fields are omitted, not null; absent optional workload fields are omitted
@@ -41,7 +43,8 @@ Cells (1–64) declare `id`, `warmup_runs` (0–20), `measured_runs` (1–100), 
 whole request. Slots declare unique `id` and `arm`: `a`, `b`, `a2`, optionally
 `b2`. Gates (1–16) name unique `(cell, metric)` pairs with a declared cell,
 `max_adverse_bps` (0–9999) and `max_reference_spread_bps` (0–1000000).
-Metrics are `end_to_end_us`, `generation_us` and `load_to_generation_us`.
+Metrics are `end_to_end_us`, `generation_us`, `load_to_generation_us`,
+`first_audio_us` and `duration_ratio` ([speech servers](#speech-servers)).
 Limits are positive `run_deadline_ms`, `setup_deadline_ms`, `output_bytes`,
 `stdout_bytes` and `stderr_bytes`.
 
@@ -54,13 +57,13 @@ duration. `audio: true` requires an audio track with nonzero samples, sample byt
 and media duration; `false` requires its absence. Expectations use the request
 bounds and exact equality. WAV and MP4 media durations round down to whole
 microseconds.
-At least one output is required. The declared set must equal the output placeholders
+CLI runners require at least one output. The declared set must equal the output placeholders
 used in sample argv. Setup arguments may use only declared output placeholders
 but need not use any. `{output}` occurs at most once in each argv; samples with
 multiple images require only `{output_dir}`. The file extension comes from the
 `output` declaration, not the directory declaration.
 
-The per-arm runner owns `id`, `program`, `args`, `env`, `execution`, `cache`,
+The per-arm CLI runner owns `id`, `program`, `args`, `env`, `execution`, `cache`,
 `pins`, optional `cwd` and optional `setup`. `execution` is `in-process`,
 `delegates-to-resident-service` or `unknown`. Programs must be executable regular
 files; relative paths resolve against the invoking directory, not `cwd`, without
@@ -214,7 +217,7 @@ repeat. These observations are descriptive, not a comparison verdict.
 Byte-identical MP4 output requires bit-exact muxing, including stable movie-header
 creation times.
 Each reported run includes `realtime_factor`: end-to-end time divided by checked
-WAV duration, with values below one meaning faster than real time.
+audio duration, with values below one meaning faster than real time.
 `frames_per_second_end_to_end` is checked video frames per second of end-to-end
 time. Rates are null for other modalities, ineligible runs and zero durations.
 These descriptive values add no gates.
@@ -278,6 +281,86 @@ unavailable if either arm lacks eligible samples for the seed or is
 nondeterministic.
 Exit codes are **0** PASS, **1** ERROR/INVALID, **2** INCONCLUSIVE and
 **3** REGRESSION.
+
+## Speech servers
+
+A `media-speech-server-v1` runner measures an OpenAI-style
+`POST /v1/audio/speech` server that is already running; the Grill never starts,
+stops or configures it. The capture's `--deployment`
+[declaration](README.md#deployment-declarations-and-privacy) identifies the
+server build, and receipts record `execution: delegates-to-resident-service`.
+
+The runner declares `id`, `endpoint`, `model`, optional `voice`,
+`response_format` (`wav` or `pcm`), `stream` and, exactly for `pcm`, `pcm` with
+positive `channels` and `sample_bytes`; `stream: true` requires `pcm`. The
+endpoint uses HTTPS, or plain HTTP to a literal loopback address; no credentials
+are sent. The workload has `modality: "audio"` and `outputs: []`, and its
+requests accept only `prompt`, `seeds` and the expected reply `sample_rate`.
+Each sample posts JSON with `model`, `input` (the prompt), `response_format`,
+`voice` when declared and `"stream": true` when streaming. Seeds are not sent;
+they only schedule samples and group determinism. Preflight and each reservation
+record the exact body.
+
+Capture sends samples serially through one reused HTTP/1.1 client without
+proxies, redirects or retries. `end_to_end_us` runs from dispatch to the end of
+the reply body; for streamed 200 replies `first_audio_us` stops at the first body
+byte. `run_deadline_ms` bounds each request and `output_bytes` the retained
+`body.bin`; the other process limits are unused but must be positive. Each run
+retains the status, every response header, the body hash and any deadline,
+transport or cancellation outcome. Audio duration comes from the body: WAV through
+the checks above, PCM as whole frames of `channels × sample_bytes` at the request
+rate.
+
+Failed samples are retained, never retried, and ineligible with `http_status`
+(not 200), `finish_not_stop` (an `X-Finish-Reason` header other than `stop`; no
+header is accepted), `partial_frame`, `output_invalid` or `sample_rate_mismatch`
+(WAV), `output_missing` (no audio), `output_oversized`, `deadline_exceeded`,
+`transport_failed` or `cancelled`. Inspect rechecks body hashes and re-derives
+audio and reasons from the retained status, headers and body.
+
+`first_audio_us` gates are lower-is-better and admitted only for a streaming
+speech runner, so every measured sample of every arm is streamed.
+`duration_ratio` divides each eligible measured sample's audio duration by the
+median A+A2 duration for the same cell and seed. Its gate, admitted for audio
+workloads, applies the envelope rule in both directions with `max_adverse_bps` as
+the allowed deviation, so shortened and stretched speech both regress. Arm
+summaries report `duration_ratio_bps`, floored for display. Cross-arm hash
+equality compares reply bodies.
+
+For example, streamed 16-bit mono PCM at 44.1 kHz (adjust the endpoint):
+
+```json
+{"kind": "media-speech-server-v1", "version": 1, "id": "drama",
+ "endpoint": "http://127.0.0.1:8000/v1/audio/speech",
+ "model": "fishaudio/drama-3", "response_format": "pcm", "stream": true,
+ "pcm": {"channels": 1, "sample_bytes": 2}}
+```
+
+```json
+{"kind": "media-workload-v1", "version": 1, "name": "speech-first-audio",
+ "modality": "audio",
+ "request": {"prompt": "The quick brown fox jumps over the lazy dog.",
+             "seeds": [1], "sample_rate": 44100},
+ "outputs": [],
+ "cells": [{"id": "short", "warmup_runs": 2, "measured_runs": 10}],
+ "slots": [{"id": "a", "arm": "a"}, {"id": "b", "arm": "b"}, {"id": "a2", "arm": "a2"}],
+ "limits": {"run_deadline_ms": 60000, "setup_deadline_ms": 1,
+            "output_bytes": 67108864, "stdout_bytes": 1, "stderr_bytes": 1},
+ "gates": [
+   {"cell": "short", "metric": "first_audio_us", "max_adverse_bps": 500, "max_reference_spread_bps": 2000},
+   {"cell": "short", "metric": "end_to_end_us", "max_adverse_bps": 500, "max_reference_spread_bps": 2000},
+   {"cell": "short", "metric": "duration_ratio", "max_adverse_bps": 1000, "max_reference_spread_bps": 2000}]}
+```
+
+Capture `a` with the reference server and its deployment declaration, restart the
+server as the candidate for `b`, return to the reference for `a2`, then compare:
+
+```text
+grill-perf media capture --workload W.json --runner R.json --deployment A.json --slot a --out a
+grill-perf media capture --workload W.json --runner R.json --deployment B.json --slot b --out b
+grill-perf media capture --workload W.json --runner R.json --deployment A.json --slot a2 --out a2
+grill-perf media compare --a a --b b --a2 a2
+```
 
 ## Private evidence
 

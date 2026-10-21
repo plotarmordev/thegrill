@@ -1,4 +1,5 @@
 pub(super) mod compare;
+pub(super) mod speech;
 use super::cache::{self, Observation};
 use super::*;
 use crate::{
@@ -11,6 +12,13 @@ use std::{
 };
 
 const CLAIM: &str = "collector-observed-fresh-process-wall-time-and-container-checked-outputs-not-attested-execution-or-quality";
+const SPEECH_CLAIM: &str = "collector-observed-http-reply-time-and-framing-checked-audio-not-attested-execution-or-quality";
+fn claim(runner: &Runner) -> &'static str {
+    match runner {
+        Runner::Cli(_) => CLAIM,
+        Runner::Speech(_) => SPEECH_CLAIM,
+    }
+}
 const TOP_FILES: [&str; 7] = [
     "workload.json",
     "runner.json",
@@ -46,7 +54,8 @@ struct Receipt {
     workload_typed_sha256: String,
     runner_sha256: String,
     deployment_sha256: String,
-    program: Program,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    program: Option<Program>,
     setup_program: Option<Program>,
     execution: Execution,
     markers: Option<markers::Transport>,
@@ -114,6 +123,11 @@ enum Reason {
     CaptureFailed,
     CacheMutatedDuringMeasurement,
     CacheObservationIncomplete,
+    HttpStatus,
+    FinishNotStop,
+    PartialFrame,
+    SampleRateMismatch,
+    TransportFailed,
 }
 #[derive(Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -210,7 +224,10 @@ struct Run {
     cell: String,
     phase: Phase,
     seed: u64,
-    process: ProcessRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process: Option<ProcessRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply: Option<speech::Reply>,
     markers: Option<markers::Markers>,
     eligible: bool,
     outputs: Vec<RetainedOutput>,
@@ -218,6 +235,22 @@ struct Run {
     details: Vec<String>,
     cache_after: Vec<Observation>,
     cache_mutated_during_measurement: Option<bool>,
+}
+impl Run {
+    // Inspect admits exactly one of the process and reply records for the runner kind.
+    fn end_to_end_us(&self) -> u64 {
+        match (&self.process, &self.reply) {
+            (Some(process), _) => process.end_to_end_us,
+            (None, Some(reply)) => reply.end_to_end_us,
+            (None, None) => 0,
+        }
+    }
+    fn cancelled(&self) -> bool {
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.status == Status::Cancelled)
+            || self.reply.as_ref().is_some_and(speech::Reply::cancelled)
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -270,6 +303,7 @@ struct CellSummary {
     eligible: usize,
     ineligible_by_reason: BTreeMap<Reason, usize>,
     end_to_end_us: Option<Summary>,
+    first_audio_us: Option<Summary>,
     markers_by_status: BTreeMap<markers::Status, usize>,
     generation_us: Option<Summary>,
     load_to_generation_us: Option<Summary>,
@@ -304,19 +338,24 @@ fn json_digest(value: &impl Serialize) -> Result<String> {
         &serde_json::to_vec(value).map_err(|error| error.to_string())?,
     ))
 }
-fn reservation(sample: &Scheduled<'_>, plan: &Plan, root: &Path) -> Result<Reservation> {
+fn reservation(
+    sample: &Scheduled<'_>,
+    runner: &Cli,
+    workload: &Workload,
+    root: &Path,
+) -> Result<Reservation> {
     Ok(Reservation {
         cell: sample.cell.id.clone(),
         phase: sample.phase,
         seed: sample.seed,
         args: render(
-            &plan.runner.args,
+            &runner.args,
             sample.request,
             sample.seed,
             &root.join(sample.directory()),
-            &plan.workload,
+            workload,
         )?,
-        env: plan.runner.env.clone(),
+        env: runner.env.clone(),
     })
 }
 #[derive(Serialize)]
@@ -334,7 +373,11 @@ struct Rates {
 }
 
 fn produced(run: &Run) -> (u128, u128) {
-    let mut audio_us = 0;
+    let mut audio_us = run
+        .reply
+        .as_ref()
+        .and_then(|reply| reply.audio.as_ref())
+        .map_or(0, |audio| u128::from(audio.duration_us));
     let mut frames = 0;
     for output in &run.outputs {
         let validation = &output.validation;
@@ -350,7 +393,7 @@ fn rates<'a>(runs: impl Iterator<Item = &'a Run>) -> Rates {
     let (mut elapsed_us, mut audio_us, mut frames) = (0u128, 0u128, 0u128);
     for run in runs.filter(|run| run.eligible) {
         let (audio, video) = produced(run);
-        elapsed_us += u128::from(run.process.end_to_end_us);
+        elapsed_us += u128::from(run.end_to_end_us());
         audio_us += audio;
         frames += video;
     }
@@ -666,6 +709,7 @@ fn reason_for(status: Status) -> Option<Reason> {
 
 struct Session<'a> {
     plan: &'a Plan,
+    runner: &'a Cli,
     receipt: &'a Receipt,
     receipt_sha256: &'a str,
     guard: &'a Guard,
@@ -683,7 +727,6 @@ impl Session<'_> {
             .map(std::ffi::OsString::from)
             .collect::<Vec<_>>();
         let env = self
-            .plan
             .runner
             .env
             .iter()
@@ -746,7 +789,7 @@ impl Session<'_> {
             "reservation.json",
             &SetupReservation {
                 args: args.clone(),
-                env: self.plan.runner.env.clone(),
+                env: self.runner.env.clone(),
             },
         )?;
         let mut process = self.launch(
@@ -773,11 +816,11 @@ impl Session<'_> {
     }
     fn sample(&self, root: &Path, sample: &Scheduled<'_>, previous: &[Observation]) -> Result<Run> {
         let dir = root.join(sample.directory());
-        prepare_directory(&dir, &self.plan.runner.args)?;
-        let reservation = reservation(sample, self.plan, root)?;
+        prepare_directory(&dir, &self.runner.args)?;
+        let reservation = reservation(sample, self.runner, &self.plan.workload, root)?;
         evidence::publish(&dir, "reservation.json", &reservation)?;
         let mut process = self.launch(
-            &self.receipt.program,
+            self.receipt.program.as_ref().ok_or("missing program")?,
             &reservation.args,
             self.plan.workload.limits.run_deadline_ms,
             &dir,
@@ -786,7 +829,7 @@ impl Session<'_> {
             &dir,
             &self.plan.workload,
             sample.request,
-            &self.plan.runner.args,
+            &self.runner.args,
             false,
         )?;
         demote_outputs(&mut process, &outputs.reasons);
@@ -809,11 +852,11 @@ impl Session<'_> {
             eligible: process.status == Status::Complete
                 && cache_mutated_during_measurement == Some(false),
             markers: self
-                .plan
                 .runner
                 .markers
                 .map(|_| markers::collect(&dir, process.end_to_end_us)),
-            process,
+            process: Some(process),
+            reply: None,
             outputs: outputs.retained,
             reasons: outputs.reasons,
             details: outputs.details,
@@ -860,24 +903,25 @@ fn make_receipt(
     root: &Path,
     started_unix_ms: u64,
 ) -> Result<Receipt> {
-    Ok(Receipt {
+    let mut receipt = Receipt {
         version: 1,
         kind: "media-capture-v1".into(),
-        claim: CLAIM.into(),
+        claim: claim(&plan.runner).into(),
         support: SUPPORT.into(),
         slot,
         workload_sha256: admitted.workload_sha256,
         workload_typed_sha256: admitted.workload_typed_sha256,
         runner_sha256: admitted.runner_sha256,
         deployment_sha256: evidence::digest(deployment),
-        program: admitted.program,
-        setup_program: admitted.setup_program,
-        execution: plan.runner.execution,
-        markers: plan.runner.markers,
-        env: admitted.env,
-        cwd: admitted.cwd,
-        cache_declared_state: plan.runner.cache.declared_state,
-        cache_paths: admitted.cache_paths,
+        // A speech server runs outside the capture: no program, environment or caches.
+        program: None,
+        setup_program: None,
+        execution: Execution::DelegatesToResidentService,
+        markers: None,
+        env: BTreeMap::new(),
+        cwd: None,
+        cache_declared_state: CacheState::Unknown,
+        cache_paths: Vec::new(),
         collector: Collector {
             version: env!("CARGO_PKG_VERSION").into(),
             source: env!("GRILL_PERF_SOURCE").into(),
@@ -891,7 +935,34 @@ fn make_receipt(
         },
         started_unix_ms,
         projection_root: root.into(),
-    })
+    };
+    if let Admitted::Cli {
+        execution,
+        markers,
+        program,
+        setup_program,
+        env,
+        cwd,
+        cache_paths,
+        cache_declared_state,
+        ..
+    } = admitted.runner
+    {
+        receipt.program = Some(program);
+        receipt.setup_program = setup_program;
+        receipt.execution = execution;
+        receipt.markers = markers;
+        receipt.env = env;
+        receipt.cwd = cwd;
+        receipt.cache_declared_state = cache_declared_state;
+        receipt.cache_paths = cache_paths;
+    }
+    Ok(receipt)
+}
+
+enum Sampler<'a> {
+    Cli(Session<'a>),
+    Speech(speech::Session<'a>),
 }
 
 pub(super) fn capture(
@@ -935,18 +1006,29 @@ pub(super) fn capture(
         "cache-before.json",
         &cache::observe(&receipt.cache_paths),
     )?;
-    let session = Session {
-        plan: &plan,
-        receipt: &receipt,
-        receipt_sha256: &receipt_sha256,
-        guard: &guard,
+    let sampler = match &plan.runner {
+        Runner::Cli(runner) => Sampler::Cli(Session {
+            plan: &plan,
+            runner,
+            receipt: &receipt,
+            receipt_sha256: &receipt_sha256,
+            guard: &guard,
+        }),
+        Runner::Speech(server) => Sampler::Speech(speech::Session::new(
+            server,
+            &plan.workload,
+            &receipt_sha256,
+        )?),
     };
-    let setup = plan
-        .runner
-        .setup
-        .as_ref()
-        .map(|setup| session.setup(&root, setup))
-        .transpose()?;
+    let setup = match &sampler {
+        Sampler::Cli(session) => session
+            .runner
+            .setup
+            .as_ref()
+            .map(|setup| session.setup(&root, setup))
+            .transpose()?,
+        Sampler::Speech(_) => None,
+    };
     let after_setup = cache::observe(&receipt.cache_paths);
     evidence::publish(&root, "cache-after-setup.json", &after_setup)?;
     let setup_failed = setup
@@ -958,7 +1040,10 @@ pub(super) fn capture(
             let previous = runs
                 .last()
                 .map_or(after_setup.as_slice(), |run| &run.cache_after);
-            runs.push(session.sample(&root, &sample, previous)?);
+            runs.push(match &sampler {
+                Sampler::Cli(session) => session.sample(&root, &sample, previous)?,
+                Sampler::Speech(session) => session.sample(&root, &sample)?,
+            });
             pause(sample.cell.pause_between_runs_ms);
         }
     }
@@ -1164,28 +1249,38 @@ fn output_counts_match(
         .zip(&workload.outputs)
         .all(|(count, output)| *count == expected_outputs(output, request, args, setup))
 }
-fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Result<()> {
-    if run.markers.is_some() != plan.runner.markers.is_some() {
+fn verify_run(
+    dir: &Path,
+    run: &Run,
+    sample: &Scheduled<'_>,
+    runner: &Cli,
+    workload: &Workload,
+) -> Result<()> {
+    let process = run
+        .process
+        .as_ref()
+        .filter(|_| run.reply.is_none())
+        .ok_or("run record does not match its runner kind")?;
+    if run.markers.is_some() != runner.markers.is_some() {
         return Err("marker record declaration mismatch".into());
     }
     if run
         .markers
         .as_ref()
-        .is_some_and(|record| *record != markers::collect(dir, run.process.end_to_end_us))
+        .is_some_and(|record| *record != markers::collect(dir, process.end_to_end_us))
     {
         return Err("retained evidence hash mismatch: markers".into());
     }
-    let workload = &plan.workload;
     verify_process(
         dir,
-        &run.process,
+        process,
         &workload.limits,
         workload.limits.run_deadline_ms,
     )?;
     let counts = verify_outputs(dir, &run.outputs, workload)?;
-    let eligible = run.process.status == Status::Complete
+    let eligible = process.status == Status::Complete
         && run.reasons.is_empty()
-        && output_counts_match(&counts, workload, sample.request, &plan.runner.args, false)
+        && output_counts_match(&counts, workload, sample.request, &runner.args, false)
         && run.outputs.iter().all(|output| output.validation.valid());
     if run.eligible != eligible {
         return Err("sample eligibility mismatch".into());
@@ -1200,27 +1295,40 @@ fn verify_run(dir: &Path, run: &Run, sample: &Scheduled<'_>, plan: &Plan) -> Res
             return Err("cache eligibility reason mismatch".into());
         }
     }
-    if run.cell != sample.cell.id || run.phase != sample.phase || run.seed != sample.seed {
-        return Err("sample schedule mismatch".into());
-    }
     Ok(())
 }
 
 fn verify_receipt(receipt: &Receipt, plan: &Plan, deployment: &[u8]) -> Result<Deployment> {
-    if receipt.kind != "media-capture-v1"
+    let declared = match &plan.runner {
+        Runner::Cli(runner) => {
+            receipt.program.is_some()
+                && receipt.execution == runner.execution
+                && receipt.markers == runner.markers
+                && receipt.env == runner.env
+                && receipt.cache_declared_state == runner.cache.declared_state
+                && receipt.setup_program.is_some() == runner.setup.is_some()
+        }
+        Runner::Speech(_) => {
+            receipt.program.is_none()
+                && receipt.setup_program.is_none()
+                && receipt.execution == Execution::DelegatesToResidentService
+                && receipt.markers.is_none()
+                && receipt.env.is_empty()
+                && receipt.cwd.is_none()
+                && receipt.cache_declared_state == CacheState::Unknown
+                && receipt.cache_paths.is_empty()
+        }
+    };
+    if !declared
+        || receipt.kind != "media-capture-v1"
         || receipt.version != 1
         || receipt.support != SUPPORT
-        || receipt.claim != CLAIM
+        || receipt.claim != claim(&plan.runner)
         || receipt.workload_sha256 != evidence::digest(&plan.workload_bytes)
         || receipt.workload_typed_sha256 != json_digest(&plan.workload)?
         || receipt.runner_sha256 != evidence::digest(&plan.runner_bytes)
         || receipt.deployment_sha256 != evidence::digest(deployment)
         || !plan.workload.slots.contains(&receipt.slot)
-        || receipt.execution != plan.runner.execution
-        || receipt.markers != plan.runner.markers
-        || receipt.env != plan.runner.env
-        || receipt.cache_declared_state != plan.runner.cache.declared_state
-        || receipt.setup_program.is_some() != plan.runner.setup.is_some()
     {
         return Err("media receipt declaration mismatch".into());
     }
@@ -1234,7 +1342,12 @@ fn inspect_setup(
     receipt: &Receipt,
     manifest: &Manifest,
 ) -> Result<Option<SetupRecord>> {
-    let Some(setup) = &plan.runner.setup else {
+    let Runner::Cli(
+        runner @ Cli {
+            setup: Some(setup), ..
+        },
+    ) = &plan.runner
+    else {
         return Ok(None);
     };
     let reservation: SetupReservation = verified_json(root, "setup/reservation.json", manifest)?;
@@ -1248,7 +1361,7 @@ fn inspect_setup(
     if reservation
         != (SetupReservation {
             args,
-            env: plan.runner.env.clone(),
+            env: runner.env.clone(),
         })
     {
         return Err("setup reservation projection mismatch".into());
@@ -1317,7 +1430,7 @@ fn load(root: &Path) -> Result<Loaded> {
     if manifest.runs > schedule(&plan.workload).count() {
         return Err("capture run count exceeds plan".into());
     }
-    let expected_names = manifest_names(manifest.runs, plan.runner.setup.is_some())
+    let expected_names = manifest_names(manifest.runs, plan.runner.setup().is_some())
         .into_iter()
         .collect::<BTreeSet<_>>();
     if manifest.files.keys().cloned().collect::<BTreeSet<_>>() != expected_names {
@@ -1341,16 +1454,32 @@ fn load(root: &Path) -> Result<Loaded> {
     let mut runs: Vec<Run> = Vec::with_capacity(expected_runs);
     for sample in schedule(&plan.workload).take(expected_runs) {
         let prefix = sample.directory();
-        let reserved: Reservation =
-            verified_json(root, &format!("{prefix}/reservation.json"), &manifest)?;
-        if reserved != reservation(&sample, &plan, &receipt.projection_root)? {
+        let reserved = format!("{prefix}/reservation.json");
+        let projected = match &plan.runner {
+            Runner::Cli(runner) => {
+                verified_json::<Reservation>(root, &reserved, &manifest)?
+                    == reservation(&sample, runner, &plan.workload, &receipt.projection_root)?
+            }
+            Runner::Speech(server) => {
+                verified_json::<speech::Reservation>(root, &reserved, &manifest)?
+                    == server.reservation(&sample)?
+            }
+        };
+        if !projected {
             return Err("sample reservation projection mismatch".into());
         }
         let run: Run = verified_json(root, &format!("{prefix}/run.json"), &manifest)?;
         if &run.receipt_sha256 != receipt_sha256 {
             return Err("run record is bound to a different capture receipt".into());
         }
-        verify_run(&root.join(prefix), &run, &sample, &plan)?;
+        if run.cell != sample.cell.id || run.phase != sample.phase || run.seed != sample.seed {
+            return Err("sample schedule mismatch".into());
+        }
+        let dir = root.join(prefix);
+        match &plan.runner {
+            Runner::Cli(runner) => verify_run(&dir, &run, &sample, runner, &plan.workload)?,
+            Runner::Speech(server) => server.verify(&dir, &run, &sample, &plan.workload.limits)?,
+        }
         let previous = runs
             .last()
             .map_or(after_setup.as_slice(), |run| &run.cache_after);
@@ -1361,9 +1490,7 @@ fn load(root: &Path) -> Result<Loaded> {
         }
         runs.push(run);
     }
-    let cancelled = runs
-        .iter()
-        .any(|run| run.process.status == Status::Cancelled)
+    let cancelled = runs.iter().any(Run::cancelled)
         || setup
             .as_ref()
             .is_some_and(|setup| setup.process.status == Status::Cancelled);
@@ -1375,7 +1502,7 @@ fn load(root: &Path) -> Result<Loaded> {
     }
     let process_us = runs
         .iter()
-        .map(|run| u128::from(run.process.end_to_end_us))
+        .map(|run| u128::from(run.end_to_end_us()))
         .sum::<u128>()
         + setup
             .as_ref()
@@ -1426,7 +1553,7 @@ fn inspection(
     Inspection {
         version: 1,
         kind: "media-inspection-v1".into(),
-        claim: CLAIM.into(),
+        claim: receipt.claim.clone(),
         support: SUPPORT.into(),
         status,
         execution: receipt.execution,
@@ -1480,6 +1607,7 @@ fn hashes_by_seed<'a>(runs: impl Iterator<Item = &'a Run>) -> BTreeMap<u64, Vec<
             run.outputs
                 .iter()
                 .map(|output| output.sha256.as_str())
+                .chain(run.reply.as_ref().map(|reply| reply.body.sha256.as_str()))
                 .collect(),
         );
     }
@@ -1500,9 +1628,16 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
     let times = measured
         .iter()
         .filter(|run| run.eligible)
-        .map(|run| run.process.end_to_end_us)
+        .map(|run| run.end_to_end_us())
         .collect::<Vec<_>>();
     let end_to_end_us = summary(&times);
+    let first_audio_us = summary(
+        &measured
+            .iter()
+            .filter(|run| run.eligible)
+            .filter_map(|run| run.reply.as_ref()?.first_audio_us)
+            .collect::<Vec<_>>(),
+    );
     let marker_summary = |metric| {
         summary(
             &measured
@@ -1542,6 +1677,7 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
         eligible: times.len(),
         ineligible_by_reason: reasons,
         end_to_end_us,
+        first_audio_us,
         markers_by_status,
         generation_us,
         load_to_generation_us,

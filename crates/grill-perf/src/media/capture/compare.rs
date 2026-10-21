@@ -35,6 +35,7 @@ struct ArmSummary {
     seconds_per_image: Option<f64>,
     images_per_second_end_to_end: Option<f64>,
     images_per_second_generation: Option<f64>,
+    duration_ratio_bps: Option<Summary>,
     #[serde(flatten)]
     rates: Rates,
 }
@@ -59,17 +60,12 @@ struct GateResult {
 }
 
 fn same_runner(a: &Loaded, b: &Loaded) -> bool {
+    fn identity(program: Option<&Program>) -> Option<(&PathBuf, &String)> {
+        program.map(|program| (&program.declared_path, &program.resolved_sha256))
+    }
     a.plan.runner_bytes == b.plan.runner_bytes
-        && a.receipt.program.declared_path == b.receipt.program.declared_path
-        && a.receipt.program.resolved_sha256 == b.receipt.program.resolved_sha256
-        && a.receipt
-            .setup_program
-            .as_ref()
-            .map(|program| (&program.declared_path, &program.resolved_sha256))
-            == b.receipt
-                .setup_program
-                .as_ref()
-                .map(|program| (&program.declared_path, &program.resolved_sha256))
+        && identity(a.receipt.program.as_ref()) == identity(b.receipt.program.as_ref())
+        && identity(a.receipt.setup_program.as_ref()) == identity(b.receipt.setup_program.as_ref())
         && a.deployment == b.deployment
 }
 
@@ -114,7 +110,7 @@ fn admit(captures: &[Loaded], arms: &[Arm]) -> Result<()> {
     Ok(())
 }
 
-fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
+fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run], ratios: &[Rational]) -> ArmSummary {
     let samples = summarize(cell, runs.iter().copied());
     let images = cell
         .request
@@ -138,6 +134,16 @@ fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
             .filter(|us| *us > 0.0)
             .zip(images)
             .map(|(us, images)| images * 1_000_000.0 / us),
+        // Display only, floored to whole basis points; gates use the exact ratios.
+        duration_ratio_bps: summary(
+            &ratios
+                .iter()
+                .map(|ratio| {
+                    let bps = u128::from(ratio.numerator) * 10_000 / u128::from(ratio.denominator);
+                    u64::try_from(bps).unwrap_or(u64::MAX)
+                })
+                .collect::<Vec<_>>(),
+        ),
         rates: rates(
             runs.iter()
                 .copied()
@@ -145,6 +151,42 @@ fn arm_summary(cell: &Cell, workload: &Workload, runs: &[&Run]) -> ArmSummary {
         ),
         samples,
     }
+}
+
+fn eligible_measured<'a>(runs: &[&'a Run]) -> impl Iterator<Item = &'a Run> {
+    runs.iter()
+        .copied()
+        .filter(|run| run.phase == Phase::Measured && run.eligible)
+}
+
+/// Each eligible measured sample's audio duration over the reference median for its seed.
+fn duration_ratios(reference: &[&Run], runs: &[&Run]) -> Vec<Rational> {
+    let mut durations = BTreeMap::<u64, Vec<u128>>::new();
+    for run in eligible_measured(reference) {
+        durations.entry(run.seed).or_default().push(produced(run).0);
+    }
+    let medians = durations
+        .into_iter()
+        .map(|(seed, mut values)| {
+            values.sort_unstable();
+            let middle = values.len() / 2;
+            let median = if values.len() % 2 == 1 {
+                (values[middle], 1)
+            } else {
+                (values[middle - 1] + values[middle], 2)
+            };
+            (seed, median)
+        })
+        .collect::<BTreeMap<_, _>>();
+    eligible_measured(runs)
+        .filter_map(|run| {
+            let (sum, count) = medians.get(&run.seed)?;
+            Some(Rational {
+                numerator: u64::try_from(produced(run).0 * count).ok()?,
+                denominator: u64::try_from(*sum).ok().filter(|sum| *sum > 0)?,
+            })
+        })
+        .collect()
 }
 
 fn hash_equality(reference: &[&Run], candidate: &[&Run]) -> Vec<HashEquality> {
@@ -195,25 +237,25 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
                 .filter(|run| run.cell == gate.cell),
         );
     }
-    let values = arms.each_ref().map(|runs| {
-        runs.iter()
-            .filter(|run| run.phase == Phase::Measured && run.eligible)
-            .filter_map(|run| match gate.metric {
-                Metric::EndToEnd => Some(Rational {
-                    numerator: run.process.end_to_end_us,
-                    denominator: 1,
-                }),
-                metric => run
-                    .markers
-                    .as_ref()?
-                    .delta_ns(metric)
-                    .map(|numerator| Rational {
-                        numerator,
-                        denominator: 1000,
-                    }),
-            })
-            .collect::<Vec<_>>()
-    });
+    let ratios = arms.each_ref().map(|runs| duration_ratios(&arms[0], runs));
+    let values = match gate.metric {
+        Metric::DurationRatio => ratios.clone(),
+        metric => arms.each_ref().map(|runs| {
+            eligible_measured(runs)
+                .filter_map(|run| match metric {
+                    Metric::EndToEnd => Some((run.end_to_end_us(), 1).into()),
+                    Metric::FirstAudio => {
+                        run.reply.as_ref()?.first_audio_us.map(|us| (us, 1).into())
+                    }
+                    marker => run
+                        .markers
+                        .as_ref()?
+                        .delta_ns(marker)
+                        .map(|numerator| (numerator, 1000).into()),
+                })
+                .collect::<Vec<_>>()
+        }),
+    };
     let mut result = GateResult {
         gate: gate.clone(),
         outcome: Outcome::Inconclusive,
@@ -221,8 +263,8 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
         reference: None,
         candidate: None,
         adverse_bounds: None,
-        reference_summary: arm_summary(cell, workload, &arms[0]),
-        candidate_summary: arm_summary(cell, workload, &arms[1]),
+        reference_summary: arm_summary(cell, workload, &arms[0], &ratios[0]),
+        candidate_summary: arm_summary(cell, workload, &arms[1], &ratios[1]),
         cross_arm_hash_equality: hash_equality(&arms[0], &arms[1]),
     };
     match (envelope::range(&values[0]), envelope::range(&values[1])) {
@@ -256,24 +298,46 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
                 != values.len()
         })
     {
-        result.reason = Some("markers_unavailable".into());
+        result.reason = Some(
+            match gate.metric {
+                Metric::Generation | Metric::LoadToGeneration => "markers_unavailable",
+                _ => "audio_unavailable",
+            }
+            .into(),
+        );
         return result;
     }
     let reference = result.reference.expect("at least three reference samples");
     let candidate = result.candidate.expect("at least three candidate samples");
-    match envelope::assess(
-        reference,
-        candidate,
-        gate.max_adverse_bps,
-        gate.max_reference_spread_bps,
-        Direction::LowerBetter,
-    ) {
-        Ok(assessment) => {
-            result.outcome = match assessment.decision {
+    // Shortened and stretched audio are both adverse for the duration ratio.
+    let directions: &[Direction] = if gate.metric == Metric::DurationRatio {
+        &[Direction::LowerBetter, Direction::HigherBetter]
+    } else {
+        &[Direction::LowerBetter]
+    };
+    match directions
+        .iter()
+        .map(|direction| {
+            envelope::assess(
+                reference,
+                candidate,
+                gate.max_adverse_bps,
+                gate.max_reference_spread_bps,
+                *direction,
+            )
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(assessments) => {
+            let decisive = assessments
+                .iter()
+                .find(|assessment| assessment.decision == EnvelopeDecision::Regression)
+                .unwrap_or(&assessments[0]);
+            result.outcome = match decisive.decision {
                 EnvelopeDecision::Pass => Outcome::Pass,
                 EnvelopeDecision::Regression => Outcome::Regression,
             };
-            result.adverse_bounds = Some(assessment.adverse_bounds);
+            result.adverse_bounds = Some(decisive.adverse_bounds);
         }
         Err(reason) => envelope_failure(&mut result, reason),
     }
@@ -281,13 +345,14 @@ fn gate_result(gate: &Gate, captures: &[Loaded]) -> GateResult {
 }
 
 fn matching_pins(a: &Runner, b: &Runner) -> bool {
-    if a.pins.is_empty() || b.pins.is_empty() {
-        return true;
-    }
     fn pins(runner: &Runner) -> BTreeSet<&str> {
-        runner.pins.iter().map(|pin| pin.sha256.as_str()).collect()
+        match runner {
+            Runner::Cli(runner) => runner.pins.iter().map(|pin| pin.sha256.as_str()).collect(),
+            Runner::Speech(_) => BTreeSet::new(),
+        }
     }
-    pins(a) == pins(b)
+    let (a, b) = (pins(a), pins(b));
+    a.is_empty() || b.is_empty() || a == b
 }
 
 pub(in crate::media) fn compare(
