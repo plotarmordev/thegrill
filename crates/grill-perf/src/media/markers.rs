@@ -80,7 +80,7 @@ impl Markers {
         let (start, end) = match metric {
             Metric::Generation => (Name::GenerationStarted, Name::GenerationFinished),
             Metric::LoadToGeneration => (Name::RunnerStarted, Name::GenerationStarted),
-            Metric::EndToEnd => return None,
+            Metric::EndToEnd | Metric::FirstAudio | Metric::DurationRatio => return None,
         };
         let stamp = |name| {
             self.events

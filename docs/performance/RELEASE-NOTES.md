@@ -1,5 +1,15 @@
 # Performance release notes
 
+## Unreleased
+
+- Add a `media-speech-server-v1` runner to `grill-perf media` for an
+  already-running OpenAI-style `POST /v1/audio/speech` server: serial requests,
+  streamed `first_audio_us`, retained reply bodies and headers rechecked offline,
+  a `first_audio_us` gate and a two-sided `duration_ratio` gate against the
+  reference arm. See [Speech servers](MEDIA.md#speech-servers).
+- Verification is limited to a loopback fixture server; no live speech server
+  was measured.
+
 ## Version 0.10.0 — audio, video and runner markers
 
 - Add runner-asserted media markers, exact generation interval gates and offline
