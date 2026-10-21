@@ -287,7 +287,10 @@ fn capture_records_latency_and_declared_decision_rates() {
         report["support"],
         json!("local-unreleased-extension-not-released-v0.6-support")
     );
-    assert_eq!(report["collector"]["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        report["collector"]["version"],
+        json!(env!("CARGO_PKG_VERSION"))
+    );
     assert_eq!(report["protocol"], json!("systemone-v1"));
     assert_eq!(report["clock"]["units"], json!("microseconds"));
     assert_eq!(report["waves"]["planned"], json!(8));
@@ -516,14 +519,9 @@ fn compare_requires_every_declared_slot() {
     assert_eq!(output.status.code(), Some(2));
     let report = stdout_json(&output);
     assert_eq!(report["outcome"], json!("INCONCLUSIVE"));
-    assert!(
-        report["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(
-                "every declared slot, including warmups and failed captures, is required"
-            ))
-    );
+    assert!(report["reasons"].as_array().unwrap().contains(&json!(
+        "every declared slot, including warmups and failed captures, is required"
+    )));
 }
 
 #[test]

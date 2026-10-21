@@ -201,11 +201,9 @@ impl Question {
         }
         let present = match (self.kind, &self.criteria) {
             (QuestionKind::Noul, None) => true,
-            (QuestionKind::Noul, Some(value)) => value
-                .as_object()
-                .is_some_and(|object| {
-                    object.len() == 2 && object.values().all(serde_json::Value::is_string)
-                }),
+            (QuestionKind::Noul, Some(value)) => value.as_object().is_some_and(|object| {
+                object.len() == 2 && object.values().all(serde_json::Value::is_string)
+            }),
             (QuestionKind::Choice, Some(value)) => value.as_object().is_some_and(|object| {
                 !object.is_empty()
                     && object.len() <= CRITERIA_CAP
@@ -512,7 +510,10 @@ fn validate_distribution(
         errors.push(format!("probability_keys_mismatch:{id}"));
         return false;
     }
-    if probabilities.values().any(|value| !probability(Some(value))) {
+    if probabilities
+        .values()
+        .any(|value| !probability(Some(value)))
+    {
         errors.push(format!("invalid_probability:{id}"));
         return false;
     }
@@ -1017,13 +1018,17 @@ async fn dispatch_burst(burst: &Burst<'_>, origin: Instant) -> Result<Vec<Option
                 let Some(joined) = joined else { break; };
                 let raw = joined
                     .map_err(|_| "burst task failed; no success claimed for this burst")?;
-                raws[raw.lane as usize] = Some(raw);
+                let lane = raw.lane as usize;
+                raws[lane] = Some(raw);
             }
         }
     }
     while !tasks.is_empty() {
         match tasks.join_next().await {
-            Some(Ok(raw)) => raws[raw.lane as usize] = Some(raw),
+            Some(Ok(raw)) => {
+                let lane = raw.lane as usize;
+                raws[lane] = Some(raw);
+            }
             Some(Err(_)) => {
                 return Err("burst task failed; no success claimed for this burst".into());
             }
@@ -1102,8 +1107,14 @@ fn assemble(
         responses.push(response);
     }
     let spread = match (
-        attempts.iter().map(|attempt| attempt.dispatch_offset_us).min(),
-        attempts.iter().map(|attempt| attempt.dispatch_offset_us).max(),
+        attempts
+            .iter()
+            .map(|attempt| attempt.dispatch_offset_us)
+            .min(),
+        attempts
+            .iter()
+            .map(|attempt| attempt.dispatch_offset_us)
+            .max(),
     ) {
         (Some(low), Some(high)) => high - low,
         _ => 0,
@@ -1151,7 +1162,11 @@ async fn dispatch(session: &Session<'_>) -> Result<()> {
                 let result = run_burst(&burst, origin, ordinal).await?;
                 ordinal += result.attempts.len() as u32;
                 let requests = result.attempts.len() as u32;
-                let decisions = result.attempts.iter().map(|attempt| attempt.decisions).sum();
+                let decisions = result
+                    .attempts
+                    .iter()
+                    .map(|attempt| attempt.decisions)
+                    .sum();
                 let complete = result
                     .attempts
                     .iter()
@@ -1384,8 +1399,7 @@ fn cell_inspection(loaded: &Loaded, cell: &Cell) -> CellInspection {
         }
         if wave.makespan_us > 0 {
             request_rates.push(f64::from(wave.requests) * 1_000_000.0 / wave.makespan_us as f64);
-            decision_rates
-                .push(f64::from(wave.decisions) * 1_000_000.0 / wave.makespan_us as f64);
+            decision_rates.push(f64::from(wave.decisions) * 1_000_000.0 / wave.makespan_us as f64);
         }
     }
     CellInspection {
@@ -1537,7 +1551,10 @@ fn verify_wave(
         let dir = request_dir(root, attempt.ordinal);
         let retained = evidence::read(&dir.join("body.bin"), REQUEST_CAP)?;
         if retained.len() != entry.bytes || evidence::digest(&retained) != entry.sha256 {
-            return Err(format!("retained request bytes changed in wave {}", wave.index));
+            return Err(format!(
+                "retained request bytes changed in wave {}",
+                wave.index
+            ));
         }
         let response = evidence::read(&dir.join("response.bin"), capture.limits.response_bytes)?;
         if response.len() != attempt.response_bytes
@@ -1629,7 +1646,7 @@ pub fn load(root: &Path) -> Result<Loaded> {
     let mut waves: Vec<Option<Wave>> = vec![None; capture.plan_waves as usize];
     let mut ordinals = BTreeSet::new();
     let mut manifest = format!("{}\n", evidence::digest(&receipt_source));
-    for index in 0..capture.plan_waves as usize {
+    for (index, retained) in waves.iter_mut().enumerate() {
         let path = root.join(format!("wave-{index:06}.json"));
         let bytes = match evidence::read(&path, CAP) {
             Ok(bytes) => bytes,
@@ -1651,7 +1668,7 @@ pub fn load(root: &Path) -> Result<Loaded> {
             }
         }
         manifest.push_str(&format!("{index}:{}\n", evidence::digest(&bytes)));
-        waves[index] = Some(wave);
+        *retained = Some(wave);
     }
     Ok(Loaded {
         plan,
@@ -1839,8 +1856,7 @@ fn reference_binding(arms: &[Vec<Loaded>; 3], report: &mut Comparison) {
         );
     }
     let changed = arms[1].iter().any(|loaded| {
-        loaded.capture.endpoint_sha256 != endpoint
-            || loaded.capture.deployment_sha256 != deployment
+        loaded.capture.endpoint_sha256 != endpoint || loaded.capture.deployment_sha256 != deployment
     });
     if !changed {
         report.outcome = report.outcome.max(Outcome::Inconclusive);
@@ -1865,7 +1881,9 @@ fn exposure(arms: &[Vec<Loaded>; 3], report: &mut Comparison) {
         for wave in waves {
             for attempt in &wave.attempts {
                 if let Some(tokens) = attempt.input_tokens {
-                    seen.entry(attempt.request.clone()).or_default().insert(tokens);
+                    seen.entry(attempt.request.clone())
+                        .or_default()
+                        .insert(tokens);
                 }
             }
         }
@@ -1953,9 +1971,9 @@ pub fn compare(
     }
     if slots.len() != plan.slots.len() {
         report.outcome = report.outcome.max(Outcome::Inconclusive);
-        report.reasons.push(
-            "every declared slot, including warmups and failed captures, is required".into(),
-        );
+        report
+            .reasons
+            .push("every declared slot, including warmups and failed captures, is required".into());
     }
     reference_binding(&arms, &mut report);
     exposure(&arms, &mut report);
