@@ -1,14 +1,28 @@
 # Performance release notes
 
-## Unreleased
+## Version 0.11.0 — speech servers
 
 - Add a `media-speech-server-v1` runner to `grill-perf media` for an
   already-running OpenAI-style `POST /v1/audio/speech` server: serial requests,
   streamed `first_audio_us`, retained reply bodies and headers rechecked offline,
   a `first_audio_us` gate and a two-sided `duration_ratio` gate against the
   reference arm. See [Speech servers](MEDIA.md#speech-servers).
-- Verification is limited to a loopback fixture server; no live speech server
-  was measured.
+
+Verification and limits of this version:
+
+- The speech runner was tested only against a loopback fixture server in the
+  test suite, not a live speech server.
+- A reply without an `X-Finish-Reason` header has an unknown finish reason: the
+  sample stays eligible and inspect and compare count it as
+  `finish_reason_unknown`. Only servers that send the header get the
+  `finish_not_stop` check.
+- Compatibility check: a WAV audio capture with runner markers made with the
+  published 0.10.0 Linux ARM archive inspected successfully with 0.11.0,
+  preserving its evidence digest, all three eligible measured samples and valid
+  markers; the new speech summaries are null. Three such 0.10.0 captures gave
+  identical gate outcomes under both versions (inconclusive: reference spread).
+  This synthetic check does not qualify every historical capture or
+  cross-version comparison.
 
 ## Version 0.10.0 — audio, video and runner markers
 
