@@ -6,21 +6,14 @@ WIP and is not in these archives.
 
 ## Expanded-coverage release
 
-The download commands below select the published **v0.10.0** experimental release.
-It adds audio (WAV) and video (MP4) [media](MEDIA.md) workloads, runner markers
-with generation-time gates, and lets killed descendants close inherited pipes
-until the run deadline. Existing measurements and their meaning are unchanged, and
-v0.9.1 media captures still inspect. Use its exact version/target, checksum and
-build receipt; never substitute a moving branch or local staging hashes. Retain
-earlier published releases and their original pins for historical studies.
-Installing v0.10.0 does not reinterpret old receipts or qualify new backend
-claims.
-
-The speech-server media runner ships from
-[v0.11.0](RELEASE-NOTES.md#version-0110--speech-servers).
-That release is in preparation; the download commands remain pinned to the
-published release above. Use a [source build](#upgrade-rollback-and-source-fallback)
-containing these changes until publication.
+The download commands below select the published **v0.11.0** experimental release.
+It adds a [media](MEDIA.md) runner for OpenAI-style speech servers (time to first
+audio, real-time factor and a duration-ratio gate). Existing measurements and
+their meaning are unchanged, and v0.10.0 media captures still inspect. Use its
+exact version/target, checksum and build receipt; never substitute a moving
+branch or local staging hashes. Retain earlier published releases and their
+original pins for historical studies. Installing v0.11.0 does not reinterpret old
+receipts or qualify new backend claims.
 
 Since 0.2.0, packages also carry the claim map and report template under
 `docs/performance/`, public domain examples under `workloads/`, and the explicit
@@ -37,8 +30,8 @@ verification and real-backend qualification remain separate reported statuses.
 
 ## Obtain, verify, unpack
 
-The published prerelease is [**v0.10.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.10.0),
-from reviewed source `aad5dbc8e15378764ddf7092bbc55f8bbd610fb6`.
+The published prerelease is [**v0.11.0**](https://github.com/plotarmordev/thegrill/releases/tag/v0.11.0),
+from reviewed source `5b21937bde92c17b58b1f2c05ae43515a538fbf3`.
 Use the checksum sidecar and build receipt attached to that release for your
 native target. Never use a moving `latest` pin.
 The archive's bundled guide is the reviewed pre-publication snapshot; this page
@@ -69,8 +62,8 @@ For this release, set the exact version and trusted HTTPS artifact directory,
 then set `TARGET` to your native triple. Use a fresh download directory:
 
 ```sh
-VERSION=0.10.0
-ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.10.0
+VERSION=0.11.0
+ARTIFACT_BASE_URL=https://github.com/plotarmordev/thegrill/releases/download/v0.11.0
 ```
 
 ```sh
