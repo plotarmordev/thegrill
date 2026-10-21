@@ -48,6 +48,7 @@ fn speech_server() -> Server {
         let (delay_ms, frames) = match request["voice"].as_str() {
             Some("slow") => (300, 800),
             Some("short") => (0, 400),
+            Some("long") => (0, 1600),
             _ => (150, 800),
         };
         let pcm = vec![0; frames * 2];
@@ -116,7 +117,7 @@ fn speech_preflight_renders_request_bodies_and_closes_the_contract() {
     for (change, expected) in [
         (
             json!({"endpoint":"http://192.0.2.1/v1/audio/speech"}),
-            "runner.endpoint",
+            "plain HTTP to a literal loopback address",
         ),
         (
             json!({"response_format":"wav"}),
@@ -170,6 +171,13 @@ fn speech_preflight_renders_request_bodies_and_closes_the_contract() {
         .unwrap()
         .remove("sample_rate");
     f.reject("request: missing field `sample_rate`");
+    // The speech input bound counts characters: 4096 two-byte characters fit.
+    f.workload = workload.clone();
+    f.workload["request"]["prompt"] = json!("é".repeat(4096));
+    f.report();
+    f.workload["cells"][0]["request"] =
+        json!({"prompt":"é".repeat(4097),"seeds":[7],"sample_rate":RATE});
+    f.reject("cell c1.request.prompt must be at most 4096 characters");
 }
 
 #[test]
@@ -196,6 +204,8 @@ fn speech_capture_measures_whole_wav_and_streamed_first_audio() {
         json!({"channels":1,"sample_rate":RATE,"duration_us":100_000})
     );
     assert_eq!(reply["body"]["bytes"], 1644);
+    assert!(reply["finish_reason"].is_null());
+    assert_eq!(report["cells"][0]["finish_reason_unknown"], 3);
     let body = fs::read(f.root.path("capture/run-000001/body.bin")).unwrap();
     assert_eq!(reply["body"]["sha256"], super::digest(&body));
     let end_to_end = reply["end_to_end_us"].as_u64().unwrap();
@@ -223,6 +233,8 @@ fn speech_capture_measures_whole_wav_and_streamed_first_audio() {
             .contains(&json!(["x-finish-reason", "stop"]))
     );
     assert_eq!(report["cells"][0]["first_audio_us"]["n"], 3);
+    assert_eq!(reply["finish_reason"], "stop");
+    assert_eq!(report["cells"][0]["finish_reason_unknown"], 0);
     successful(&f.inspect_capture());
 }
 
@@ -258,6 +270,7 @@ fn speech_failures_are_retained_ineligible_and_rechecked_offline() {
         br#"{"error":"refused"}"#
     );
     assert_eq!(report["runs"][1]["reply"]["audio"]["duration_us"], 100_000);
+    assert_eq!(report["runs"][1]["reply"]["finish_reason"], "length");
     assert_eq!(report["runs"][2]["reply"]["body"]["bytes"], 3);
     let slow = &report["runs"][3]["reply"];
     assert_eq!(slow["failure"], "deadline_exceeded");
@@ -297,6 +310,8 @@ fn speech_compare_gates_first_audio_and_two_sided_duration_ratio() {
         ("a2", "a2", "slow"),
         ("b-short", "b", "short"),
         ("a2-again", "a2", "slow"),
+        ("b-long", "b", "long"),
+        ("a2-third", "a2", "slow"),
     ] {
         f.runner["voice"] = json!(voice);
         f.save();
@@ -319,6 +334,7 @@ fn speech_compare_gates_first_audio_and_two_sided_duration_ratio() {
     let [first_audio, ratio] = [&report["gates"][0], &report["gates"][1]];
     assert_eq!(first_audio["outcome"], "PASS");
     assert_eq!(first_audio["reference_summary"]["first_audio_us"]["n"], 6);
+    assert_eq!(first_audio["candidate_summary"]["finish_reason_unknown"], 0);
     assert_eq!(ratio["outcome"], "PASS");
     assert_eq!(
         ratio["candidate_summary"]["duration_ratio_bps"]["min"],
@@ -326,23 +342,29 @@ fn speech_compare_gates_first_audio_and_two_sided_duration_ratio() {
     );
     assert_eq!(ratio["cross_arm_hash_equality"][0]["equal"], true);
 
-    let output = cli()
-        .args(["media", "compare", "--a"])
-        .arg(f.root.path("a"))
-        .arg("--b")
-        .arg(f.root.path("b-short"))
-        .arg("--a2")
-        .arg(f.root.path("a2-again"))
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(3));
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["gates"][0]["outcome"], "PASS");
-    let ratio = &report["gates"][1];
-    assert_eq!(ratio["outcome"], "REGRESSION");
-    assert_eq!(
-        ratio["candidate_summary"]["duration_ratio_bps"]["max"],
-        5_000
-    );
-    assert_eq!(ratio["cross_arm_hash_equality"][0]["equal"], false);
+    // Shortened and stretched speech both regress, whatever the first-audio gain.
+    for (b, a2, ratio_bps) in [
+        ("b-short", "a2-again", 5_000),
+        ("b-long", "a2-third", 20_000),
+    ] {
+        let output = cli()
+            .args(["media", "compare", "--a"])
+            .arg(f.root.path("a"))
+            .arg("--b")
+            .arg(f.root.path(b))
+            .arg("--a2")
+            .arg(f.root.path(a2))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(3));
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["gates"][0]["outcome"], "PASS");
+        let ratio = &report["gates"][1];
+        assert_eq!(ratio["outcome"], "REGRESSION");
+        assert_eq!(
+            ratio["candidate_summary"]["duration_ratio_bps"]["max"],
+            ratio_bps
+        );
+        assert_eq!(ratio["cross_arm_hash_equality"][0]["equal"], false);
+    }
 }

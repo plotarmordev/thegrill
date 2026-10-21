@@ -304,6 +304,8 @@ struct CellSummary {
     ineligible_by_reason: BTreeMap<Reason, usize>,
     end_to_end_us: Option<Summary>,
     first_audio_us: Option<Summary>,
+    /// Eligible measured speech replies without `X-Finish-Reason`; null for CLI runners.
+    finish_reason_unknown: Option<usize>,
     markers_by_status: BTreeMap<markers::Status, usize>,
     generation_us: Option<Summary>,
     load_to_generation_us: Option<Summary>,
@@ -1638,6 +1640,18 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
             .filter_map(|run| run.reply.as_ref()?.first_audio_us)
             .collect::<Vec<_>>(),
     );
+    let finish_reason_unknown = measured.iter().any(|run| run.reply.is_some()).then(|| {
+        measured
+            .iter()
+            .filter(|run| {
+                run.eligible
+                    && run
+                        .reply
+                        .as_ref()
+                        .is_some_and(|reply| reply.finish_reason.is_none())
+            })
+            .count()
+    });
     let marker_summary = |metric| {
         summary(
             &measured
@@ -1678,6 +1692,7 @@ fn summarize<'a>(cell: &Cell, runs: impl Iterator<Item = &'a Run>) -> CellSummar
         ineligible_by_reason: reasons,
         end_to_end_us,
         first_audio_us,
+        finish_reason_unknown,
         markers_by_status,
         generation_us,
         load_to_generation_us,

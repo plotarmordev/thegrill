@@ -295,7 +295,8 @@ The runner declares `id`, `endpoint`, `model`, optional `voice`,
 positive `channels` and `sample_bytes`; `stream: true` requires `pcm`. The
 endpoint uses HTTPS, or plain HTTP to a literal loopback address; no credentials
 are sent. The workload has `modality: "audio"` and `outputs: []`, and its
-requests accept only `prompt`, `seeds` and the expected reply `sample_rate`.
+requests accept only `prompt` (at most 4096 characters), `seeds` and the expected
+reply `sample_rate`.
 Each sample posts JSON with `model`, `input` (the prompt), `response_format`,
 `voice` when declared and `"stream": true` when streaming. Seeds are not sent;
 they only schedule samples and group determinism. Preflight and each reservation
@@ -312,11 +313,14 @@ the checks above, PCM as whole frames of `channels × sample_bytes` at the reque
 rate.
 
 Failed samples are retained, never retried, and ineligible with `http_status`
-(not 200), `finish_not_stop` (an `X-Finish-Reason` header other than `stop`; no
-header is accepted), `partial_frame`, `output_invalid` or `sample_rate_mismatch`
-(WAV), `output_missing` (no audio), `output_oversized`, `deadline_exceeded`,
-`transport_failed` or `cancelled`. Inspect rechecks body hashes and re-derives
-audio and reasons from the retained status, headers and body.
+(not 200), `finish_not_stop` (an `X-Finish-Reason` other than `stop`),
+`partial_frame`, `output_invalid` or `sample_rate_mismatch` (WAV),
+`output_missing` (no audio), `output_oversized`, `deadline_exceeded`,
+`transport_failed` or `cancelled`. Without that header, `finish_reason` is `null`
+(unknown), the sample stays eligible and inspect and compare count it as
+`finish_reason_unknown`, so servers that send the header, such as Drama, get the
+stricter check automatically. Inspect rechecks body hashes and re-derives finish
+reason, audio and reasons from the retained status, headers and body.
 
 `first_audio_us` gates are lower-is-better and admitted only for a streaming
 speech runner, so every measured sample of every arm is streamed.

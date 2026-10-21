@@ -5,6 +5,8 @@ use reqwest::header::{ACCEPT_ENCODING, CONTENT_TYPE, USER_AGENT};
 
 const BODY: &str = "body.bin";
 const FINISH_REASON: &str = "x-finish-reason";
+/// The OpenAI-style speech `input` limit, counted in characters.
+const INPUT_CHARS: usize = 4096;
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -63,6 +65,8 @@ pub(super) struct Reply {
     pub(super) first_audio_us: Option<u64>,
     http_status: Option<u16>,
     headers: Vec<[String; 2]>,
+    /// `X-Finish-Reason` values; null when the server sent none, so the reason is unknown.
+    pub(super) finish_reason: Option<String>,
     pub(super) body: Stream,
     /// Deadline, transport or cancellation outcome that ended the exchange early.
     failure: Option<Reason>,
@@ -79,6 +83,7 @@ impl Reply {
 }
 
 struct Judged {
+    finish_reason: Option<String>,
     audio: Option<crate::wavfile::Checked>,
     wav_failure: Option<crate::wavfile::Failure>,
     reasons: Vec<Reason>,
@@ -123,17 +128,29 @@ impl Server {
         if !w.outputs.is_empty() {
             return Err("outputs must be empty: the reply body is a speech server's output".into());
         }
-        if std::iter::once(&w.request)
-            .chain(w.cells.iter().filter_map(|cell| cell.request.as_ref()))
-            .any(|request| request.negative_prompt.is_some() || request.guidance_milli.is_some())
+        for (context, request) in
+            std::iter::once(("request".to_string(), &w.request)).chain(w.cells.iter().filter_map(
+                |cell| Some((format!("cell {}.request", cell.id), cell.request.as_ref()?)),
+            ))
         {
-            return Err("speech server requests accept only prompt, seeds and sample_rate".into());
+            if request.negative_prompt.is_some() || request.guidance_milli.is_some() {
+                return Err(format!(
+                    "{context}: speech server requests accept only prompt, seeds and sample_rate"
+                ));
+            }
+            if request.prompt.chars().count() > INPUT_CHARS {
+                return Err(format!(
+                    "{context}.prompt must be at most {INPUT_CHARS} characters for a speech server"
+                ));
+            }
         }
         Ok(())
     }
 
     pub(in crate::media) fn url(&self) -> Result<reqwest::Url> {
-        wire::endpoint(&self.endpoint, true).map_err(|error| format!("runner.endpoint: {error}"))
+        wire::endpoint(&self.endpoint, true).map_err(|_| {
+            "runner.endpoint must be a control-free URL of at most 4096 bytes with a host and no credentials, query or fragment, using HTTPS or plain HTTP to a literal loopback address".into()
+        })
     }
 
     pub(in crate::media) fn body(&self, request: &Request) -> Result<String> {
@@ -158,7 +175,14 @@ impl Server {
 
     /// Derives audio and eligibility from retained facts only, so inspect repeats it offline.
     fn judge(&self, reply: &Reply, body: &[u8], sample_rate: u32, deadline_ms: u32) -> Judged {
+        let values = reply
+            .headers
+            .iter()
+            .filter(|[name, _]| name == FINISH_REASON)
+            .map(|[_, value]| value.as_str())
+            .collect::<Vec<_>>();
         let mut judged = Judged {
+            finish_reason: (!values.is_empty()).then(|| values.join(", ")),
             audio: None,
             wav_failure: None,
             reasons: reply.failure.into_iter().collect(),
@@ -173,11 +197,7 @@ impl Server {
         if reply.http_status.is_some_and(|status| status != 200) {
             reasons.push(Reason::HttpStatus);
         }
-        if reply
-            .headers
-            .iter()
-            .any(|[name, value]| name == FINISH_REASON && value != "stop")
-        {
+        if values.iter().any(|value| *value != "stop") {
             reasons.push(Reason::FinishNotStop);
         }
         if reply.failure.is_none() && !reply.body.truncated && reply.http_status == Some(200) {
@@ -253,7 +273,8 @@ impl Server {
             sample_rate(sample.request),
             limits.run_deadline_ms,
         );
-        if reply.audio != judged.audio
+        if reply.finish_reason != judged.finish_reason
+            || reply.audio != judged.audio
             || reply.wav_failure != judged.wav_failure
             || run.reasons != judged.reasons
             || run.eligible != run.reasons.is_empty()
@@ -455,6 +476,7 @@ impl<'a> Session<'a> {
             first_audio_us: exchanged.first_audio_us,
             http_status: exchanged.http_status,
             headers: exchanged.headers,
+            finish_reason: None,
             body: Stream {
                 sha256: evidence::digest(&exchanged.body),
                 bytes: exchanged.body.len(),
@@ -470,6 +492,7 @@ impl<'a> Session<'a> {
             sample_rate(sample.request),
             limits.run_deadline_ms,
         );
+        reply.finish_reason = judged.finish_reason;
         reply.audio = judged.audio;
         reply.wav_failure = judged.wav_failure;
         let run = Run {
