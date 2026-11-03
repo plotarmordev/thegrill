@@ -26,6 +26,8 @@ const POLL_MS: u64 = 10;
 pub enum Command {
     /// Observe an operator-launched process; never launch or restart it.
     Observe(CaptureArgs),
+    /// Build a log-derived capture from an engine launcher's finished startup log.
+    FromLog(LogArgs),
     /// Collect the one declared store request, before the operator's restart.
     Store(CaptureArgs),
     /// Collect the ordered post-restart list, linked to retained store evidence.
@@ -69,12 +71,29 @@ pub struct CaptureArgs {
     #[arg(long)]
     pub out: PathBuf,
 }
+#[derive(Args)]
+pub struct LogArgs {
+    pub plan: PathBuf,
+    #[arg(long)]
+    pub slot: usize,
+    /// The engine's own `grill-startup-v1` lines, retained byte-for-byte.
+    #[arg(long)]
+    pub log: PathBuf,
+    /// Exact launcher source emitting the log contract; not executed.
+    #[arg(long)]
+    pub producer_source: PathBuf,
+    #[arg(long)]
+    pub previous: Option<PathBuf>,
+    #[arg(long)]
+    pub out: PathBuf,
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
     NativeObserved,
     Imported,
     Declared,
+    LogDerived,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +109,7 @@ pub enum Adapter {
     RuntimeAsgiFixtureV1,
     RuntimeAsgiFixtureBootstrapV1,
     UninstrumentedRecipeLogs,
+    EngineLogV1,
 }
 impl Adapter {
     fn runtime(self) -> bool {
@@ -306,6 +326,9 @@ pub struct Plan {
     /// Runtime bridge only: minimum complete observation after ASGI startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_window_us: Option<u64>,
+    /// Engine log adapter only: every rank that must report weight loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_ranks: Option<usize>,
     /// A and A2 must match; B differs only along this explicitly declared setup axis.
     pub setup_axis: String,
     pub setup_sha256: [String; 3],
@@ -427,6 +450,24 @@ impl Plan {
                     "runtime adapter requires a finite post-readiness coverage window".into(),
                 );
             }
+        }
+        // Logs carry no request, cache-state or communication evidence: only ready is gated.
+        match (self.adapter, self.log_ranks) {
+            (Adapter::EngineLogV1, Some(ranks))
+                if (1..=64).contains(&ranks)
+                    && self.study == Study::Startup
+                    && self.gates.iter().all(|g| g.target == Target::Ready)
+                    && self
+                        .states
+                        .iter()
+                        .all(|s| s.required_observed == Temperature::Unknown) => {}
+            (Adapter::EngineLogV1, _) | (_, Some(_)) => {
+                return Err(
+                    "engine log plan requires 1-64 ranks, a startup study, ready gates and unknown states"
+                        .into(),
+                );
+            }
+            _ => (),
         }
         let l = &self.limits;
         if l.total_ms == 0
@@ -684,12 +725,94 @@ pub struct Inspection {
     pub cache_result: Option<CacheResult>,
     pub request_usage: Vec<model::Usage>,
     pub metrics: Option<metrics::Summary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub weight_loads: Vec<WeightLoad>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct DurationSample {
     pub target: Target,
     pub clock: Clock,
     pub duration_us: u64,
+}
+/// One rank's weight-load span on its own host clock.
+#[derive(Debug, Serialize)]
+pub struct WeightLoad {
+    pub rank: usize,
+    pub host: String,
+    pub duration_us: u64,
+}
+#[derive(Debug)]
+struct EngineLog {
+    ready_us: u64,
+    weight_loads: Vec<WeightLoad>,
+}
+const LOG_MARKER: &str = "grill-startup-v1";
+fn decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
+    s.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| s.parse().ok())
+        .flatten()
+}
+/// Strict `grill-startup-v1 <us> <host> <rank> <event>` lines. Hosts keep separate
+/// monotonic clocks, so every span subtracts timestamps from a single host.
+fn parse_engine_log(raw: &[u8], ranks: usize) -> Result<EngineLog> {
+    let text = std::str::from_utf8(raw).map_err(|_| "engine log is not UTF-8")?;
+    let body = text
+        .strip_suffix('\n')
+        .ok_or("engine log must end with a complete line")?;
+    let mut hosts: Vec<Option<&str>> = vec![None; ranks];
+    let mut clocks = std::collections::BTreeMap::new();
+    let mut starts: Vec<Option<u64>> = vec![None; ranks];
+    let mut ended = vec![false; ranks];
+    let mut weight_loads = Vec::with_capacity(ranks);
+    let mut launch = None;
+    let mut ready = None;
+    for (index, line) in body.split('\n').enumerate() {
+        let fail = |reason: &str| format!("engine log line {}: {reason}", index + 1);
+        let fields: Vec<&str> = line.split(' ').collect();
+        let &[LOG_MARKER, time, host, rank, event] = fields.as_slice() else {
+            return Err(fail("unknown line"));
+        };
+        let (Some(time), Some(rank)) = (decimal::<u64>(time), decimal::<usize>(rank)) else {
+            return Err(fail("timestamp and rank must be unsigned decimal"));
+        };
+        if rank >= ranks || !short(host) {
+            return Err(fail("undeclared rank or invalid host"));
+        }
+        if *hosts[rank].get_or_insert(host) != host {
+            return Err(fail("rank changed host"));
+        }
+        let clock = clocks.entry(host).or_insert(time);
+        if time < *clock || ready.is_some() {
+            return Err(fail("host clock regressed or line after engine_ready"));
+        }
+        *clock = time;
+        match (event, launch) {
+            ("launch", None) if rank == 0 => launch = Some(time),
+            ("weights_start", Some(_)) if starts[rank].is_none() => starts[rank] = Some(time),
+            ("weights_end", Some(_)) if !ended[rank] => {
+                let start = starts[rank].ok_or_else(|| fail("weights_end before weights_start"))?;
+                ended[rank] = true;
+                weight_loads.push(WeightLoad {
+                    rank,
+                    host: host.into(),
+                    duration_us: Some(time - start)
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| fail("empty weight-load span"))?,
+                });
+            }
+            ("engine_ready", Some(origin)) if rank == 0 && weight_loads.len() == ranks => {
+                ready = Some(time - origin).filter(|n| *n > 0);
+                ready.ok_or_else(|| fail("empty launch-to-ready span"))?;
+            }
+            _ => return Err(fail("unknown, duplicate or out-of-order event")),
+        }
+    }
+    weight_loads.sort_by_key(|w| w.rank);
+    Ok(EngineLog {
+        ready_us: ready.ok_or("engine log ends before engine_ready")?,
+        weight_loads,
+    })
 }
 struct Loaded {
     plan: Plan,
@@ -1011,13 +1134,82 @@ async fn collect_request(
     })
 }
 
+/// Producer source bytes and collector digest, both checked against the plan pins.
+fn pins(plan: &Plan, producer_source: &Path) -> Result<(Vec<u8>, String)> {
+    let producer = evidence::read(producer_source, CAP)?;
+    if evidence::digest(&producer) != plan.adapter_sha256 {
+        return Err("producer source pin mismatch".into());
+    }
+    let binary = evidence::binary_digest()?;
+    if binary != plan.collector_sha256 {
+        return Err("collector binary pin mismatch".into());
+    }
+    Ok((producer, binary))
+}
+fn predecessor(previous: Option<&Path>, slot: usize, plan_hash: &str) -> Result<Option<String>> {
+    let Some(previous) = previous else {
+        if slot != 0 {
+            return Err("later slot requires --previous retained acquisition".into());
+        }
+        return Ok(None);
+    };
+    let loaded = load(previous)?;
+    if loaded.capture.slot + 1 != slot
+        || loaded.capture.stage == Stage::Store
+        || loaded.capture.plan_sha256 != plan_hash
+    {
+        return Err("previous acquisition is not the preceding declared slot".into());
+    }
+    Ok(Some(loaded.digest))
+}
+
+/// The launcher owns the engine; Grill only retains and replays its finished log.
+pub fn from_log(args: &LogArgs) -> Result<Inspection> {
+    let plan_bytes = evidence::read(&args.plan, CAP)?;
+    let plan: Plan = decode(&plan_bytes)?;
+    plan.validate()?;
+    if args.slot >= plan.slots.len() || plan.adapter != Adapter::EngineLogV1 {
+        return Err("log capture needs a declared slot of an engine_log_v1 plan".into());
+    }
+    let (producer, binary) = pins(&plan, &args.producer_source)?;
+    let plan_hash = evidence::digest(&plan_bytes);
+    let previous_sha256 = predecessor(args.previous.as_deref(), args.slot, &plan_hash)?;
+    let log = evidence::read(&args.log, plan.event_bytes)?;
+    evidence::fresh(&args.out)?;
+    evidence::write(&args.out.join("plan.json"), &plan_bytes)?;
+    evidence::write(&args.out.join("producer.bin"), &producer)?;
+    evidence::write(&args.out.join("events.bin"), &log)?;
+    let capture = Capture {
+        version: 1,
+        kind: "startup-observation-v1".into(),
+        provenance: Provenance::LogDerived,
+        plan_sha256: plan_hash,
+        collector_sha256: binary,
+        slot: args.slot,
+        stage: Stage::Startup,
+        previous_sha256,
+        store_sha256: None,
+        engine: None,
+        cache_server: None,
+        runtime_namespaces: None,
+        events_sha256: evidence::digest(&log),
+        requests: Vec::new(),
+        failures: Vec::new(),
+    };
+    evidence::publish(&args.out, "capture.json", &capture)?;
+    Ok(load(&args.out)?.inspection)
+}
+
 #[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
 pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result<Inspection> {
     let plan_bytes = evidence::read(&args.plan, CAP)?;
     let plan: Plan = decode(&plan_bytes)?;
     plan.validate()?;
     if args.slot >= plan.slots.len()
-        || plan.adapter == Adapter::UninstrumentedRecipeLogs
+        || matches!(
+            plan.adapter,
+            Adapter::UninstrumentedRecipeLogs | Adapter::EngineLogV1
+        )
         || !matches!(
             (&plan.study, stage),
             (Study::Startup, Stage::Startup)
@@ -1026,33 +1218,12 @@ pub fn capture(args: &CaptureArgs, stage: Stage, store: Option<&Path>) -> Result
     {
         return Err("capture stage, slot or native producer is unsupported".into());
     }
-    let producer = evidence::read(&args.producer_source, CAP)?;
-    if evidence::digest(&producer) != plan.adapter_sha256 {
-        return Err("producer source pin mismatch".into());
-    }
-    let binary = evidence::binary_digest()?;
-    if binary != plan.collector_sha256 {
-        return Err("collector binary pin mismatch".into());
-    }
+    let (producer, binary) = pins(&plan, &args.producer_source)?;
     // Resolve credentials before creating a partial acquisition, not from process environments.
     wire::credential(plan.auth_env.as_deref())?;
     wire::credential(plan.metrics.as_ref().and_then(|c| c.auth_env.as_deref()))?;
     let plan_hash = evidence::digest(&plan_bytes);
-    let previous_sha256 = if let Some(previous) = &args.previous {
-        let loaded = load(previous)?;
-        if loaded.capture.slot + 1 != args.slot
-            || loaded.capture.stage == Stage::Store
-            || loaded.capture.plan_sha256 != plan_hash
-        {
-            return Err("previous acquisition is not the preceding declared slot".into());
-        }
-        Some(loaded.digest)
-    } else {
-        if args.slot != 0 {
-            return Err("later slot requires --previous retained acquisition".into());
-        }
-        None
-    };
+    let previous_sha256 = predecessor(args.previous.as_deref(), args.slot, &plan_hash)?;
     let stored = if let Some(path) = store {
         let loaded = load(path)?;
         if stage != Stage::Reload
@@ -1275,18 +1446,17 @@ fn response_valid(plan: &Plan, record: &RequestRecord, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
-#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
-fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspection> {
+fn report(plan: &Plan, c: &Capture) -> Inspection {
     let mut report = Inspection {
         version: 1,
         claim: "finite-domain-observation-not-live-qualification",
         provenance: c.provenance,
         slot: plan.slots[c.slot].clone(),
         stage: c.stage,
-        launch_anchor: if plan.adapter.runtime() {
-            "bridge-entrypoint-not-os-launch"
-        } else {
-            "fixture-first-event-not-os-launch"
+        launch_anchor: match plan.adapter {
+            Adapter::EngineLogV1 => "engine-log-launch-line-not-os-launch",
+            adapter if adapter.runtime() => "bridge-entrypoint-not-os-launch",
+            _ => "fixture-first-event-not-os-launch",
         },
         outcome: Outcome::Pass,
         reasons: Vec::new(),
@@ -1295,10 +1465,40 @@ fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspecti
         cache_result: None,
         request_usage: c.requests.iter().map(|r| r.attempt.usage.clone()).collect(),
         metrics: None,
+        weight_loads: Vec::new(),
     };
     for reason in &c.failures {
         add_reason(&mut report, Outcome::Inconclusive, reason.clone());
     }
+    report
+}
+
+/// Malformed logs remain retained, nonqualifying ERROR acquisitions.
+fn analyze_log(plan: &Plan, c: &Capture, raw: &[u8], ranks: usize) -> Inspection {
+    let mut report = report(plan, c);
+    match parse_engine_log(raw, ranks) {
+        Ok(log) => {
+            report.durations.push(DurationSample {
+                target: Target::Ready,
+                clock: Clock {
+                    id: "engine-log-head-host".into(),
+                    kind: "monotonic".into(),
+                    units: "microseconds".into(),
+                    resolution_us: 1,
+                    synchronization: "single-host-origin".into(),
+                },
+                duration_us: log.ready_us,
+            });
+            report.weight_loads = log.weight_loads;
+        }
+        Err(e) => add_reason(&mut report, Outcome::Error, format!("malformed log: {e}")),
+    }
+    report
+}
+
+#[expect(clippy::too_many_lines, reason = "predates the function-length limit")]
+fn analyze(root: &Path, plan: &Plan, c: &Capture, raw: &[u8]) -> Result<Inspection> {
+    let mut report = report(plan, c);
     let events = match parse_events(raw, plan) {
         Ok(events) => events,
         Err(e) => {
@@ -2017,6 +2217,14 @@ fn load(root: &Path) -> Result<Loaded> {
             (Study::Startup, Stage::Startup)
                 | (Study::RestartCache { .. }, Stage::Store | Stage::Reload)
         )
+        // Log-derived facts never pass as native observation, nor native facts as logs.
+        || match c.provenance {
+            Provenance::LogDerived => {
+                plan.adapter != Adapter::EngineLogV1 || c.engine.is_some() || !c.requests.is_empty()
+            }
+            Provenance::NativeObserved => plan.adapter == Adapter::EngineLogV1,
+            Provenance::Imported | Provenance::Declared => false,
+        }
     {
         return Err("startup capture identity, stage or bounds mismatch".into());
     }
@@ -2028,7 +2236,10 @@ fn load(root: &Path) -> Result<Loaded> {
     if evidence::digest(&raw) != c.events_sha256 {
         return Err("event source digest mismatch".into());
     }
-    let mut inspection = analyze(root, &plan, &c, &raw)?;
+    let mut inspection = match plan.log_ranks {
+        Some(ranks) => analyze_log(&plan, &c, &raw, ranks),
+        None => analyze(root, &plan, &c, &raw)?,
+    };
     if let Some(hash) = &c.store_sha256 {
         // A store cannot itself reference another store: precheck before recursive load.
         let store_bytes = evidence::read(&root.join("store/capture.json"), CAP)?;
@@ -2152,7 +2363,11 @@ pub fn compare(plan_path: &Path, manifest: &Path) -> Result<Comparison> {
     let mut result = Comparison {
         version: 1,
         kind: "startup-comparison-v1",
-        scope: "native-unauthenticated-domain-comparison-not-live-qualification",
+        scope: if plan.adapter == Adapter::EngineLogV1 {
+            "log-derived-unauthenticated-domain-comparison-not-live-qualification"
+        } else {
+            "native-unauthenticated-domain-comparison-not-live-qualification"
+        },
         outcome: Outcome::Pass,
         reasons: Vec::new(),
         acquisitions: Vec::new(),
@@ -2161,6 +2376,7 @@ pub fn compare(plan_path: &Path, manifest: &Path) -> Result<Comparison> {
     let mut previous = None;
     let mut distinct = BTreeSet::new();
     let mut incarnations = BTreeSet::new();
+    let mut logs = BTreeSet::new();
     let mut exposure: Option<Vec<(Option<u64>, Option<u64>)>> = None;
     for (index, path) in paths.iter().enumerate() {
         let loaded = load(path)?;
@@ -2179,6 +2395,11 @@ pub fn compare(plan_path: &Path, manifest: &Path) -> Result<Comparison> {
                 "repeated engine incarnation is not an independent startup acquisition".into(),
             );
         }
+        if loaded.capture.provenance == Provenance::LogDerived
+            && !logs.insert(loaded.capture.events_sha256.clone())
+        {
+            return Err("repeated engine log is not an independent startup acquisition".into());
+        }
         let usage: Vec<_> = loaded
             .inspection
             .request_usage
@@ -2193,7 +2414,10 @@ pub fn compare(plan_path: &Path, manifest: &Path) -> Result<Comparison> {
         }
         exposure.get_or_insert(usage);
         previous = Some(loaded.digest.clone());
-        if loaded.capture.provenance != Provenance::NativeObserved {
+        if matches!(
+            loaded.capture.provenance,
+            Provenance::Imported | Provenance::Declared
+        ) {
             result.scope = "imported-comparison-only-not-real-adapter-exercised";
         }
         result.outcome = result.outcome.max(loaded.inspection.outcome);
@@ -2287,6 +2511,11 @@ pub fn execute(command: Command) -> Result<u8> {
             crate::print_json(&report)?;
             Ok(report.outcome.exit())
         }
+        Command::FromLog(args) => {
+            let report = from_log(&args)?;
+            crate::print_json(&report)?;
+            Ok(report.outcome.exit())
+        }
         Command::Store(args) => {
             let report = capture(&args, Stage::Store, None)?;
             crate::print_json(&report)?;
@@ -2327,5 +2556,184 @@ pub fn execute(command: Command) -> Result<u8> {
             crate::print_json(&report)?;
             Ok(report.outcome.exit())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two hosts with independent monotonic clocks; host-b's origin is far from host-a's.
+    fn two_rank_log(base: u64, ready_after: u64) -> String {
+        [
+            (base, "host-a 0 launch"),
+            (base + 1_000, "host-a 0 weights_start"),
+            (7_000_000, "host-b 1 weights_start"),
+            (base + 41_000, "host-a 0 weights_end"),
+            (7_052_000, "host-b 1 weights_end"),
+            (base + ready_after, "host-a 0 engine_ready"),
+        ]
+        .map(|(us, rest)| format!("{LOG_MARKER} {us} {rest}\n"))
+        .concat()
+    }
+
+    #[test]
+    fn two_rank_log_yields_per_rank_weight_loads_and_engine_ready() {
+        let log = parse_engine_log(two_rank_log(500, 100_000).as_bytes(), 2).unwrap();
+        assert_eq!(log.ready_us, 100_000);
+        let loads: Vec<_> = log
+            .weight_loads
+            .iter()
+            .map(|w| (w.rank, w.host.as_str(), w.duration_us))
+            .collect();
+        assert_eq!(loads, [(0, "host-a", 40_000), (1, "host-b", 52_000)]);
+    }
+
+    #[test]
+    fn unknown_missing_and_out_of_order_lines_are_rejected() {
+        let valid = two_rank_log(500, 100_000);
+        let lines: Vec<&str> = valid.lines().collect();
+        let join = |lines: &[&str]| lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+        let mut cases = vec![
+            valid.trim_end().to_owned(),
+            valid.replace("host-b 1", "host-b 2"),
+            valid.replace("host-b 1 weights_end", "host-a 1 weights_end"),
+            valid.replace("weights_end", "weights_done"),
+            format!("INFO model loaded\n{valid}"),
+            format!("{valid}{LOG_MARKER} 200000 host-a 0 engine_ready\n"),
+            valid.replace(" 7052000 ", " +7052000 "),
+            valid.replace(" 7052000 ", " 6000000 "),
+        ];
+        for skip in 0..lines.len() {
+            let mut missing = lines.clone();
+            missing.remove(skip);
+            cases.push(join(&missing));
+        }
+        for (a, b) in [(0, 1), (1, 3), (4, 5), (2, 4)] {
+            let mut swapped = lines.clone();
+            swapped.swap(a, b);
+            cases.push(join(&swapped));
+        }
+        for case in cases {
+            assert!(parse_engine_log(case.as_bytes(), 2).is_err(), "{case}");
+        }
+        // Cross-host interleaving is not ordering evidence; each host's own order is.
+        let mut interleaved = lines.clone();
+        interleaved.swap(1, 2);
+        assert!(parse_engine_log(join(&interleaved).as_bytes(), 2).is_ok());
+    }
+
+    fn study(root: &Path) -> PathBuf {
+        let launcher = b"#!/bin/sh\n# emits grill-startup-v1 lines\n";
+        evidence::write(&root.join("launcher.sh"), launcher).unwrap();
+        let mut slots = Vec::new();
+        for arm in ["a", "b", "a2"] {
+            slots.push(serde_json::json!({"id": format!("{arm}-w"), "arm": arm, "warmup": true, "index": 0}));
+            for i in 0..3 {
+                slots.push(serde_json::json!({"id": format!("{arm}-{i}"), "arm": arm, "warmup": false, "index": i}));
+            }
+        }
+        let plan = serde_json::json!({
+            "version": 1, "kind": "startup-study-v1", "study_id": "loader-settings",
+            "collector_sha256": evidence::binary_digest().unwrap(), "adapter": "engine_log_v1",
+            "adapter_sha256": evidence::digest(launcher), "log_ranks": 2,
+            "setup_axis": "weight-loader", "setup_sha256": ["1".repeat(64), "2".repeat(64), "1".repeat(64)],
+            "slots": slots, "study": {"kind": "startup"},
+            "states": [{"class": "weights", "declared": "unknown", "required_observed": "unknown"}],
+            "request": {"model": "m", "prompt": "p", "max_tokens": 8, "expected_answer": "21"},
+            "endpoint": "http://127.0.0.1:9/v1/chat/completions", "local_http": true, "auth_env": null,
+            "metrics": null, "max_events": 8, "event_bytes": 4096, "deadline_us": 3_000_000,
+            "limits": {"total_ms": 1000, "idle_ms": 1000, "response_bytes": 1024, "wave_buffer_bytes": 1024},
+            "gates": [{"target": {"kind": "ready"}, "max_regression_bps": 500, "max_reference_spread_bps": 0}]
+        });
+        let path = root.join("plan.json");
+        evidence::write(&path, &serde_json::to_vec(&plan).unwrap()).unwrap();
+        path
+    }
+
+    /// Log-derived acquisitions for loader A and B, ready in `candidate_us` on B.
+    fn compare_loader_settings(root: &Path, candidate_us: u64) -> Comparison {
+        let plan_path = study(root);
+        let plan: Plan = decode(&evidence::read(&plan_path, CAP).unwrap()).unwrap();
+        let mut previous = None;
+        let mut paths = Vec::new();
+        for (slot, declared) in plan.slots.iter().enumerate() {
+            let ready = if declared.arm == Arm::B {
+                candidate_us
+            } else {
+                100_000
+            };
+            let log = root.join(format!("engine-{slot}.log"));
+            evidence::write(
+                &log,
+                two_rank_log(slot as u64 * 1_000_000, ready).as_bytes(),
+            )
+            .unwrap();
+            let out = root.join(format!("capture-{slot}"));
+            let report = from_log(&LogArgs {
+                plan: plan_path.clone(),
+                slot,
+                log,
+                producer_source: root.join("launcher.sh"),
+                previous: previous.take(),
+                out: out.clone(),
+            })
+            .unwrap();
+            assert_eq!(report.provenance, Provenance::LogDerived);
+            assert_eq!(report.weight_loads.len(), 2);
+            previous = Some(out.clone());
+            paths.push(out);
+        }
+        let manifest = root.join("manifest.json");
+        evidence::write(&manifest, &serde_json::to_vec(&paths).unwrap()).unwrap();
+        compare(&plan_path, &manifest).unwrap()
+    }
+
+    fn fresh_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("grill-startup-{name}-{}", std::process::id()));
+        evidence::fresh(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn log_derived_loader_settings_compare_with_usual_verdicts() {
+        for (candidate, expected) in [(105_000, Outcome::Pass), (106_000, Outcome::Regression)] {
+            let root = fresh_root(&format!("compare-{candidate}"));
+            let result = compare_loader_settings(&root, candidate);
+            let raw = evidence::read(&root.join("capture-0/events.bin"), 4096).unwrap();
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(result.outcome, expected);
+            assert_eq!(result.gates[0].counts, [3, 3, 3]);
+            assert_eq!(raw, two_rank_log(0, 100_000).as_bytes());
+        }
+    }
+
+    #[test]
+    fn malformed_log_is_retained_as_error_and_repeated_logs_are_not_independent() {
+        let root = fresh_root("malformed");
+        let plan = study(&root);
+        let log = root.join("engine.log");
+        let bytes = format!("{LOG_MARKER} 1 host-a 0 launch\n");
+        evidence::write(&log, bytes.as_bytes()).unwrap();
+        let args = |slot, previous: Option<&str>, out: &str| LogArgs {
+            plan: plan.clone(),
+            slot,
+            log: log.clone(),
+            producer_source: root.join("launcher.sh"),
+            previous: previous.map(|p| root.join(p)),
+            out: root.join(out),
+        };
+        let report = from_log(&args(0, None, "first")).unwrap();
+        from_log(&args(1, Some("first"), "second")).unwrap();
+        let retained = evidence::read(&root.join("first/events.bin"), 4096).unwrap();
+        let manifest = root.join("manifest.json");
+        let paths = [root.join("first"), root.join("second")];
+        evidence::write(&manifest, &serde_json::to_vec(&paths).unwrap()).unwrap();
+        let repeated = compare(&plan, &manifest);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(report.outcome, Outcome::Error);
+        assert_eq!(retained, bytes.as_bytes());
+        assert!(repeated.is_err());
     }
 }
