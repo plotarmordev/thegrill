@@ -27,7 +27,13 @@ cargo clippy -p grill-perf --locked --all-targets -- -D warnings
 ```
 
 Native `/proc`/cgroup/NVML resource capture and external-program microbench
-capture remain Linux-only. macOS changes must not weaken those Linux contracts.
+capture remain Linux-only, as do the quality CLI's evidence storage, run
+ownership locks and interrupt latch; on macOS those paths fail closed and their
+tests are compiled for Linux only. The full workspace check list above also
+builds and passes on Apple Silicon macOS. Its media adapter fixture runs
+`python3` from `PATH`, which must be Python 3.12 (the macOS system 3.9 lacks
+`importlib.metadata.entry_points` selection). macOS changes must not weaken
+those Linux contracts.
 
 Integration tests run the CLI against synthetic inputs and loopback fixtures. Do not point tests at a model service. Use `cargo test --locked --test offline` or `cargo test --locked --test runner` for a focused run.
 
