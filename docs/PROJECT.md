@@ -29,6 +29,8 @@ The offline contracts and direct-answer runner below are implemented. Local chec
 - Task and grader validity require evidence beyond self-checks and passing software tests.
 - Performance claims require measurements under stated conditions; receipts alone do not establish model identity, server capacity, or independent replication.
 
+[The shared `sstore_tx` repair episode](REPAIR-EPISODE.md) replays offline, but it was not adopted as a task: it has no held-out set, and The Grill has no execution grader.
+
 ## Scope
 
 The quality binary, `grill`, provides serial direct-answer and fixture-tool collection, offline study manifests, deterministic synthetic examples, and paired family/unit reports. This guide describes those current capabilities, not a calibrated aggregate intelligence score. The separate serving-performance companion is documented in [its own guide](performance/README.md).
