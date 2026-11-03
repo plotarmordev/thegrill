@@ -10,6 +10,8 @@ capture ownership keep their existing meanings.
 ```text
 grill-perf startup observe PLAN --slot N --pid PID --events JOURNAL \
   --producer-source SOURCE --out NEW_DIRECTORY [--previous PREVIOUS_CAPTURE]
+grill-perf startup from-log PLAN --slot N --log ENGINE_LOG \
+  --producer-source LAUNCHER --out NEW_DIRECTORY [--previous PREVIOUS_CAPTURE]
 grill-perf startup store PLAN --slot N --pid PID --cache-pid CACHE_PID \
   --events JOURNAL --producer-source SOURCE --out STORE_DIRECTORY \
   [--previous PREVIOUS_CAPTURE]
@@ -22,7 +24,8 @@ grill-perf startup inspect CAPTURE_DIRECTORY
 grill-perf startup compare PLAN ORDERED_PATH_MANIFEST
 ```
 
-All output is JSON. `observe` only accepts a startup study; `store` and `reload`
+All output is JSON. `observe` only accepts a startup study; `from-log` only an
+`engine_log_v1` plan ([engine-launcher logs](#engine-launcher-logs)); `store` and `reload`
 only accept a restart-cache study. The path manifest is a JSON array of capture
 directory paths in the plan's A/B/A2 slot order. `--previous` binds the preceding
 whole acquisition's receipt, including failures; store and reload use the same
@@ -379,7 +382,8 @@ required fields are:
   SHA-256; every capture rechecks these pins.
 - `runtime_window_us` is required for every `runtime_*` adapter above, including
   `runtime_asgi_fixture_bootstrap_v1`; it is absent for existing non-runtime
-  adapters. These explicit adapter contracts extend the closed plan without
+  adapters. `log_ranks` (1–64) is required for `engine_log_v1` and absent
+  otherwise. These explicit adapter contracts extend the closed plan without
   reinterpreting old bytes.
 - `setup_axis` and `setup_sha256:[A,B,A2]`: prospectively declared setup
   fingerprints. A and A2 must match. These remain declarations, not observed
@@ -530,11 +534,58 @@ These uninstrumented recipe logs cannot establish complete request coverage,
 substage boundaries, hidden-warming absence, actual restart identity or a
 persisted first reload. `uninstrumented_recipe_logs` is an explicitly
 nonqualifying imported/declaration source category, not a parser or a native
-producer for those logs. No real DeepSeek/GLM startup adapter or backend has been
+producer for those logs; the separate `engine_log_v1` contract below parses only
+its own closed line grammar. No real DeepSeek/GLM startup adapter or backend has been
 exercised or qualified by this source delivery. Production source support for
 those unavailable facts requires separately reviewed instrumentation and an
 explicit disruptive observation window; do not translate the neutral fixture's
 result into model-KV persistence or communication speedup.
+
+## Engine-launcher logs
+
+An engine started by its own launcher (for example a multi-host recipe) has no
+Grill-attached process or journal. Instead the launcher writes a finished startup
+log, and `startup from-log` builds a capture from it. Grill never starts, waits
+for or reads anything but that file; `--log` is an ordinary file, not a command.
+
+The log is the engine's own `grill-startup-v1` lines and nothing else, one per
+line, UTF-8, each ending in `\n`, separated by single spaces:
+
+```text
+grill-startup-v1 <microseconds> <host> <rank> <event>
+```
+
+`<microseconds>` is that host's monotonic clock; `<rank>` is `0..log_ranks`;
+both are unsigned decimal. `<host>` is a short ASCII ID. Events are closed:
+
+| Event | Rule |
+|---|---|
+| `launch` | Rank 0, the first line; origin of `ready` |
+| `weights_start` | Once per rank, after `launch` |
+| `weights_end` | Once per rank, after its `weights_start`, strictly later |
+| `engine_ready` | Rank 0, the last line, after every rank's `weights_end`; the whole multi-host engine is ready |
+
+Hosts have independent clocks, so a rank keeps one host, each host's timestamps
+never regress, and every span subtracts only timestamps from one host. Lines of
+different hosts may interleave; file order across hosts is not ordering evidence.
+Any other line (including ordinary engine output), unknown event or rank, missing,
+duplicate or out-of-order event, or text after `engine_ready` rejects the whole log.
+Filter the engine's output to these lines before capture; never trim a rejected log.
+
+The capture retains the plan, the pinned launcher source as `producer.bin`, the
+raw log bytes as `events.bin`, and a `capture.json` with `provenance:"log_derived"`;
+it has no engine identity or requests. A rejected log is still retained, as an
+`ERROR` acquisition. Inspection reports `ready` (rank 0 launch to `engine_ready`,
+clock `engine-log-head-host`, `launch_anchor:"engine-log-launch-line-not-os-launch"`)
+and `weight_loads:[{rank,host,duration_us}]` for every rank.
+
+An `engine_log_v1` plan is a startup study whose gates are all `ready` and whose
+states all require `unknown`: logs observe no requests, cache state or
+communication. `compare` gives the [usual verdicts](#offline-decision-and-limitations),
+for example A/A2 on one loader setting and B on another, with scope
+`log-derived-unauthenticated-domain-comparison-not-live-qualification`. The same log
+bytes in two slots are not independent acquisitions and are rejected. Log lines are
+unauthenticated launcher output, not native observation; import keeps them imported.
 
 ## Pinned model-KV source observations
 
