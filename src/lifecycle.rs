@@ -3,15 +3,20 @@ use crate::contract::*;
 use crate::store::{self, AttemptState, Loaded};
 use crate::{identity, record};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const SESSION_CAP: usize = CASE_CAP + 1;
 const META_CAP: usize = 8192;
 
+#[cfg(target_os = "linux")]
 pub(crate) struct Lock(File);
+#[cfg(target_os = "linux")]
 impl Lock {
     pub fn run(root: &Path) -> Result<Self> {
         let file = OpenOptions::new()
@@ -50,12 +55,34 @@ impl Lock {
         Ok(Self(file))
     }
 }
+#[cfg(target_os = "linux")]
 impl Drop for Lock {
     fn drop(&mut self) {
         // SAFETY: the descriptor remains owned until after this call.
         unsafe {
             libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
+    }
+}
+
+/// Ownership and admission rely on Linux `flock` semantics; elsewhere every
+/// lifecycle operation fails closed instead of running without a lock.
+#[cfg(not(target_os = "linux"))]
+pub(crate) enum Lock {}
+#[cfg(not(target_os = "linux"))]
+impl Lock {
+    pub fn run(root: &Path) -> Result<Self> {
+        let _ = root;
+        Err("run ownership locking is supported on Linux only".into())
+    }
+    fn gate(root: &Path) -> Result<Self> {
+        Self::run(root)
+    }
+}
+#[cfg(not(target_os = "linux"))]
+impl Drop for Lock {
+    fn drop(&mut self) {
+        match *self {}
     }
 }
 
@@ -506,5 +533,19 @@ mod tests {
         attempts[0].followup.as_mut().unwrap().state =
             AttemptState::Terminal(Box::new(store::tests::terminal(b"body", b"call")));
         assert_eq!(prefix(&attempts).unwrap(), 1);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn pause_fails_closed_without_linux_locking() {
+        let root = std::env::temp_dir().join(format!("grill-lock-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("lifecycle")).unwrap();
+        std::fs::write(root.join("lifecycle/admission.lock"), b"").unwrap();
+        let result = pause(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            result.unwrap_err(),
+            "run ownership locking is supported on Linux only"
+        );
     }
 }

@@ -3,7 +3,7 @@ use crate::report::{Verified, VerifiedCase};
 use crate::{grade, identity, pack, transport};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn io_error(operation: &str, path: &Path, error: std::io::Error) -> String {
@@ -18,6 +18,7 @@ pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     }
     #[cfg(target_os = "linux")]
     {
+        use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
         let metadata = fs::symlink_metadata(path).map_err(|e| io_error("inspect", path, e))?;
         if !metadata.file_type().is_file() {
@@ -1272,6 +1273,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn tool_fixture(call: &str) -> (Pack, Vec<String>, Plan) {
         let pack_bytes = serde_json::to_vec(&serde_json::json!({
             "version":5, "label":"synthetic", "worlds":["w"], "groups":["g"],
@@ -1319,6 +1321,8 @@ pub(crate) mod tests {
         (pack, inputs, plan)
     }
 
+    // Replays evidence through store::read, which is Linux-only like tests/offline.rs.
+    #[cfg(target_os = "linux")]
     #[test]
     fn followup_rejects_call_artifact_without_raw_body_replay() {
         let call =
