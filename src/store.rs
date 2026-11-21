@@ -11,12 +11,12 @@ fn io_error(operation: &str, path: &Path, error: std::io::Error) -> String {
 }
 
 pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = (path, cap);
-        Err("evidence file handling is supported on Linux only".into())
+        Err("evidence file handling requires a UNIX platform".into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
@@ -27,7 +27,7 @@ pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
                 path.display()
             ));
         }
-        // Linux O_NOFOLLOW | O_NONBLOCK: reject symlinks, do not hang if a FIFO
+        // POSIX O_NOFOLLOW | O_NONBLOCK: reject symlinks, do not hang if a FIFO
         // is substituted between metadata and open. Parent races are not a sandbox.
         let file = OpenOptions::new()
             .read(true)
@@ -50,6 +50,23 @@ pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
     }
 }
 
+/// Flush one open file or directory to stable storage. On macOS `fsync` only
+/// reaches the buffer cache, so `F_FULLFSYNC` is required for the durability
+/// every evidence write promises.
+pub(crate) fn sync_to_disk(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: the descriptor remains owned until after this call.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    file.sync_all()
+}
+
 fn directory(path: &Path) -> Result<()> {
     let metadata =
         fs::symlink_metadata(path).map_err(|e| io_error("inspect directory", path, e))?;
@@ -65,7 +82,7 @@ fn exists(path: &Path) -> bool {
 
 pub(crate) fn sync_directory(path: &Path) -> Result<()> {
     File::open(path)
-        .and_then(|f| f.sync_all())
+        .and_then(|f| sync_to_disk(&f))
         .map_err(|e| io_error("sync directory", path, e))
 }
 
@@ -114,7 +131,7 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = open_new(path)?;
     file.write_all(bytes)
         .and_then(|_| file.flush())
-        .and_then(|_| file.sync_all())
+        .and_then(|_| sync_to_disk(&file))
         .map_err(|e| io_error("write/sync", path, e))
 }
 
@@ -1273,7 +1290,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn tool_fixture(call: &str) -> (Pack, Vec<String>, Plan) {
         let pack_bytes = serde_json::to_vec(&serde_json::json!({
             "version":5, "label":"synthetic", "worlds":["w"], "groups":["g"],
@@ -1311,7 +1328,7 @@ pub(crate) mod tests {
             provenance: Provenance {
                 grill: "fixture".into(),
                 lockfile: String::new(),
-                os: "linux".into(),
+                os: std::env::consts::OS.into(),
                 arch: "fixture".into(),
                 started_unix_ms: 0,
                 pid: 0,
@@ -1321,8 +1338,8 @@ pub(crate) mod tests {
         (pack, inputs, plan)
     }
 
-    // Replays evidence through store::read, which is Linux-only like tests/offline.rs.
-    #[cfg(target_os = "linux")]
+    // Replays evidence through store::read, which is UNIX-only like tests/offline.rs.
+    #[cfg(unix)]
     #[test]
     fn followup_rejects_call_artifact_without_raw_body_replay() {
         let call =
@@ -1402,5 +1419,32 @@ pub(crate) mod tests {
                 assert!(replay.is_none());
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_sync_flushes_open_files_and_directories() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = loop {
+            let path = std::env::temp_dir().join(format!(
+                "grill-sync-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => break path,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("fixture directory: {error}"),
+            }
+        };
+        let mut file = open_new(&dir.join("synced")).unwrap();
+        file.write_all(b"synced").unwrap();
+        // The platform flush (F_FULLFSYNC on macOS, fsync elsewhere) must accept
+        // both the open file and its directory.
+        sync_to_disk(&file).unwrap();
+        sync_directory(&dir).unwrap();
+        drop(file);
+        assert_eq!(fs::read(dir.join("synced")).unwrap(), b"synced");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
