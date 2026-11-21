@@ -24,7 +24,7 @@ fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::SeqCst)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn latch_interrupt() -> Result<()> {
     extern "C" fn on_interrupt(_: libc::c_int) {
         INTERRUPTED.store(true, Ordering::SeqCst);
@@ -43,9 +43,9 @@ fn latch_interrupt() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn latch_interrupt() -> Result<()> {
-    Err("the runner's interrupt latch is supported on Linux only".into())
+    Err("the runner's interrupt latch requires a UNIX platform".into())
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]

@@ -11,12 +11,12 @@ fn io_error(operation: &str, path: &Path, error: std::io::Error) -> String {
 }
 
 pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = (path, cap);
-        Err("evidence file handling is supported on Linux only".into())
+        Err("evidence file handling requires a UNIX platform".into())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::io::Read;
         use std::os::unix::fs::OpenOptionsExt;
@@ -27,7 +27,7 @@ pub(crate) fn read(path: &Path, cap: usize) -> Result<Vec<u8>> {
                 path.display()
             ));
         }
-        // Linux O_NOFOLLOW | O_NONBLOCK: reject symlinks, do not hang if a FIFO
+        // POSIX O_NOFOLLOW | O_NONBLOCK: reject symlinks, do not hang if a FIFO
         // is substituted between metadata and open. Parent races are not a sandbox.
         let file = OpenOptions::new()
             .read(true)
@@ -1273,7 +1273,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn tool_fixture(call: &str) -> (Pack, Vec<String>, Plan) {
         let pack_bytes = serde_json::to_vec(&serde_json::json!({
             "version":5, "label":"synthetic", "worlds":["w"], "groups":["g"],
@@ -1311,7 +1311,7 @@ pub(crate) mod tests {
             provenance: Provenance {
                 grill: "fixture".into(),
                 lockfile: String::new(),
-                os: "linux".into(),
+                os: std::env::consts::OS.into(),
                 arch: "fixture".into(),
                 started_unix_ms: 0,
                 pid: 0,
@@ -1321,8 +1321,8 @@ pub(crate) mod tests {
         (pack, inputs, plan)
     }
 
-    // Replays evidence through store::read, which is Linux-only like tests/offline.rs.
-    #[cfg(target_os = "linux")]
+    // Replays evidence through store::read, which is UNIX-only like tests/offline.rs.
+    #[cfg(unix)]
     #[test]
     fn followup_rejects_call_artifact_without_raw_body_replay() {
         let call =

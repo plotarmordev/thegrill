@@ -1,22 +1,22 @@
-//! Cooperative admission control and immutable continuation sessions (Linux local filesystems).
+//! Cooperative admission control and immutable continuation sessions (Linux and macOS local filesystems).
 use crate::contract::*;
 use crate::store::{self, AttemptState, Loaded};
 use crate::{identity, record};
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const SESSION_CAP: usize = CASE_CAP + 1;
 const META_CAP: usize = 8192;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) struct Lock(File);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Lock {
     pub fn run(root: &Path) -> Result<Self> {
         let file = OpenOptions::new()
@@ -55,7 +55,7 @@ impl Lock {
         Ok(Self(file))
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 impl Drop for Lock {
     fn drop(&mut self) {
         // SAFETY: the descriptor remains owned until after this call.
@@ -65,21 +65,21 @@ impl Drop for Lock {
     }
 }
 
-/// Ownership and admission rely on Linux `flock` semantics; elsewhere every
+/// Ownership and admission rely on BSD `flock` semantics; elsewhere every
 /// lifecycle operation fails closed instead of running without a lock.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 pub(crate) enum Lock {}
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 impl Lock {
     pub fn run(root: &Path) -> Result<Self> {
         let _ = root;
-        Err("run ownership locking is supported on Linux only".into())
+        Err("run ownership locking requires a UNIX platform".into())
     }
     fn gate(root: &Path) -> Result<Self> {
         Self::run(root)
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 impl Drop for Lock {
     fn drop(&mut self) {
         match *self {}
@@ -535,17 +535,15 @@ mod tests {
         assert_eq!(prefix(&attempts).unwrap(), 1);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(unix)]
     #[test]
-    fn pause_fails_closed_without_linux_locking() {
+    fn run_ownership_lock_is_exclusive_while_held() {
         let root = std::env::temp_dir().join(format!("grill-lock-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("lifecycle")).unwrap();
-        std::fs::write(root.join("lifecycle/admission.lock"), b"").unwrap();
-        let result = pause(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let owner = Lock::run(&root).unwrap();
+        assert!(Lock::run(&root).is_err());
+        drop(owner);
+        assert!(Lock::run(&root).is_ok());
         std::fs::remove_dir_all(&root).unwrap();
-        assert_eq!(
-            result.unwrap_err(),
-            "run ownership locking is supported on Linux only"
-        );
     }
 }

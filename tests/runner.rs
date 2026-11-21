@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 // Regressions against an independent counted loopback HTTP fixture. Every
 // scenario proves dispatch counts and persisted evidence through the real CLI;
 // nothing here contacts a model service.

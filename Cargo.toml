@@ -35,6 +35,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Current-thread runtime, deadlines, Unix signal latch and select!.
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "signal", "macros"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-# Architecture-correct O_NOFOLLOW/O_NONBLOCK constants for evidence opens.
+[target.'cfg(unix)'.dependencies]
+# Platform constants for evidence opens (O_NOFOLLOW/O_NONBLOCK) and flock
+# ownership.
 libc = { version = "0.2", default-features = false }
