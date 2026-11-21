@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -295,6 +295,18 @@ fn forged_or_missing_evidence_and_unsafe_inputs_are_rejected() {
             .status
             .success()
     );
+    success(
+        &Command::new("mkfifo")
+            .arg(s.path("pack-fifo"))
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        !grade(&s.path("pack-fifo"), &a, &s.path("fifo-view"))
+            .status
+            .success()
+    );
+    assert!(!s.path("fifo-view").exists());
 }
 
 #[test]
