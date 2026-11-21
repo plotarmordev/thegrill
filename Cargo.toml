@@ -36,6 +36,6 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "signal", "macros"] }
 
 [target.'cfg(unix)'.dependencies]
-# Platform constants for evidence opens (O_NOFOLLOW/O_NONBLOCK), flock
-# ownership, and macOS F_FULLFSYNC flushes.
+# Platform constants for evidence opens (O_NOFOLLOW/O_NONBLOCK) and flock
+# ownership.
 libc = { version = "0.2", default-features = false }

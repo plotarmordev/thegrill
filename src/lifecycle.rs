@@ -65,7 +65,7 @@ impl Drop for Lock {
     }
 }
 
-/// Ownership and admission rely on POSIX `flock` semantics; elsewhere every
+/// Ownership and admission rely on BSD `flock` semantics; elsewhere every
 /// lifecycle operation fails closed instead of running without a lock.
 #[cfg(not(unix))]
 pub(crate) enum Lock {}

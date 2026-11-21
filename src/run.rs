@@ -430,7 +430,7 @@ impl Capture {
             .into_inner()
             .map_err(|e| format!("flush body evidence: {}", e.error()))?;
         file.flush()
-            .and_then(|_| store::sync_to_disk(&file))
+            .and_then(|_| file.sync_all())
             .map_err(|e| format!("sync body evidence: {e}"))?;
         Ok((self.bytes, self.hash.finish(), self.truncated))
     }

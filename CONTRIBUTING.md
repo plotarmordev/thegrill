@@ -28,8 +28,9 @@ cargo clippy -p grill-perf --locked --all-targets -- -D warnings
 
 Native `/proc`/cgroup/NVML resource capture and external-program microbench
 capture remain Linux-only. The quality CLI's evidence storage, run ownership
-locks and interrupt latch run on Linux and macOS: storage flushes use
-`F_FULLFSYNC` on macOS, and the offline and runner test suites are compiled
+locks and interrupt latch run on Linux and macOS: on Apple platforms the
+evidence flushes come from std `sync_all`, which issues `F_FULLFSYNC`, and
+the offline and runner test suites are compiled
 for all UNIX targets. The full workspace check list above also builds and
 passes on Apple Silicon macOS. Its media adapter fixture runs `python3` from
 `PATH`, which must be Python 3.12 (the macOS system 3.9 lacks
